@@ -1,4 +1,4 @@
-import "./styles.css";
+import "./hud.css";
 import type {
   NetworkIndex,
   NetworkIndexEntry,
@@ -29,98 +29,74 @@ async function renderRoute(): Promise<void> {
 async function renderRegistry(): Promise<void> {
   document.title = "dialtone.earth — network registry";
   app.innerHTML = `
-    <main class="registry-shell">
-      <header class="site-header">
-        <a class="wordmark" href="/" aria-label="dialtone.earth home">
-          <span class="wordmark-mark" aria-hidden="true"></span>
-          dialtone<span>.earth</span>
-        </a>
-        <p class="eyebrow">network registry / live snapshots</p>
-      </header>
-      <section class="registry-intro">
-        <p class="kicker">dialtone networks</p>
-        <h1>Find the signal.</h1>
-        <p>
-          A public registry of dialtone networks and the machines carrying
-          them around the world.
-        </p>
-      </section>
-      <section class="network-list" aria-labelledby="networks-title">
-        <div class="section-heading">
-          <h2 id="networks-title">Networks</h2>
-          <span>01 registered</span>
+    <main class="hud-shell registry-page">
+      <div class="scene-shade" aria-hidden="true"></div>
+      <section class="terminal-overlay registry-terminal" aria-labelledby="registry-title">
+        <a class="hud-brand" href="/">dialtone // earth</a>
+        <div class="hud-title-row">
+          <h1 id="registry-title">DIALTONE NETWORK REGISTRY</h1>
+          <span id="registry-count">00 NETWORKS</span>
         </div>
-        <div class="loading-card" role="status">loading registry…</div>
+        <p class="hud-caption">PUBLIC MESH SNAPSHOTS // SELECT NETWORK</p>
+        <div class="registry-table" role="table" aria-label="Dialtone networks">
+          <div class="registry-row registry-row-header" role="row">
+            <span role="columnheader">NETWORK</span>
+            <span role="columnheader">STATUS</span>
+            <span role="columnheader">NODES</span>
+            <span role="columnheader">ONLINE</span>
+            <span role="columnheader">RELEASE</span>
+            <span role="columnheader">UPDATED</span>
+          </div>
+          <div class="loading-row" role="status">LOADING REGISTRY...</div>
+        </div>
       </section>
-      <footer class="site-footer">
-        <span>dialtone.earth</span>
-        <span>registry / 2026</span>
-      </footer>
+      <section class="tour-cc-bar" aria-label="Registry help">
+        <p class="cc-channel"><span class="dim">CH:</span> REGISTRY <span class="focus">READY</span></p>
+        <p class="cc-body">Choose a network row to open its H3 globe and node telemetry.</p>
+      </section>
     </main>
   `;
 
-  const list = app.querySelector<HTMLElement>(".network-list");
+  const list = app.querySelector<HTMLElement>(".registry-table");
   if (!list) return;
 
   try {
     const index = await fetchJson<NetworkIndex>("/networks/index.json");
-    const headingCount = list.querySelector(".section-heading span");
+    const headingCount = app.querySelector("#registry-count");
     if (headingCount) {
-      headingCount.textContent = `${String(index.networks.length).padStart(2, "0")} registered`;
+      headingCount.textContent = `${String(index.networks.length).padStart(2, "0")} NETWORKS`;
     }
-    const loading = list.querySelector(".loading-card");
+    const loading = list.querySelector(".loading-row");
     loading?.remove();
     index.networks.forEach((network) => {
-      list.append(createNetworkCard(network));
+      list.append(createNetworkRow(network));
     });
   } catch (error) {
     showLoadError(list, error);
   }
 }
 
-function createNetworkCard(network: NetworkIndexEntry): HTMLAnchorElement {
-  const card = document.createElement("a");
-  card.className = "network-card";
-  card.href = `/n/${network.slug}`;
-  card.innerHTML = `
-    <div class="network-card-main">
-      <div class="network-status">
-        <span class="status-dot" aria-hidden="true"></span>
-        <span>${network.online_count > 0 ? "operational" : "offline"}</span>
-      </div>
-      <h3>${escapeHtml(network.name)}</h3>
-      <p>public mesh network</p>
-    </div>
-    <dl class="network-metrics">
-      <div>
-        <dt>nodes</dt>
-        <dd>${network.node_count}</dd>
-      </div>
-      <div>
-        <dt>online</dt>
-        <dd>${network.online_count}<span>/${network.node_count}</span></dd>
-      </div>
-      <div>
-        <dt>release</dt>
-        <dd>${escapeHtml(network.latest_release)}</dd>
-      </div>
-      <div>
-        <dt>updated</dt>
-        <dd class="metric-time">
-          <time datetime="${network.generated_at}" title="${formatDate(network.generated_at)}">
-            ${formatRelativeTime(network.generated_at)}
-          </time>
-        </dd>
-      </div>
-    </dl>
-    <span class="network-arrow" aria-hidden="true">↗</span>
+function createNetworkRow(network: NetworkIndexEntry): HTMLAnchorElement {
+  const row = document.createElement("a");
+  row.className = "registry-row registry-network-row";
+  row.href = `/n/${network.slug}`;
+  row.setAttribute("role", "row");
+  row.innerHTML = `
+    <span class="registry-name" role="cell"><i aria-hidden="true"></i>${escapeHtml(network.name)}</span>
+    <span role="cell">${network.online_count > 0 ? "ACTIVE" : "OFFLINE"}</span>
+    <span role="cell">${network.node_count}</span>
+    <span role="cell">${network.online_count}/${network.node_count}</span>
+    <span role="cell">${escapeHtml(network.latest_release)}</span>
+    <time role="cell" datetime="${network.generated_at}" title="${formatDate(network.generated_at)}">
+      ${formatRelativeTime(network.generated_at)}
+    </time>
   `;
-  return card;
+  return row;
 }
 
 async function renderNetwork(slug: string): Promise<void> {
   app.innerHTML = `
-    <main class="network-shell">
+    <main class="hud-shell network-shell">
       <div class="globe-stage" aria-hidden="true"></div>
       <div class="network-loading" role="status">
         <span></span>
@@ -143,52 +119,40 @@ async function renderNetwork(slug: string): Promise<void> {
     shell.insertAdjacentHTML(
       "beforeend",
       `
-        <header class="network-header">
-          <a class="wordmark compact" href="/">
-            <span class="wordmark-mark" aria-hidden="true"></span>
-            dialtone<span>.earth</span>
-          </a>
-          <a class="back-link" href="/">← all networks</a>
-        </header>
-        <aside class="stats-panel" aria-label="${escapeHtml(snapshot.network)} network status">
-          <div class="panel-heading">
-            <div>
-              <p class="kicker">network / live snapshot</p>
-              <h1>${escapeHtml(snapshot.network)}</h1>
-            </div>
-            <span class="live-chip"><i></i> live</span>
+        <div class="scene-shade" aria-hidden="true"></div>
+        <section class="terminal-overlay network-terminal" aria-label="${escapeHtml(snapshot.network)} network status">
+          <a class="hud-brand" href="/">dialtone // earth</a>
+          <div class="hud-title-row">
+            <h1>NETWORK // ${escapeHtml(snapshot.network).toUpperCase()}</h1>
+            <span>LIVE SNAPSHOT</span>
           </div>
-          <dl class="summary-grid">
-            <div>
-              <dt>nodes</dt>
-              <dd>${snapshot.node_count}</dd>
-            </div>
-            <div>
-              <dt>online</dt>
-              <dd>${onlineCount}<span>/${snapshot.node_count}</span></dd>
-            </div>
-            <div>
-              <dt>release</dt>
-              <dd>${escapeHtml(snapshot.latest_release)}</dd>
-            </div>
-          </dl>
-          <div class="nodes-heading">
-            <h2>Nodes</h2>
-            <span>${onlineCount} reporting</span>
+          <div class="network-summary" role="group" aria-label="Network summary">
+            <span><b>NDS</b> ${snapshot.node_count}</span>
+            <span><b>ONL</b> ${onlineCount}/${snapshot.node_count}</span>
+            <span><b>REL</b> ${escapeHtml(snapshot.latest_release)}</span>
           </div>
-          <div class="node-list">
+          <div class="node-table" role="table" aria-label="Metal nodes">
+            <div class="node-row node-row-header" role="row">
+              <span role="columnheader">NODE</span>
+              <span role="columnheader">OS</span>
+              <span role="columnheader">VERSION</span>
+              <span role="columnheader">RELAY</span>
+              <span role="columnheader">RTT</span>
+            </div>
             ${snapshot.nodes.map(renderNode).join("")}
           </div>
-          <div class="snapshot-time">
-            <span>snapshot</span>
-            <time datetime="${snapshot.generated_at}">
-              ${formatDate(snapshot.generated_at)}
-            </time>
+        </section>
+        <section class="tour-cc-bar network-cc" aria-label="Globe controls and snapshot">
+          <p class="cc-channel">
+            <span class="dim">CH:</span> ${escapeHtml(snapshot.network).toUpperCase()}
+            <span class="focus">ACTIVE ${onlineCount}/${snapshot.node_count}</span>
+          </p>
+          <div class="cc-footer-line">
+            <a href="/">[ ESC ] REGISTRY</a>
+            <span>DRAG TO ORBIT // SCROLL TO ZOOM</span>
+            <time datetime="${snapshot.generated_at}">SNAPSHOT ${formatDate(snapshot.generated_at).toUpperCase()}</time>
           </div>
-        </aside>
-        <div class="globe-hint" aria-hidden="true">
-          <span></span> drag to orbit · scroll to zoom
-        </div>
+        </section>
       `,
     );
     const { mountGlobe } = await import("./globe");
@@ -205,53 +169,38 @@ function renderNode(node: NetworkNode): string {
       ? "origin"
       : `${node.rtt_ms_from_grok_bot_metal.toFixed(1)} ms`;
   return `
-    <article class="node-row">
-      <div class="node-identity">
-        <span class="node-dot ${node.online ? "online" : "offline"}"></span>
-        <div>
-          <h3>${escapeHtml(node.name)}</h3>
-          <p>${escapeHtml(node.os)}</p>
-        </div>
-      </div>
-      <dl>
-        <div>
-          <dt>version</dt>
-          <dd>v${escapeHtml(node.version)}</dd>
-        </div>
-        <div>
-          <dt>relay</dt>
-          <dd>${escapeHtml(node.relay_region)}</dd>
-        </div>
-        <div>
-          <dt>rtt</dt>
-          <dd>${rtt}</dd>
-        </div>
-      </dl>
-    </article>
+    <div class="node-row" role="row">
+      <span class="node-name" role="cell">
+        <i class="${node.online ? "online" : "offline"}" aria-hidden="true"></i>
+        ${escapeHtml(node.name)}
+      </span>
+      <span class="dim" role="cell">${escapeHtml(node.os)}</span>
+      <span role="cell">v${escapeHtml(node.version)}</span>
+      <span class="dim" role="cell">${escapeHtml(node.relay_region)}</span>
+      <span role="cell">${rtt}</span>
+    </div>
   `;
 }
 
 function renderNotFound(): void {
   document.title = "not found — dialtone.earth";
   app.innerHTML = `
-    <main class="error-page">
-      <a class="wordmark" href="/">
-        <span class="wordmark-mark" aria-hidden="true"></span>
-        dialtone<span>.earth</span>
-      </a>
-      <p class="kicker">404 / signal lost</p>
-      <h1>Network not found.</h1>
-      <a class="text-link" href="/">return to registry →</a>
+    <main class="hud-shell error-page">
+      <section class="terminal-overlay">
+        <a class="hud-brand" href="/">dialtone // earth</a>
+        <h1>404 // NETWORK NOT FOUND</h1>
+        <a class="text-link" href="/">[ ESC ] RETURN TO REGISTRY</a>
+      </section>
     </main>
   `;
 }
 
 function showLoadError(container: HTMLElement, error: unknown): void {
   const message = error instanceof Error ? error.message : "unknown error";
-  container.querySelector(".loading-card")?.remove();
+  container.querySelector(".loading-row")?.remove();
   container.insertAdjacentHTML(
     "beforeend",
-    `<div class="error-card">registry unavailable · ${escapeHtml(message)}</div>`,
+    `<div class="error-row">REGISTRY UNAVAILABLE // ${escapeHtml(message)}</div>`,
   );
 }
 
@@ -262,12 +211,12 @@ function showNetworkError(
 ): void {
   const message = error instanceof Error ? error.message : "unknown error";
   container.innerHTML = `
-    <div class="network-error">
-      <p class="kicker">network / ${escapeHtml(slug)}</p>
-      <h1>Snapshot unavailable.</h1>
-      <p>${escapeHtml(message)}</p>
-      <a class="text-link" href="/">return to registry →</a>
-    </div>
+    <section class="terminal-overlay network-error">
+      <p>NETWORK // ${escapeHtml(slug).toUpperCase()}</p>
+      <h1>SNAPSHOT UNAVAILABLE</h1>
+      <p class="dim">${escapeHtml(message)}</p>
+      <a class="text-link" href="/">[ ESC ] RETURN TO REGISTRY</a>
+    </section>
   `;
 }
 

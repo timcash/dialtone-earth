@@ -9,34 +9,43 @@ const DEG_TO_RAD = Math.PI / 180;
  * animated layers and editor controls used by the main site.
  */
 export class HexLayer {
-  readonly mesh: THREE.Mesh;
+  readonly group = new THREE.Group();
+  private readonly surface: THREE.Mesh;
+  private readonly outlines: THREE.LineSegments;
 
-  constructor(
-    cells: string[],
-    radius: number,
-    palette: readonly THREE.Color[],
-  ) {
+  constructor(cells: string[], radius: number) {
     const positions: number[] = [];
-    const colors: number[] = [];
+    const outlinePositions: number[] = [];
+    const surfaceRadius = radius * 1.002;
+    const outlineRadius = radius * 1.003;
 
-    cells.forEach((cell, index) => {
+    cells.forEach((cell) => {
       const boundary = cellToBoundary(cell, true);
-      const tint = palette[index % palette.length];
+      const surfaceRing: THREE.Vector3[] = [];
+      const outlineRing: THREE.Vector3[] = [];
       const center = boundary
         .reduce(
-          (point, [lng, lat]) =>
-            point.add(this.latLngToVector(lat, lng, radius)),
+          (point, [lng, lat]) => {
+            const surfacePoint = this.latLngToVector(
+              lat,
+              lng,
+              surfaceRadius,
+            );
+            surfaceRing.push(surfacePoint);
+            outlineRing.push(
+              this.latLngToVector(lat, lng, outlineRadius),
+            );
+            return point.add(surfacePoint);
+          },
           new THREE.Vector3(),
         )
         .divideScalar(boundary.length)
         .normalize()
-        .multiplyScalar(radius);
+        .multiplyScalar(surfaceRadius);
 
       for (let side = 0; side < boundary.length; side += 1) {
-        const [lngA, latA] = boundary[side];
-        const [lngB, latB] = boundary[(side + 1) % boundary.length];
-        const a = this.latLngToVector(latA, lngA, radius);
-        const b = this.latLngToVector(latB, lngB, radius);
+        const a = surfaceRing[side];
+        const b = surfaceRing[(side + 1) % surfaceRing.length];
         positions.push(
           center.x,
           center.y,
@@ -48,37 +57,62 @@ export class HexLayer {
           b.y,
           b.z,
         );
-        for (let vertex = 0; vertex < 3; vertex += 1) {
-          colors.push(tint.r, tint.g, tint.b);
-        }
+        const outlineA = outlineRing[side];
+        const outlineB = outlineRing[(side + 1) % outlineRing.length];
+        outlinePositions.push(
+          outlineA.x,
+          outlineA.y,
+          outlineA.z,
+          outlineB.x,
+          outlineB.y,
+          outlineB.z,
+        );
       }
     });
 
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute(
+    const surfaceGeometry = new THREE.BufferGeometry();
+    surfaceGeometry.setAttribute(
       "position",
       new THREE.Float32BufferAttribute(positions, 3),
     );
-    geometry.setAttribute(
-      "color",
-      new THREE.Float32BufferAttribute(colors, 3),
+    surfaceGeometry.computeVertexNormals();
+    const outlineGeometry = new THREE.BufferGeometry();
+    outlineGeometry.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(outlinePositions, 3),
     );
 
-    const material = new THREE.MeshBasicMaterial({
-      transparent: true,
-      opacity: 0.72,
-      vertexColors: true,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    });
-
-    this.mesh = new THREE.Mesh(geometry, material);
-    this.mesh.renderOrder = 1;
+    this.surface = new THREE.Mesh(
+      surfaceGeometry,
+      new THREE.MeshBasicMaterial({
+        color: 0xececec,
+        transparent: true,
+        opacity: 0.08,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: 1,
+        polygonOffsetUnits: 1,
+      }),
+    );
+    this.outlines = new THREE.LineSegments(
+      outlineGeometry,
+      new THREE.LineBasicMaterial({
+        color: 0x9c9c9c,
+        transparent: true,
+        opacity: 0.46,
+      }),
+    );
+    this.surface.renderOrder = 1;
+    this.outlines.renderOrder = 2;
+    this.group.add(this.surface, this.outlines);
   }
 
   dispose(): void {
-    this.mesh.geometry.dispose();
-    (this.mesh.material as THREE.Material).dispose();
+    this.surface.geometry.dispose();
+    (this.surface.material as THREE.Material).dispose();
+    this.outlines.geometry.dispose();
+    (this.outlines.material as THREE.Material).dispose();
   }
 
   private latLngToVector(
@@ -87,11 +121,11 @@ export class HexLayer {
     radius: number,
   ): THREE.Vector3 {
     const latRad = lat * DEG_TO_RAD;
-    const lngRad = lng * DEG_TO_RAD;
+    const lngRad = -lng * DEG_TO_RAD;
     return new THREE.Vector3(
-      radius * Math.cos(latRad) * Math.sin(lngRad),
-      radius * Math.sin(latRad),
-      radius * Math.cos(latRad) * Math.cos(lngRad),
-    );
+      Math.cos(latRad) * Math.cos(lngRad),
+      Math.sin(latRad),
+      Math.cos(latRad) * Math.sin(lngRad),
+    ).multiplyScalar(radius);
   }
 }

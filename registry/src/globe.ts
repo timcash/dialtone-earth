@@ -1,4 +1,4 @@
-import { latLngToCell } from "h3-js";
+import { cellToBoundary, latLngToCell } from "h3-js";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { HexLayer } from "./hex-layer";
@@ -43,7 +43,7 @@ async function loadLandCells(): Promise<string[]> {
 
 class RegistryGlobe {
   private readonly scene = new THREE.Scene();
-  private readonly camera = new THREE.PerspectiveCamera(46, 1, 0.1, 2000);
+  private readonly camera = new THREE.PerspectiveCamera(34, 1, 0.1, 2000);
   private readonly renderer = new THREE.WebGLRenderer({
     antialias: true,
     alpha: true,
@@ -61,8 +61,7 @@ class RegistryGlobe {
     nodes: NetworkNode[],
     landCells: string[],
   ) {
-    this.scene.fog = new THREE.FogExp2(0x020407, 0.0019);
-    this.renderer.setClearColor(0x020407, 1);
+    this.renderer.setClearColor(0x000000, 0);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.domElement.setAttribute(
@@ -71,28 +70,24 @@ class RegistryGlobe {
     );
     container.appendChild(this.renderer.domElement);
 
-    this.camera.position.set(0, 8, 146);
+    this.camera.position.set(0, 0, 185);
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.055;
     this.controls.enablePan = false;
-    this.controls.minDistance = 82;
-    this.controls.maxDistance = 205;
+    this.controls.minDistance = 120;
+    this.controls.maxDistance = 250;
     this.controls.rotateSpeed = 0.45;
     this.controls.zoomSpeed = 0.7;
 
     this.scene.add(this.globe);
-    this.addStars();
+    // Center the initial view on the Atlantic so the US and EU nodes are
+    // visible together. The globe stays put until the user orbits it.
+    this.globe.rotation.y = -Math.PI / 4;
     this.addEarth();
-    this.hexLayer = new HexLayer(landCells, EARTH_RADIUS + 0.38, [
-      new THREE.Color(0x164a55),
-      new THREE.Color(0x1d6570),
-      new THREE.Color(0x287580),
-      new THREE.Color(0x123c47),
-    ]);
-    this.globe.add(this.hexLayer.mesh);
+    this.hexLayer = new HexLayer(landCells, EARTH_RADIUS);
+    this.globe.add(this.hexLayer.group);
     nodes.forEach((node) => this.addMarker(node));
-    this.addLights();
     this.positionGlobe();
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -128,28 +123,28 @@ class RegistryGlobe {
 
   private addEarth(): void {
     const earth = new THREE.Mesh(
-      new THREE.SphereGeometry(EARTH_RADIUS, 72, 72),
-      new THREE.MeshStandardMaterial({
-        color: 0x061423,
-        emissive: 0x020810,
-        roughness: 0.82,
-        metalness: 0.12,
+      new THREE.SphereGeometry(EARTH_RADIUS, 48, 36),
+      new THREE.MeshBasicMaterial({
+        colorWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: 1,
+        polygonOffsetUnits: 1,
       }),
     );
     this.globe.add(earth);
 
-    const grid = new THREE.LineSegments(
-      new THREE.WireframeGeometry(new THREE.SphereGeometry(50.12, 36, 24)),
+    const graticule = new THREE.LineSegments(
+      createGraticuleGeometry(EARTH_RADIUS * 1.002),
       new THREE.LineBasicMaterial({
-        color: 0x1e6370,
+        color: 0x474747,
         transparent: true,
-        opacity: 0.11,
+        opacity: 0.42,
       }),
     );
-    this.globe.add(grid);
+    this.globe.add(graticule);
 
     const atmosphere = new THREE.Mesh(
-      new THREE.SphereGeometry(EARTH_RADIUS + 3.2, 64, 64),
+      new THREE.SphereGeometry(EARTH_RADIUS * 1.055, 48, 36),
       new THREE.ShaderMaterial({
         transparent: true,
         side: THREE.BackSide,
@@ -170,8 +165,10 @@ class RegistryGlobe {
           varying vec3 vWorldPosition;
           void main() {
             vec3 viewDirection = normalize(cameraPosition - vWorldPosition);
-            float rim = pow(1.0 - max(dot(vNormal, viewDirection), 0.0), 3.0);
-            gl_FragColor = vec4(0.12, 0.73, 0.84, rim * 0.55);
+            float rim = 1.0 - abs(dot(normalize(vNormal), viewDirection));
+            float glow = pow(clamp(rim, 0.0, 1.0), 2.9) * 0.22;
+            if (glow < 0.01) discard;
+            gl_FragColor = vec4(vec3(0.62), glow);
           }
         `,
       }),
@@ -180,10 +177,24 @@ class RegistryGlobe {
   }
 
   private addMarker(node: NetworkNode): void {
-    const color = new THREE.Color(node.online ? 0x74f5df : 0xff6a72);
+    const color = new THREE.Color(node.online ? 0xf5f5f5 : 0x707070);
     const direction = latLngToVector(node.lat, node.lng, 1);
-    const base = direction.clone().multiplyScalar(EARTH_RADIUS + 0.7);
-    const tip = direction.clone().multiplyScalar(EARTH_RADIUS + 5.8);
+    const base = direction.clone().multiplyScalar(EARTH_RADIUS * 1.006);
+    const tip = direction.clone().multiplyScalar(EARTH_RADIUS + 2.5);
+
+    const cell = latLngToCell(node.lat, node.lng, 3);
+    const cellBoundary = cellToBoundary(cell, true).map(([lng, lat]) =>
+      latLngToVector(lat, lng, EARTH_RADIUS * 1.008),
+    );
+    const cellOutline = new THREE.LineLoop(
+      new THREE.BufferGeometry().setFromPoints(cellBoundary),
+      new THREE.LineBasicMaterial({
+        color,
+        transparent: true,
+        opacity: node.online ? 0.95 : 0.45,
+      }),
+    );
+    this.globe.add(cellOutline);
 
     const lineGeometry = new THREE.BufferGeometry().setFromPoints([base, tip]);
     const line = new THREE.Line(
@@ -191,13 +202,13 @@ class RegistryGlobe {
       new THREE.LineBasicMaterial({
         color,
         transparent: true,
-        opacity: 0.85,
+        opacity: 0.9,
       }),
     );
     this.globe.add(line);
 
     const marker = new THREE.Mesh(
-      new THREE.SphereGeometry(0.95, 16, 16),
+      new THREE.SphereGeometry(0.36, 12, 12),
       new THREE.MeshBasicMaterial({ color }),
     );
     marker.position.copy(tip);
@@ -205,11 +216,11 @@ class RegistryGlobe {
     this.globe.add(marker);
 
     const pulse = new THREE.Mesh(
-      new THREE.RingGeometry(1.25, 1.65, 32),
+      new THREE.RingGeometry(0.88, 1.08, 32),
       new THREE.MeshBasicMaterial({
         color,
         transparent: true,
-        opacity: 0.62,
+        opacity: 0.74,
         side: THREE.DoubleSide,
         depthWrite: false,
       }),
@@ -224,60 +235,9 @@ class RegistryGlobe {
     this.globe.add(pulse);
   }
 
-  private addLights(): void {
-    this.scene.add(new THREE.HemisphereLight(0x91e8ff, 0x020509, 1.25));
-    const key = new THREE.DirectionalLight(0xc5f8ff, 2.8);
-    key.position.set(100, 65, 110);
-    this.scene.add(key);
-    const edge = new THREE.DirectionalLight(0x2859ff, 1.15);
-    edge.position.set(-90, -25, -80);
-    this.scene.add(edge);
-  }
-
-  private addStars(): void {
-    const positions: number[] = [];
-    let seed = 0x3d1a17;
-    const random = (): number => {
-      seed = (seed * 1664525 + 1013904223) >>> 0;
-      return seed / 0xffffffff;
-    };
-
-    for (let index = 0; index < 950; index += 1) {
-      const radius = 280 + random() * 450;
-      const theta = random() * Math.PI * 2;
-      const phi = Math.acos(2 * random() - 1);
-      positions.push(
-        radius * Math.sin(phi) * Math.cos(theta),
-        radius * Math.cos(phi),
-        radius * Math.sin(phi) * Math.sin(theta),
-      );
-    }
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute(
-      "position",
-      new THREE.Float32BufferAttribute(positions, 3),
-    );
-    const points = new THREE.Points(
-      geometry,
-      new THREE.PointsMaterial({
-        color: 0x9ec5d1,
-        size: 0.8,
-        transparent: true,
-        opacity: 0.7,
-        sizeAttenuation: true,
-      }),
-    );
-    this.scene.add(points);
-  }
-
   private positionGlobe(): void {
-    const horizontalOffset =
-      this.container.clientWidth >= 900
-        ? -Math.min(22, this.container.clientWidth / 70)
-        : 0;
-    this.globe.position.x = horizontalOffset;
-    this.controls.target.set(horizontalOffset, 0, 0);
+    this.globe.position.set(0, 0, 0);
+    this.controls.target.set(0, 0, 0);
     this.controls.update();
   }
 
@@ -293,12 +253,11 @@ class RegistryGlobe {
   private animate = (): void => {
     this.frameId = requestAnimationFrame(this.animate);
     const elapsed = (performance.now() - this.startTime) / 1000;
-    this.globe.rotation.y = elapsed * 0.025;
     this.markerPulses.forEach((pulse) => {
       const wave = (elapsed * 0.7 + Number(pulse.userData.phase)) % 1;
       pulse.scale.setScalar(1 + wave * 1.8);
       (pulse.material as THREE.MeshBasicMaterial).opacity =
-        0.62 * (1 - wave);
+        0.74 * (1 - wave);
     });
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
@@ -311,10 +270,34 @@ function latLngToVector(
   radius: number,
 ): THREE.Vector3 {
   const latRad = lat * DEG_TO_RAD;
-  const lngRad = lng * DEG_TO_RAD;
+  const lngRad = -lng * DEG_TO_RAD;
   return new THREE.Vector3(
-    radius * Math.cos(latRad) * Math.sin(lngRad),
-    radius * Math.sin(latRad),
-    radius * Math.cos(latRad) * Math.cos(lngRad),
+    Math.cos(latRad) * Math.cos(lngRad),
+    Math.sin(latRad),
+    Math.cos(latRad) * Math.sin(lngRad),
+  ).multiplyScalar(radius);
+}
+
+function createGraticuleGeometry(radius: number): THREE.BufferGeometry {
+  const positions: number[] = [];
+  for (let lat = -75; lat <= 75; lat += 15) {
+    for (let lng = -180; lng < 180; lng += 4) {
+      const a = latLngToVector(lat, lng, radius);
+      const b = latLngToVector(lat, lng + 4, radius);
+      positions.push(a.x, a.y, a.z, b.x, b.y, b.z);
+    }
+  }
+  for (let lng = -180; lng < 180; lng += 15) {
+    for (let lat = -75; lat < 75; lat += 4) {
+      const a = latLngToVector(lat, lng, radius);
+      const b = latLngToVector(Math.min(75, lat + 4), lng, radius);
+      positions.push(a.x, a.y, a.z, b.x, b.y, b.z);
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(positions, 3),
   );
+  return geometry;
 }
