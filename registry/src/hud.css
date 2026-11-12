@@ -152,58 +152,34 @@ a {
 }
 
 .registry-page {
-  overflow-y: auto;
-}
-
-.registry-content {
-  max-width: 1180px;
-  margin-inline: auto;
-  padding: calc(20px + var(--safe-top)) max(16px, var(--safe-right))
-    calc(28px + var(--safe-bottom)) max(16px, var(--safe-left));
-}
-
-.registry-header {
-  margin-bottom: 16px;
-}
-
-.registry-header .hud-brand {
-  margin-bottom: 4px;
-}
-
-.registry-header h1 {
-  font-size: clamp(22px, 4.5vw, 34px);
-  line-height: 1.2;
-  letter-spacing: -0.045em;
+  height: 100svh;
 }
 
 .registry-globe {
-  margin-bottom: 24px;
-}
-
-.registry-scene {
-  position: relative;
-  height: clamp(250px, 47svh, 510px);
-  border: 1px solid var(--line-2);
-  border-radius: 12px 12px 0 0;
-  overflow: hidden;
-  background: radial-gradient(ellipse at center, #1c2827 0%, #141a1b 50%, #101213 85%);
-}
-
-.registry-scene canvas {
   pointer-events: none;
+  background: radial-gradient(ellipse at center, #1c2827, #141a1b 52%, #101213 85%);
+}
+
+.registry-tour,
+.registry-overlay {
+  position: absolute;
+  z-index: 2;
+  left: max(8px, var(--safe-left));
+  right: max(8px, var(--safe-right));
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(17, 19, 19, 0.94);
 }
 
 .registry-tour {
+  top: max(8px, var(--safe-top));
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px 16px;
-  min-height: 52px;
-  padding: 4px 12px;
-  border: 1px solid var(--line-2);
-  border-top: 0;
-  border-radius: 0 0 12px 12px;
-  background: var(--ice);
+  gap: 8px;
+  min-height: 54px;
+  max-width: 32rem;
+  padding: 4px 8px;
 }
 
 .tour-stop {
@@ -217,11 +193,13 @@ a {
 .tour-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 .tour-actions button {
   min-height: 44px;
+  min-width: 44px;
   padding-inline: 10px;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -235,44 +213,35 @@ a {
   background: var(--line-2);
 }
 
-.registry-globe figcaption,
-.registry-note,
-.registry-list-status {
-  margin-top: 8px;
+.registry-overlay {
+  bottom: max(8px, var(--safe-bottom));
+  max-width: 42rem;
+  max-height: min(38svh, 20rem);
+  padding-inline: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.registry-list-status,
+.registry-map-status {
+  margin-block: 6px;
   color: #b0b0b0;
 }
 
-.registry-map-status:not(:empty) {
-  display: block;
-}
-
-.registry-page h2 {
-  font-size: 18px;
-}
-
-.registry-note {
-  margin-top: 4px;
-}
-
-.registry-list-status:empty {
+.registry-list-status:empty,
+.registry-map-status:empty,
+.registry-provenance:empty {
   display: none;
 }
 
-.registry-list {
-  display: grid;
-  gap: 8px;
-  margin-top: 12px;
+.registry-list,
+.registry-provenance {
   list-style: none;
 }
 
 .registry-row {
-  display: grid;
-  align-items: start;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--line-2);
-  border-radius: 8px;
-  background: var(--ice);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line-2);
   overflow-wrap: anywhere;
 }
 
@@ -291,20 +260,20 @@ a {
   text-underline-offset: 3px;
 }
 
-.registry-page :is(a, button):focus-visible {
+.registry-page :is(a, button, summary):focus-visible {
   outline: 2px solid #9de5d0;
-  outline-offset: 3px;
+  outline-offset: -2px;
 }
 
-.registry-page:focus-visible {
+.registry-overlay:focus-visible {
   outline: 2px solid #9de5d0;
   outline-offset: -2px;
 }
 
 .registry-metrics {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px 8px;
 }
 
 .registry-metrics dt {
@@ -312,33 +281,33 @@ a {
   color: #b0b0b0;
 }
 
-.registry-snapshot-times {
-  display: flex;
-  flex-wrap: wrap;
-  grid-column: 1 / -1;
-  gap: 4px 16px;
-  padding-top: 8px;
-  border-top: 1px solid var(--line-2);
+.registry-notes {
   color: #b0b0b0;
   font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
-.registry-snapshot-times:empty {
-  display: none;
+.registry-notes summary {
+  min-height: 44px;
+  padding-block: 13px;
+  cursor: pointer;
+  color: var(--ink);
 }
 
-@media (min-width: 430px) {
-  .registry-metrics {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
+.registry-notes p,
+.registry-provenance li {
+  margin-bottom: 8px;
+}
+
+.registry-provenance :is(strong, span) {
+  display: block;
+}
+
+.registry-provenance strong {
+  color: var(--ink);
 }
 
 @media (max-width: 430px) {
-  .registry-tour {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: 3em minmax(44px, auto);
-  }
-
   .tour-stop {
     display: -webkit-box;
     -webkit-box-orient: vertical;
@@ -348,11 +317,13 @@ a {
   }
 }
 
-@media (min-width: 860px) {
-  .registry-row {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 6fr);
+@media (max-width: 340px) {
+  .registry-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
 
+@media (min-width: 700px) {
   .registry-metrics {
     grid-template-columns: repeat(6, minmax(0, 1fr));
   }

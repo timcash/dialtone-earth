@@ -34,46 +34,38 @@ async function renderRoute(): Promise<void> {
 async function renderRegistry(): Promise<void> {
   document.title = "dialtone.earth - network registry";
   app.innerHTML = `
-    <main class="hud-shell registry-page" tabindex="0" aria-labelledby="registry-title">
-      <div class="registry-content">
-        <header class="registry-header">
-          <a class="hud-brand" href="/">dialtone // earth</a>
-          <h1 id="registry-title">Dialtone network registry</h1>
-        </header>
-        <figure class="registry-globe" aria-label="Network globe">
-          <div class="registry-scene">
-            <div class="globe-stage" aria-hidden="true"></div>
-          </div>
-          <div class="registry-tour">
-            <p class="tour-stop">Loading globe.</p>
-            <div class="tour-actions">
-              <button type="button" class="tour-toggle" hidden>Pause tour</button>
-              <button type="button" class="tour-next" hidden>Next stop</button>
-            </div>
-          </div>
-          <figcaption>
-            Dots mark approximate published locations. Schematic lines show network membership only.
-            <span class="registry-map-status" role="status"></span>
-          </figcaption>
-        </figure>
-        <section aria-labelledby="networks-title">
-          <h2 id="networks-title">Networks</h2>
-          <p class="registry-note">Published snapshots. CPU, MEM, DISK and GPU MEM show total capacity.
-            Load is the mean one-minute load across reporting nodes.</p>
-          <p class="registry-list-status" role="status">Loading registry.</p>
-          <ul class="registry-list" aria-labelledby="networks-title"></ul>
-        </section>
+    <main class="hud-shell registry-page" aria-label="Dialtone network registry">
+      <div class="globe-stage registry-globe" aria-hidden="true"></div>
+      <div class="registry-tour" role="group" aria-label="Globe tour">
+        <p class="tour-stop">Loading globe.</p>
+        <div class="tour-actions">
+          <button type="button" class="tour-toggle" hidden>Pause tour</button>
+          <button type="button" class="tour-next" hidden>Next stop</button>
+        </div>
       </div>
+      <section class="registry-overlay" tabindex="0" aria-label="Network resources">
+        <p class="registry-list-status" role="status">Loading registry.</p>
+        <p class="registry-map-status" role="status"></p>
+        <ul class="registry-list" role="list" aria-label="Dialtone networks"></ul>
+        <details class="registry-notes">
+          <summary>Snapshot and map details</summary>
+          <p>CPU, MEM, DISK and GPU MEM show published capacity. Partial values cover only the
+            indicated reporting nodes. Load is the mean one-minute load across reporting nodes.</p>
+          <p>Dots mark approximate published locations. Schematic lines show network membership only.</p>
+          <ul class="registry-provenance" role="list" aria-label="Snapshot times"></ul>
+        </details>
+      </section>
     </main>
   `;
 
   const list = app.querySelector<HTMLUListElement>(".registry-list")!;
+  const provenance = app.querySelector<HTMLUListElement>(".registry-provenance")!;
   const listStatus = app.querySelector<HTMLElement>(".registry-list-status")!;
   const mapStatus = app.querySelector<HTMLElement>(".registry-map-status")!;
   const label = app.querySelector<HTMLElement>(".tour-stop")!;
   const toggle = app.querySelector<HTMLButtonElement>(".tour-toggle")!;
   const next = app.querySelector<HTMLButtonElement>(".tour-next")!;
-  const stage = app.querySelector<HTMLElement>(".registry-scene .globe-stage")!;
+  const stage = app.querySelector<HTMLElement>(".globe-stage")!;
   const index = await loadNetworkIndex().catch(() => null);
   const entries = index?.entries ?? [];
   if (!index || (index.skipped && !entries.length)) {
@@ -85,7 +77,7 @@ async function renderRegistry(): Promise<void> {
   }
 
   const overviews = await Promise.all(entries.map(async (entry) => {
-    const { row, nodeCount, resourceValues, dates } = createNetworkRow(entry);
+    const { row, nodeCount, resourceValues } = createNetworkRow(entry);
     list.append(row);
     const overview = await loadNetworkOverview(entry);
     const suffix = overview.snapshotStatus === "partial" ? " (partial)"
@@ -94,9 +86,11 @@ async function renderRegistry(): Promise<void> {
     resourceColumns.forEach(({ key }, index) => {
       resourceValues[index].textContent = formatResource(key, overview.resources[key]);
     });
-    dates.innerHTML = renderSnapshotTimes(overview.times);
     return overview;
   }));
+  provenance.innerHTML = overviews.filter(({ times }) => times.length).map(({ name, times }) =>
+    `<li><strong>${escapeHtml(name)}</strong>${renderSnapshotTimes(times)}</li>`,
+  ).join("");
   const plan = createGlobePlan(overviews);
   const incompleteMap = !!index?.skipped || overviews.some(({ nodes, nodeCount, snapshotStatus }) =>
     snapshotStatus !== "available" || nodes.length !== nodeCount,
@@ -122,11 +116,9 @@ function createNetworkRow(network: OverviewEntry) {
       <div><dt>Nodes</dt><dd>${network.node_count ?? "Loading."}</dd></div>
       ${resourceColumns.map(({ label }) => `<div><dt>${label}</dt><dd>Loading.</dd></div>`).join("")}
     </dl>
-    <p class="registry-snapshot-times"></p>
   `;
   const [nodeCount, ...resourceValues] = row.querySelectorAll("dd");
-  const dates = row.querySelector<HTMLParagraphElement>(".registry-snapshot-times")!;
-  return { row, nodeCount, resourceValues, dates };
+  return { row, nodeCount, resourceValues };
 }
 
 async function renderNetwork(slug: string): Promise<void> {
