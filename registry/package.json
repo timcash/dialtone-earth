@@ -1,0 +1,27 @@
+{
+  "name": "dialtone-earth-registry",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "vite",
+    "test": "node --test tests/networks.test.mjs",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "h3-js": "^4.5.0",
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.187.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "wrangler": "^4.160.1"
+  },
+  "packageManager": "pnpm@10.33.4"
+}

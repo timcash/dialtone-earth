@@ -1,0 +1,80 @@
+{
+  "network": "metal",
+  "generated_at": "2026-11-12T01:50:34Z",
+  "source": "grok-bot-metal /api/mesh, sanitized",
+  "transport": "iroh relay (n0 public relays), gossip",
+  "latest_release": "v0.5.3",
+  "node_count": 5,
+  "expected_peers": [
+    "legion",
+    "legion-metal",
+    "vm-us",
+    "vm-eu",
+    "vm-asia"
+  ],
+  "probe": {
+    "last_result": "3/3 ok (hourly health run 4:51 PM PST)"
+  },
+  "nodes": [
+    {
+      "name": "grok-bot-metal",
+      "os": "linux",
+      "arch": "x86_64",
+      "version": "0.5.3",
+      "relay_region": "usw1",
+      "lat": 39,
+      "lng": -77,
+      "heard": 4,
+      "online": true,
+      "rtt_ms_from_grok_bot_metal": null
+    },
+    {
+      "name": "legion",
+      "os": "windows",
+      "arch": "x86_64",
+      "version": "0.5.3",
+      "relay_region": "usw1",
+      "lat": 34,
+      "lng": -118,
+      "heard": 4,
+      "online": true,
+      "rtt_ms_from_grok_bot_metal": 69.7
+    },
+    {
+      "name": "vm-eu",
+      "os": "linux",
+      "arch": "x86_64",
+      "version": "0.5.3",
+      "relay_region": "euc1",
+      "lat": 51,
+      "lng": 4,
+      "heard": 4,
+      "online": true,
+      "rtt_ms_from_grok_bot_metal": 296.4
+    },
+    {
+      "name": "vm-us",
+      "os": "linux",
+      "arch": "x86_64",
+      "version": "0.5.3",
+      "relay_region": "use1",
+      "lat": 41,
+      "lng": -96,
+      "heard": 4,
+      "online": true,
+      "rtt_ms_from_grok_bot_metal": 185.5
+    },
+    {
+      "name": "vm-asia",
+      "os": "linux",
+      "arch": "x86_64",
+      "version": "0.5.3",
+      "relay_region": "aps1",
+      "lat": 36,
+      "lng": 140,
+      "heard": 4,
+      "online": true,
+      "rtt_ms_from_grok_bot_metal": 458.3
+    }
+  ]
+}
