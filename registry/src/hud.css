@@ -48,7 +48,6 @@ body {
   line-height: 1.5;
   font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
-  user-select: none;
 }
 
 a {
@@ -152,76 +151,213 @@ a {
   white-space: nowrap;
 }
 
-.hud-caption {
-  margin: 7px 0 18px;
-  color: var(--ink-2);
-  font-size: 10px;
-  letter-spacing: 0.08em;
+.registry-page {
+  overflow-y: auto;
 }
 
-.registry-terminal {
+.registry-content {
   max-width: 1180px;
+  margin-inline: auto;
+  padding: calc(20px + var(--safe-top)) max(16px, var(--safe-right))
+    calc(28px + var(--safe-bottom)) max(16px, var(--safe-left));
 }
 
-.registry-table {
-  width: min(100%, 1040px);
-  border-top: 1px solid var(--line);
+.registry-header {
+  margin-bottom: 16px;
 }
 
-.registry-row {
+.registry-header .hud-brand {
+  margin-bottom: 4px;
+}
+
+.registry-header h1 {
+  font-size: clamp(22px, 4.5vw, 34px);
+  line-height: 1.2;
+  letter-spacing: -0.045em;
+}
+
+.registry-globe {
+  margin-bottom: 24px;
+}
+
+.registry-scene {
+  position: relative;
+  height: clamp(250px, 47svh, 510px);
+  border: 1px solid var(--line-2);
+  border-radius: 12px 12px 0 0;
+  overflow: hidden;
+  background: radial-gradient(ellipse at center, #1c2827 0%, #141a1b 50%, #101213 85%);
+}
+
+.registry-scene canvas {
+  pointer-events: none;
+}
+
+.registry-tour {
   display: grid;
-  grid-template-columns:
-    minmax(170px, 2fr) minmax(90px, 1fr) minmax(60px, 0.65fr)
-    minmax(70px, 0.75fr) minmax(90px, 1fr) minmax(140px, 1.4fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  min-height: 44px;
-  border-bottom: 1px solid var(--line-2);
+  gap: 8px 16px;
+  min-height: 52px;
+  padding: 4px 12px;
+  border: 1px solid var(--line-2);
+  border-top: 0;
+  border-radius: 0 0 12px 12px;
+  background: var(--ice);
 }
 
-.registry-row > span,
-.registry-row > time {
-  min-width: 0;
-  padding: 0 12px;
+.tour-stop {
+  color: #9de5d0;
+  font-weight: 700;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.registry-row > :first-child {
-  padding-left: 6px;
+.tour-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
-.registry-row-header {
-  min-height: 32px;
-  color: var(--ink-2);
-  font-size: 10px;
-  letter-spacing: 0.07em;
-}
-
-.registry-network-row {
+.tour-actions button {
+  min-height: 44px;
+  padding-inline: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
   color: var(--ink);
-  font-size: clamp(11px, 1vw, 13px);
-  transition:
-    color 120ms ease,
-    background 120ms ease;
+  font: inherit;
+  cursor: pointer;
 }
 
-.registry-network-row:hover,
-.registry-network-row:focus-visible {
-  color: var(--accent);
-  background: rgba(255, 255, 255, 0.06);
-  outline: none;
+.tour-actions button:hover {
+  background: var(--line-2);
+}
+
+.registry-globe figcaption,
+.registry-note,
+.registry-list-status {
+  margin-top: 8px;
+  color: #b0b0b0;
+}
+
+.registry-map-status:not(:empty) {
+  display: block;
+}
+
+.registry-page h2 {
+  font-size: 18px;
+}
+
+.registry-note {
+  margin-top: 4px;
+}
+
+.registry-list-status:empty {
+  display: none;
+}
+
+.registry-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  list-style: none;
+}
+
+.registry-row {
+  display: grid;
+  align-items: start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: var(--ice);
+  overflow-wrap: anywhere;
 }
 
 .registry-name {
   display: flex;
   align-items: center;
-  gap: 10px;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 6px 4px;
+  color: #9de5d0;
+  font-size: 15px;
   font-weight: 700;
-  text-transform: uppercase;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
-.registry-name i,
+.registry-page :is(a, button):focus-visible {
+  outline: 2px solid #9de5d0;
+  outline-offset: 3px;
+}
+
+.registry-page:focus-visible {
+  outline: 2px solid #9de5d0;
+  outline-offset: -2px;
+}
+
+.registry-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 8px;
+}
+
+.registry-metrics dt {
+  margin-bottom: 2px;
+  color: #b0b0b0;
+}
+
+.registry-snapshot-times {
+  display: flex;
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
+  gap: 4px 16px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-2);
+  color: #b0b0b0;
+  font-size: 11px;
+}
+
+.registry-snapshot-times:empty {
+  display: none;
+}
+
+@media (min-width: 430px) {
+  .registry-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 430px) {
+  .registry-tour {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 3em minmax(44px, auto);
+  }
+
+  .tour-stop {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
+@media (min-width: 860px) {
+  .registry-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 6fr);
+  }
+
+  .registry-metrics {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}
+
 .node-name i {
   display: inline-block;
   flex: 0 0 auto;
@@ -231,15 +367,6 @@ a {
   border-radius: 50%;
   background: var(--ink);
   box-shadow: 0 0 7px rgba(255, 255, 255, 0.65);
-}
-
-.loading-row,
-.error-row {
-  padding: 18px 6px;
-  border-bottom: 1px solid var(--line-2);
-  color: var(--ink-2);
-  font-size: 11px;
-  letter-spacing: 0.05em;
 }
 
 .network-summary {
@@ -315,10 +442,14 @@ a {
   font-weight: 700;
 }
 
-.node-name i.offline {
+.node-name i:is(.offline, .unknown) {
   border-color: var(--ink-2);
   background: transparent;
   box-shadow: none;
+}
+
+.node-name i.unknown {
+  border-style: dotted;
 }
 
 .dim {
@@ -355,13 +486,6 @@ a {
   font-weight: 700;
 }
 
-.cc-body {
-  margin-top: 2px;
-  color: var(--ink);
-  font-size: clamp(12px, 1.08vw, 15px);
-  letter-spacing: 0.01em;
-}
-
 .cc-footer-line {
   display: flex;
   align-items: baseline;
@@ -376,6 +500,11 @@ a {
 .cc-footer-line a {
   color: var(--ink);
   pointer-events: auto;
+}
+
+.network-snapshot-times {
+  display: grid;
+  gap: 2px;
 }
 
 .cc-footer-line a:hover,
@@ -448,10 +577,6 @@ a {
 
   .hud-title-row {
     min-width: 650px;
-  }
-
-  .registry-table {
-    min-width: 760px;
   }
 
   .node-table,

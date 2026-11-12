@@ -1,6 +1,9 @@
 {
   "network": "metal",
   "generated_at": "2026-11-12T01:50:34Z",
+  "coordinates_generated_at": "2026-11-12T01:50:34Z",
+  "telemetry_generated_at": "2026-11-12T18:00:00.0088759Z",
+  "telemetry_source": "Legion mesh snapshot; explicitly whitelisted resource fields",
   "source": "grok-bot-metal /api/mesh, sanitized",
   "transport": "iroh relay (n0 public relays), gossip",
   "latest_release": "v0.5.3",
@@ -38,7 +41,12 @@
       "lng": -118,
       "heard": 4,
       "online": true,
-      "rtt_ms_from_grok_bot_metal": 69.7
+      "rtt_ms_from_grok_bot_metal": 69.7,
+      "resources": {
+        "cpu_logical_cores": 28,
+        "mem_bytes": 34059010048,
+        "disk_bytes": 1021821579264
+      }
     },
     {
       "name": "vm-eu",
