@@ -111,9 +111,9 @@ test("network index and snapshots have the public registry shape", async () => {
 test("network aggregates use only reported capacity or percentage values", async () => {
   const metal = await readJson("metal.json");
   assert.deepEqual(aggregateNetwork(metal), {
-    cpu: "1.3% avg",
-    memory: "27.3% avg",
-    disk: "41.1% avg",
+    cpu: "42 cores",
+    memory: "30.5/75.8 GB",
+    disk: "0.73/1.22 TB",
     gpuMemory: "n/a",
     load: "n/a",
   });
@@ -122,29 +122,48 @@ test("network aggregates use only reported capacity or percentage values", async
   complete.nodes = complete.nodes.slice(0, 2);
   complete.nodes[0].stats = completeStats({
     cpu_cores: 4,
-    mem_total_bytes: 8 * 1024 ** 3,
-    mem_used_bytes: 3 * 1024 ** 3,
-    disk_total_bytes: 100 * 1024 ** 3,
-    disk_used_bytes: 25 * 1024 ** 3,
-    gpu_mem_total_bytes: 8 * 1024 ** 3,
-    gpu_mem_used_bytes: 2 * 1024 ** 3,
+    mem_total_bytes: 8_000_000_000,
+    mem_used_bytes: 3_000_000_000,
+    disk_total_bytes: 100_000_000_000,
+    disk_used_bytes: 25_000_000_000,
+    gpu_mem_total_bytes: 8_000_000_000,
+    gpu_mem_used_bytes: 2_000_000_000,
     load_avg_1m: 0.5,
   });
   complete.nodes[1].stats = completeStats({
     cpu_cores: 8,
-    mem_total_bytes: 8 * 1024 ** 3,
-    mem_used_bytes: 4 * 1024 ** 3,
-    disk_total_bytes: 100 * 1024 ** 3,
-    disk_used_bytes: 75 * 1024 ** 3,
-    gpu_mem_total_bytes: 4 * 1024 ** 3,
-    gpu_mem_used_bytes: 1 * 1024 ** 3,
+    mem_total_bytes: 8_000_000_000,
+    mem_used_bytes: 4_000_000_000,
+    disk_total_bytes: 100_000_000_000,
+    disk_used_bytes: 75_000_000_000,
+    gpu_mem_total_bytes: 4_000_000_000,
+    gpu_mem_used_bytes: 1_000_000_000,
     load_avg_1m: 1.5,
   });
   assert.deepEqual(aggregateNetwork(complete), {
-    cpu: "12c",
-    memory: "16 GiB",
-    disk: "200 GiB",
-    gpuMemory: "12 GiB",
+    cpu: "12 cores",
+    memory: "7/16 GB",
+    disk: "100/200 GB",
+    gpuMemory: "3/12 GB",
+    load: "1 avg",
+  });
+
+  complete.nodes[0].stats.cpu_percent = 10;
+  complete.nodes[0].stats.mem_percent = 20;
+  complete.nodes[0].stats.disk_percent = 30;
+  complete.nodes[1].stats.cpu_cores = null;
+  complete.nodes[1].stats.cpu_percent = 20;
+  complete.nodes[1].stats.mem_percent = 40;
+  complete.nodes[1].stats.mem_total_bytes = null;
+  complete.nodes[1].stats.mem_used_bytes = null;
+  complete.nodes[1].stats.disk_percent = 60;
+  complete.nodes[1].stats.disk_total_bytes = null;
+  complete.nodes[1].stats.disk_used_bytes = null;
+  assert.deepEqual(aggregateNetwork(complete), {
+    cpu: "15% avg",
+    memory: "30% avg",
+    disk: "45% avg",
+    gpuMemory: "3/12 GB",
     load: "1 avg",
   });
 });
