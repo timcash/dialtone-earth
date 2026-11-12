@@ -1,6 +1,6 @@
 {
   "network": "metal",
-  "generated_at": "2026-11-12T01:50:34Z",
+  "generated_at": "2026-11-12T18:08:46Z",
   "source": "grok-bot-metal /api/mesh, sanitized",
   "transport": "iroh relay (n0 public relays), gossip",
   "latest_release": "v0.5.3",
@@ -26,7 +26,20 @@
       "lng": -77,
       "heard": 4,
       "online": true,
-      "rtt_ms_from_grok_bot_metal": null
+      "rtt_ms_from_grok_bot_metal": null,
+      "stats": {
+        "cpu_cores": 8,
+        "cpu_percent": 2.4,
+        "mem_percent": 59.4,
+        "mem_total_bytes": 16779689984,
+        "mem_used_bytes": 9969946624,
+        "disk_percent": 6.6,
+        "disk_total_bytes": 136793825280,
+        "disk_used_bytes": 8992251904,
+        "gpu_mem_total_bytes": null,
+        "gpu_mem_used_bytes": null,
+        "load_avg_1m": null
+      }
     },
     {
       "name": "legion",
@@ -38,7 +51,20 @@
       "lng": -118,
       "heard": 4,
       "online": true,
-      "rtt_ms_from_grok_bot_metal": 69.7
+      "rtt_ms_from_grok_bot_metal": 69.7,
+      "stats": {
+        "cpu_cores": null,
+        "cpu_percent": 2.0,
+        "mem_percent": 53.0,
+        "mem_total_bytes": null,
+        "mem_used_bytes": null,
+        "disk_percent": 68.0,
+        "disk_total_bytes": null,
+        "disk_used_bytes": null,
+        "gpu_mem_total_bytes": null,
+        "gpu_mem_used_bytes": null,
+        "load_avg_1m": null
+      }
     },
     {
       "name": "vm-eu",
@@ -50,7 +76,20 @@
       "lng": 4,
       "heard": 4,
       "online": true,
-      "rtt_ms_from_grok_bot_metal": 296.4
+      "rtt_ms_from_grok_bot_metal": 296.4,
+      "stats": {
+        "cpu_cores": null,
+        "cpu_percent": 0.0,
+        "mem_percent": 8.0,
+        "mem_total_bytes": null,
+        "mem_used_bytes": null,
+        "disk_percent": 30.0,
+        "disk_total_bytes": null,
+        "disk_used_bytes": null,
+        "gpu_mem_total_bytes": null,
+        "gpu_mem_used_bytes": null,
+        "load_avg_1m": null
+      }
     },
     {
       "name": "vm-us",
@@ -62,7 +101,20 @@
       "lng": -96,
       "heard": 4,
       "online": true,
-      "rtt_ms_from_grok_bot_metal": 185.5
+      "rtt_ms_from_grok_bot_metal": 185.5,
+      "stats": {
+        "cpu_cores": null,
+        "cpu_percent": 1.0,
+        "mem_percent": 8.0,
+        "mem_total_bytes": null,
+        "mem_used_bytes": null,
+        "disk_percent": 73.0,
+        "disk_total_bytes": null,
+        "disk_used_bytes": null,
+        "gpu_mem_total_bytes": null,
+        "gpu_mem_used_bytes": null,
+        "load_avg_1m": null
+      }
     },
     {
       "name": "vm-asia",
@@ -74,7 +126,21 @@
       "lng": 140,
       "heard": 4,
       "online": true,
-      "rtt_ms_from_grok_bot_metal": 458.3
+      "rtt_ms_from_grok_bot_metal": 458.3,
+      "stats": {
+        "cpu_cores": null,
+        "cpu_percent": 1.0,
+        "mem_percent": 8.0,
+        "mem_total_bytes": null,
+        "mem_used_bytes": null,
+        "disk_percent": 28.0,
+        "disk_total_bytes": null,
+        "disk_used_bytes": null,
+        "gpu_mem_total_bytes": null,
+        "gpu_mem_used_bytes": null,
+        "load_avg_1m": null
+      }
     }
-  ]
+  ],
+  "stats_note": "Peers report only percentages; totals, GPU memory and load average are not yet advertised by dialtone 0.5.3 (null = not reported)."
 }

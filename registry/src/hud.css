@@ -126,6 +126,93 @@ a {
   outline: none;
 }
 
+.overview-overlay {
+  position: fixed;
+  z-index: 10;
+  top: max(16px, calc(var(--safe-top) + 16px));
+  left: max(20px, calc(var(--safe-left) + 20px));
+  width: min(920px, calc(100% - 40px));
+  color: var(--ink);
+  text-shadow:
+    0 2px 12px #000000,
+    0 0 4px #000000;
+  pointer-events: none;
+}
+
+.overview-wordmark {
+  display: inline-block;
+  margin-bottom: 8px;
+  color: var(--ink-2);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  pointer-events: auto;
+}
+
+.overview-wordmark:hover,
+.overview-wordmark:focus-visible,
+.overview-network-name:hover,
+.overview-network-name:focus-visible {
+  color: var(--accent);
+  outline: none;
+}
+
+.overview-table {
+  width: 100%;
+  border-top: 1px solid var(--line);
+}
+
+.overview-row {
+  display: grid;
+  grid-template-columns:
+    minmax(110px, 1.35fr) minmax(44px, 0.45fr) minmax(82px, 0.9fr)
+    minmax(100px, 1.15fr) minmax(100px, 1.15fr) minmax(100px, 1.15fr)
+    minmax(70px, 0.8fr);
+  align-items: center;
+  min-height: 30px;
+  border-bottom: 1px solid var(--line-2);
+  transition:
+    color 160ms ease,
+    background 160ms ease;
+}
+
+.overview-row > * {
+  min-width: 0;
+  padding: 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overview-row > :first-child {
+  padding-left: 4px;
+}
+
+.overview-row-header {
+  min-height: 25px;
+  color: var(--ink-2);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+}
+
+.overview-network-row {
+  color: var(--ink-2);
+  font-size: clamp(9px, 0.82vw, 11px);
+}
+
+.overview-network-row.is-active {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.overview-network-name {
+  color: var(--ink);
+  font-weight: 700;
+  text-transform: uppercase;
+  pointer-events: auto;
+}
+
 .hud-title-row {
   display: flex;
   align-items: baseline;
@@ -439,6 +526,17 @@ a {
 }
 
 @media (max-width: 760px) {
+  .overview-overlay {
+    top: max(12px, var(--safe-top));
+    left: 12px;
+    width: calc(100% - 24px);
+    overflow-x: auto;
+  }
+
+  .overview-table {
+    min-width: 720px;
+  }
+
   .terminal-overlay {
     top: max(12px, var(--safe-top));
     right: 12px;

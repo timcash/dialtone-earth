@@ -1,9 +1,10 @@
 import "./hud.css";
+import { aggregateNetwork } from "./aggregates";
 import type {
   NetworkIndex,
-  NetworkIndexEntry,
   NetworkNode,
   NetworkSnapshot,
+  OverviewNetwork,
 } from "./types";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -27,69 +28,75 @@ async function renderRoute(): Promise<void> {
 }
 
 async function renderRegistry(): Promise<void> {
-  document.title = "dialtone.earth — network registry";
+  document.title = "dialtone.earth — network overview";
   app.innerHTML = `
-    <main class="hud-shell registry-page">
+    <main class="hud-shell overview-page">
+      <div class="globe-stage"></div>
       <div class="scene-shade" aria-hidden="true"></div>
-      <section class="terminal-overlay registry-terminal" aria-labelledby="registry-title">
-        <a class="hud-brand" href="/">dialtone // earth</a>
-        <div class="hud-title-row">
-          <h1 id="registry-title">DIALTONE NETWORK REGISTRY</h1>
-          <span id="registry-count">00 NETWORKS</span>
-        </div>
-        <p class="hud-caption">PUBLIC MESH SNAPSHOTS // SELECT NETWORK</p>
-        <div class="registry-table" role="table" aria-label="Dialtone networks">
-          <div class="registry-row registry-row-header" role="row">
+      <section class="overview-overlay" aria-label="Dialtone network totals">
+        <a class="overview-wordmark" href="/">dialtone // earth</a>
+        <div class="overview-table" role="table" aria-label="Dialtone networks">
+          <div class="overview-row overview-row-header" role="row">
             <span role="columnheader">NETWORK</span>
-            <span role="columnheader">STATUS</span>
             <span role="columnheader">NODES</span>
-            <span role="columnheader">ONLINE</span>
-            <span role="columnheader">RELEASE</span>
-            <span role="columnheader">UPDATED</span>
+            <span role="columnheader">CPU</span>
+            <span role="columnheader">MEM</span>
+            <span role="columnheader">DISK</span>
+            <span role="columnheader">GPU MEM</span>
+            <span role="columnheader">LOAD</span>
           </div>
-          <div class="loading-row" role="status">LOADING REGISTRY...</div>
+          <div class="loading-row" role="status">LOADING NETWORKS...</div>
         </div>
-      </section>
-      <section class="tour-cc-bar" aria-label="Registry help">
-        <p class="cc-channel"><span class="dim">CH:</span> REGISTRY <span class="focus">READY</span></p>
-        <p class="cc-body">Choose a network row to open its H3 globe and node telemetry.</p>
       </section>
     </main>
   `;
 
-  const list = app.querySelector<HTMLElement>(".registry-table");
-  if (!list) return;
+  const list = app.querySelector<HTMLElement>(".overview-table");
+  const stage = app.querySelector<HTMLElement>(".globe-stage");
+  if (!list || !stage) return;
 
   try {
     const index = await fetchJson<NetworkIndex>("/networks/index.json");
-    const headingCount = app.querySelector("#registry-count");
-    if (headingCount) {
-      headingCount.textContent = `${String(index.networks.length).padStart(2, "0")} NETWORKS`;
-    }
+    const networks = await Promise.all(
+      index.networks.map(async (entry): Promise<OverviewNetwork> => ({
+        slug: entry.slug,
+        snapshot: await fetchJson<NetworkSnapshot>(
+          `/networks/${encodeURIComponent(entry.slug)}.json`,
+        ),
+      })),
+    );
     const loading = list.querySelector(".loading-row");
     loading?.remove();
-    index.networks.forEach((network) => {
-      list.append(createNetworkRow(network));
+    networks.forEach((network) => {
+      list.append(createOverviewRow(network));
+    });
+    const { mountOverviewGlobe } = await import("./overview-globe");
+    await mountOverviewGlobe(stage, networks, (slug) => {
+      list
+        .querySelectorAll<HTMLElement>(".overview-network-row")
+        .forEach((row) => {
+          row.classList.toggle("is-active", row.dataset.network === slug);
+        });
     });
   } catch (error) {
     showLoadError(list, error);
   }
 }
 
-function createNetworkRow(network: NetworkIndexEntry): HTMLAnchorElement {
-  const row = document.createElement("a");
-  row.className = "registry-row registry-network-row";
-  row.href = `/n/${network.slug}`;
+function createOverviewRow(network: OverviewNetwork): HTMLDivElement {
+  const metrics = aggregateNetwork(network.snapshot);
+  const row = document.createElement("div");
+  row.className = "overview-row overview-network-row";
+  row.dataset.network = network.slug;
   row.setAttribute("role", "row");
   row.innerHTML = `
-    <span class="registry-name" role="cell"><i aria-hidden="true"></i>${escapeHtml(network.name)}</span>
-    <span role="cell">${network.online_count > 0 ? "ACTIVE" : "OFFLINE"}</span>
-    <span role="cell">${network.node_count}</span>
-    <span role="cell">${network.online_count}/${network.node_count}</span>
-    <span role="cell">${escapeHtml(network.latest_release)}</span>
-    <time role="cell" datetime="${network.generated_at}" title="${formatDate(network.generated_at)}">
-      ${formatRelativeTime(network.generated_at)}
-    </time>
+    <a class="overview-network-name" role="cell" href="/n/${network.slug}">${escapeHtml(network.snapshot.network)}</a>
+    <span role="cell">${network.snapshot.node_count}</span>
+    <span role="cell">${metrics.cpu}</span>
+    <span role="cell">${metrics.memory}</span>
+    <span role="cell">${metrics.disk}</span>
+    <span role="cell">${metrics.gpuMemory}</span>
+    <span role="cell">${metrics.load}</span>
   `;
   return row;
 }
@@ -131,7 +138,7 @@ async function renderNetwork(slug: string): Promise<void> {
             <span><b>ONL</b> ${onlineCount}/${snapshot.node_count}</span>
             <span><b>REL</b> ${escapeHtml(snapshot.latest_release)}</span>
           </div>
-          <div class="node-table" role="table" aria-label="Metal nodes">
+          <div class="node-table" role="table" aria-label="${escapeHtml(snapshot.network)} nodes">
             <div class="node-row node-row-header" role="row">
               <span role="columnheader">NODE</span>
               <span role="columnheader">OS</span>
@@ -164,10 +171,10 @@ async function renderNetwork(slug: string): Promise<void> {
 }
 
 function renderNode(node: NetworkNode): string {
+  const reportedRtt =
+    node.rtt_ms ?? node.rtt_ms_from_grok_bot_metal ?? null;
   const rtt =
-    node.rtt_ms_from_grok_bot_metal === null
-      ? "origin"
-      : `${node.rtt_ms_from_grok_bot_metal.toFixed(1)} ms`;
+    reportedRtt === null ? "origin" : `${reportedRtt.toFixed(1)} ms`;
   return `
     <div class="node-row" role="row">
       <span class="node-name" role="cell">
@@ -237,22 +244,6 @@ function formatDate(value: string): string {
     minute: "2-digit",
     timeZoneName: "short",
   }).format(new Date(value));
-}
-
-function formatRelativeTime(value: string): string {
-  const seconds = Math.round((new Date(value).getTime() - Date.now()) / 1000);
-  const formatter = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
-  const units: Array<[Intl.RelativeTimeFormatUnit, number]> = [
-    ["year", 31_536_000],
-    ["month", 2_592_000],
-    ["day", 86_400],
-    ["hour", 3_600],
-    ["minute", 60],
-  ];
-  const [unit, divisor] =
-    units.find(([, unitSeconds]) => Math.abs(seconds) >= unitSeconds) ??
-    (["second", 1] as const);
-  return formatter.format(Math.round(seconds / divisor), unit);
 }
 
 function escapeHtml(value: string): string {
