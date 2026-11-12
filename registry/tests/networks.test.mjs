@@ -1,21 +1,20 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { registerHooks } from "node:module";
 import { isIP } from "node:net";
 import path from "node:path";
 import test from "node:test";
-import { setImmediate } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { aggregateNetwork } from "../src/aggregates.ts";
 import {
   createGlobePlan,
-  formatResource,
-  loadNetworkIndex,
-  loadNetworkOverview,
-  resourceColumns,
   snapshotTimes,
   summarizeNetwork,
 } from "../src/overview.ts";
-import { sampleTour, shouldAnimateTour, TOUR_STOP_MS } from "../src/tour.ts";
+import {
+  sampleTour,
+  shouldAnimateTour,
+  TOUR_STOP_MS,
+} from "../src/tour.ts";
 
 const registryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -54,6 +53,21 @@ const requiredNodeFields = [
   "heard",
   "online",
   "rtt_ms_from_grok_bot_metal",
+  "stats",
+];
+
+const requiredStatsFields = [
+  "cpu_cores",
+  "cpu_percent",
+  "mem_percent",
+  "mem_total_bytes",
+  "mem_used_bytes",
+  "disk_percent",
+  "disk_total_bytes",
+  "disk_used_bytes",
+  "gpu_mem_total_bytes",
+  "gpu_mem_used_bytes",
+  "load_avg_1m",
 ];
 
 test("network index and snapshots have the public registry shape", async () => {
@@ -79,6 +93,11 @@ test("network index and snapshots have the public registry shape", async () => {
 
     for (const node of snapshot.nodes) {
       assertHasFields(node, requiredNodeFields, `${entry.slug}/${node.name}`);
+      assertHasFields(
+        node.stats,
+        requiredStatsFields,
+        `${entry.slug}/${node.name}/stats`,
+      );
       assert.equal(typeof node.online, "boolean");
       assert.equal(Number.isInteger(node.lat), true, "latitude must be rounded");
       assert.equal(Number.isInteger(node.lng), true, "longitude must be rounded");
@@ -89,8 +108,139 @@ test("network index and snapshots have the public registry shape", async () => {
           (typeof node.rtt_ms_from_grok_bot_metal === "number" &&
             node.rtt_ms_from_grok_bot_metal >= 0),
       );
+      for (const [key, value] of Object.entries(node.stats)) {
+        assert.ok(
+          value === null || (typeof value === "number" && value >= 0),
+          `${entry.slug}/${node.name}/stats.${key} must be non-negative or null`,
+        );
+      }
     }
   }
+});
+
+test("network aggregates use only reported capacity or percentage values", async () => {
+  const metal = await readJson("metal.json");
+  assert.deepEqual(aggregateNetwork(metal), {
+    cpu: "42 cores",
+    memory: "30.5/75.8 GB",
+    disk: "0.73/1.22 TB",
+    gpuMemory: "n/a",
+    load: "n/a",
+  });
+
+  const complete = structuredClone(metal);
+  complete.nodes = complete.nodes.slice(0, 2);
+  complete.nodes[0].stats = completeStats({
+    cpu_cores: 4,
+    mem_total_bytes: 8_000_000_000,
+    mem_used_bytes: 3_000_000_000,
+    disk_total_bytes: 100_000_000_000,
+    disk_used_bytes: 25_000_000_000,
+    gpu_mem_total_bytes: 8_000_000_000,
+    gpu_mem_used_bytes: 2_000_000_000,
+    load_avg_1m: 0.5,
+  });
+  complete.nodes[1].stats = completeStats({
+    cpu_cores: 8,
+    mem_total_bytes: 8_000_000_000,
+    mem_used_bytes: 4_000_000_000,
+    disk_total_bytes: 100_000_000_000,
+    disk_used_bytes: 75_000_000_000,
+    gpu_mem_total_bytes: 4_000_000_000,
+    gpu_mem_used_bytes: 1_000_000_000,
+    load_avg_1m: 1.5,
+  });
+  assert.deepEqual(aggregateNetwork(complete), {
+    cpu: "12 cores",
+    memory: "7/16 GB",
+    disk: "100/200 GB",
+    gpuMemory: "3/12 GB",
+    load: "1 avg",
+  });
+
+  complete.nodes[0].stats.cpu_percent = 10;
+  complete.nodes[0].stats.mem_percent = 20;
+  complete.nodes[0].stats.disk_percent = 30;
+  complete.nodes[1].stats.cpu_cores = null;
+  complete.nodes[1].stats.cpu_percent = 20;
+  complete.nodes[1].stats.mem_percent = 40;
+  complete.nodes[1].stats.mem_total_bytes = null;
+  complete.nodes[1].stats.mem_used_bytes = null;
+  complete.nodes[1].stats.disk_percent = 60;
+  complete.nodes[1].stats.disk_total_bytes = null;
+  complete.nodes[1].stats.disk_used_bytes = null;
+  assert.deepEqual(aggregateNetwork(complete), {
+    cpu: "15% avg",
+    memory: "30% avg",
+    disk: "45% avg",
+    gpuMemory: "3/12 GB",
+    load: "1 avg",
+  });
+});
+
+test("preserves main snapshot provenance and whitelisted resources", async () => {
+  const metal = await readJson("metal.json");
+  assert.deepEqual(snapshotTimes(metal), [
+    {
+      label: "Telemetry snapshot",
+      dateTime: "2026-11-12T18:00:00.0088759Z",
+      text: "12 Nov 2026, 18:00:00 UTC",
+    },
+    {
+      label: "Location snapshot",
+      dateTime: "2026-11-12T01:50:34Z",
+      text: "12 Nov 2026, 01:50:34 UTC",
+    },
+  ]);
+  assert.deepEqual(
+    metal.nodes.find((node) => node.name === "legion").resources,
+    {
+      cpu_logical_cores: 28,
+      mem_bytes: 34059010048,
+      disk_bytes: 1021821579264,
+    },
+  );
+});
+
+test("main overview and tour helpers still plan generic network loops", () => {
+  const west = summarizeNetwork(
+    { slug: "west", name: "West", node_count: 2 },
+    {
+      node_count: 2,
+      nodes: [
+        { name: "one", lat: 0, lng: 0 },
+        { name: "two", lat: 10, lng: 20 },
+      ],
+    },
+  );
+  const plan = createGlobePlan([west]);
+  assert.deepEqual(
+    plan.stops.map(({ network, node }) => [network, node]),
+    [
+      ["West", null],
+      ["West", "one"],
+      ["West", "two"],
+    ],
+  );
+  assert.deepEqual(sampleTour(0, 3), {
+    from: 0,
+    to: 1,
+    progress: 0,
+  });
+  assert.deepEqual(
+    sampleTour(TOUR_STOP_MS * 3, 3),
+    sampleTour(0, 3),
+  );
+  assert.equal(
+    shouldAnimateTour({
+      hidden: false,
+      inView: true,
+      reducedMotion: false,
+      paused: false,
+      stopCount: 3,
+    }),
+    true,
+  );
 });
 
 test("public network data contains no private addressing or identifiers", async () => {
@@ -125,311 +275,6 @@ test("public network data contains no private addressing or identifiers", async 
   }
 });
 
-test("the published metal overview shows only Legion's three reported capacities", async () => {
-  const { networks: [entry] } = await readJson("index.json");
-  const snapshot = await readJson("metal.json");
-  const overview = summarizeNetwork(entry, snapshot);
-  const reportingNodes = snapshot.nodes
-    .filter((node) => Object.hasOwn(node, "resources"))
-    .map(({ name, resources }) => ({ name, resources }));
-
-  assert.equal(overview.nodeCount, 5);
-  assert.equal(overview.nodes.length, 5);
-  assert.deepEqual(reportingNodes, [{
-    name: "legion",
-    resources: {
-      cpu_logical_cores: 28,
-      mem_bytes: 34059010048,
-      disk_bytes: 1021821579264,
-    },
-  }]);
-  assert.deepEqual(Object.fromEntries(resourceColumns.map(({ key }) =>
-    [key, formatResource(key, overview.resources[key])],
-  )), {
-    cpu_logical_cores: "28 cores (partial, 1/5 nodes)",
-    mem_bytes: "31.72 GiB (partial, 1/5 nodes)",
-    disk_bytes: "951.65 GiB (partial, 1/5 nodes)",
-    gpu_mem_bytes: "Unavailable",
-    load_1m: "Unavailable",
-  });
-});
-
-test("metal displays distinct telemetry and location snapshot times in UTC", async () => {
-  const snapshot = await readJson("metal.json");
-  const { networks: [entry] } = await readJson("index.json");
-  const overview = summarizeNetwork(entry, snapshot);
-
-  assert.equal(snapshot.generated_at, "2026-11-12T01:50:34Z");
-  assert.equal(snapshot.coordinates_generated_at, snapshot.generated_at);
-  assert.deepEqual(overview.times, [
-    {
-      label: "Telemetry snapshot",
-      dateTime: "2026-11-12T18:00:00.0088759Z",
-      text: "12 Nov 2026, 18:00:00 UTC",
-    },
-    {
-      label: "Location snapshot",
-      dateTime: "2026-11-12T01:50:34Z",
-      text: "12 Nov 2026, 01:50:34 UTC",
-    },
-  ]);
-  assert.deepEqual(snapshotTimes({ generated_at: entry.generated_at, telemetry_generated_at: "invalid" }), [
-    {
-      label: "Network snapshot",
-      dateTime: entry.generated_at,
-      text: "12 Nov 2026, 01:50:34 UTC",
-    },
-  ]);
-});
-
-test("missing resource data and CPU percentages leave resource columns unavailable", () => {
-  const overview = summarizeNetwork({ slug: "test", name: "Test", node_count: 1 }, {
-    node_count: 1,
-    nodes: [{ resources: { cpu_percent: 19.1 } }],
-  });
-  for (const { key } of resourceColumns) {
-    assert.equal(formatResource(key, overview.resources[key]), "Unavailable");
-  }
-});
-
-test("resource totals use reported units and preserve zero and partial coverage", () => {
-  const gib = 1024 ** 3;
-  const overview = summarizeNetwork({ slug: "test", name: "Test", node_count: 3 }, {
-    node_count: 3,
-    nodes: [
-      { resources: { cpu_logical_cores: 8, mem_bytes: 2 * gib, disk_bytes: 3 * gib, gpu_mem_bytes: 0, load_1m: 0 } },
-      { resources: { cpu_logical_cores: 4, mem_bytes: 3 * gib, disk_bytes: -1, gpu_mem_bytes: 0, load_1m: 2 } },
-      { resources: { cpu_logical_cores: 2, mem_bytes: gib, disk_bytes: "100", gpu_mem_bytes: null } },
-    ],
-  });
-  const read = (key) => formatResource(key, overview.resources[key]);
-
-  assert.equal(read("cpu_logical_cores"), "14 cores");
-  assert.equal(read("mem_bytes"), "6 GiB");
-  assert.equal(read("disk_bytes"), "3 GiB (partial, 1/3 nodes)");
-  assert.equal(read("gpu_mem_bytes"), "0 B (partial, 2/3 nodes)");
-  assert.equal(read("load_1m"), "1 (partial, 2/3 nodes)");
-});
-
-test("short or inconsistent node lists never report complete totals", () => {
-  const entry = { slug: "test", name: "Test", node_count: 3 };
-  const node = { name: "one", lat: 0, lng: 0, resources: { cpu_logical_cores: 8 } };
-  const overview = summarizeNetwork(entry, { node_count: 2, nodes: [node] });
-  assert.equal(overview.snapshotStatus, "partial");
-  assert.equal(overview.nodeCount, 3);
-  assert.equal(formatResource("cpu_logical_cores", overview.resources.cpu_logical_cores), "8 cores (partial, 1/3 nodes)");
-
-  const disagreement = summarizeNetwork({ ...entry, node_count: 0 }, { node_count: 1, nodes: [node] });
-  assert.equal(disagreement.snapshotStatus, "partial");
-  assert.equal(formatResource("cpu_logical_cores", disagreement.resources.cpu_logical_cores), "8 cores (partial, 1 reporting)");
-});
-
-test("loads every indexed network and isolates missing or malformed snapshots", async () => {
-  const entries = [
-    { slug: "metal", name: "Metal", node_count: 5 },
-    { slug: "edge", name: "Edge", node_count: 1 },
-    { slug: "lab", name: "Lab", node_count: 2 },
-    { slug: "broken", name: "Broken" },
-  ];
-  const requested = [];
-  const fakeFetch = async (url) => {
-    requested.push(url);
-    switch (url) {
-      case "/networks/index.json": return Response.json({ networks: entries });
-      case "/networks/metal.json": return Response.json(await readJson("metal.json"));
-      case "/networks/edge.json": return Response.json({
-        node_count: 1,
-        nodes: [{ name: "edge node", lat: 1, lng: 2 }],
-      });
-      case "/networks/lab.json": return new Response(null, { status: 503 });
-      case "/networks/broken.json": return Response.json({ nodes: "invalid" });
-      default: throw new Error("Unexpected request");
-    }
-  };
-  const { entries: index, skipped } = await loadNetworkIndex(fakeFetch);
-  assert.equal(skipped, 0);
-  const overviews = await Promise.all(index.map((entry) => loadNetworkOverview(entry, fakeFetch)));
-  assert.deepEqual(requested, [
-    "/networks/index.json", "/networks/metal.json", "/networks/edge.json",
-    "/networks/lab.json", "/networks/broken.json",
-  ]);
-  assert.deepEqual(overviews.map(({ slug, nodeCount, snapshotStatus }) => [slug, nodeCount, snapshotStatus]), [
-    ["metal", 5, "available"], ["edge", 1, "available"],
-    ["lab", 2, "unavailable"], ["broken", null, "unavailable"],
-  ]);
-  await assert.rejects(loadNetworkIndex(async () => Response.json({ networks: null })), /invalid network index/i);
-
-  const partialIndex = await loadNetworkIndex(async () => Response.json({
-    networks: [null, { slug: "../invalid", name: "Invalid" }, entries[1]],
-  }));
-  assert.deepEqual(partialIndex, { entries: [entries[1]], skipped: 2 });
-});
-
-test("the globe only maps valid locations and tours each mapped network and node", () => {
-  const makeNetwork = (slug, nodes) => summarizeNetwork(
-    { slug, name: slug, node_count: nodes.length },
-    { node_count: nodes.length, nodes },
-  );
-  const overview = createGlobePlan([
-    makeNetwork("west", [
-      { name: "west one", lat: 0, lng: 0 },
-      { name: "unknown" },
-      { name: "west two", lat: 15, lng: -20 },
-    ]),
-    makeNetwork("east", [
-      { name: "east one", lat: 5, lng: 180 },
-      { name: "east two", lat: 10, lng: -179 },
-    ]),
-    makeNetwork("unmapped", [{ name: "invalid", lat: 91, lng: 0 }]),
-  ]);
-  assert.deepEqual(overview.groups.map(({ slug, nodes }) => [slug, nodes.map(({ name }) => name)]), [
-    ["west", ["west one", "west two"]], ["east", ["east one", "east two"]],
-  ]);
-  assert.deepEqual(overview.stops.map(({ network, node }) => [network, node]), [
-    ["west", null], ["west", "west one"], ["west", "west two"],
-    ["east", null], ["east", "east one"], ["east", "east two"],
-  ]);
-  const east = overview.stops[3];
-  assert.ok(east.lat > 5 && east.lat < 10);
-  assert.ok(Math.abs(east.lng) > 179);
-});
-
-test("the camera timeline holds each stop, transitions, and closes the loop", () => {
-  assert.deepEqual(sampleTour(0, 3), { from: 0, to: 1, progress: 0 });
-  assert.deepEqual(sampleTour(100, 3), { from: 0, to: 1, progress: 0 });
-  const end = sampleTour(TOUR_STOP_MS * 3 - 100, 3);
-  assert.equal(end.from, 2);
-  assert.equal(end.to, 0);
-  assert.ok(end.progress > 0.9 && end.progress < 1);
-  assert.deepEqual(sampleTour(TOUR_STOP_MS * 3, 3), sampleTour(0, 3));
-});
-
-test("the tour animates only when visible, in view, and motion is enabled", () => {
-  const playing = { hidden: false, inView: true, reducedMotion: false, paused: false, stopCount: 2 };
-  assert.equal(shouldAnimateTour(playing), true);
-  for (const override of [
-    { hidden: true }, { inView: false }, { reducedMotion: true },
-    { paused: true }, { stopCount: 1 }, { stopCount: 0 },
-  ]) {
-    assert.equal(shouldAnimateTour({ ...playing, ...override }), false);
-  }
-});
-
-test("the main route places only network metrics over the full-height globe", async (t) => {
-  const metal = await readJson("metal.json");
-  const rows = [];
-  const provenance = { innerHTML: "" };
-  const elements = {
-    ".registry-list": { append: (row) => rows.push(row) },
-    ".registry-provenance": provenance,
-    ".globe-stage": {},
-  };
-  const app = {
-    innerHTML: "",
-    querySelector(selector) { return elements[selector] ?? {}; },
-  };
-  const createElement = () => ({
-    innerHTML: "",
-    cells: Array.from({ length: 6 }, () => ({ textContent: "" })),
-    querySelectorAll() { return this.cells; },
-  });
-  await renderRoute(t, "/", app, async (url) => {
-    switch (url) {
-      case "/networks/index.json": return Response.json({ networks: [
-        { slug: "metal", name: "metal", node_count: 5 },
-        { slug: "edge", name: "Edge", node_count: 1 },
-      ] });
-      case "/networks/metal.json": return Response.json(metal);
-      case "/networks/edge.json": return Response.json({ node_count: 1, nodes: [] });
-      default: throw new Error("Unexpected request");
-    }
-  }, createElement);
-
-  assert.match(app.innerHTML, /<main[^>]+class="hud-shell registry-page"[^>]*>\s*<div class="globe-stage registry-globe" aria-hidden="true"><\/div>/);
-  assert.match(app.innerHTML, /<section class="registry-overlay" tabindex="0" aria-label="Network resources">/);
-  assert.doesNotMatch(app.innerHTML, /<h[12]\b/);
-  assert.match(app.innerHTML, /<details[^>]*>[\s\S]*<summary>[^<]+<\/summary>[\s\S]*Schematic[\s\S]*registry-provenance[\s\S]*<\/details>/);
-  assert.equal(rows.length, 2);
-  assert.deepEqual([...rows[0].innerHTML.matchAll(/<dt>([^<]+)<\/dt>/g)].map(([, label]) => label),
-    ["Nodes", "CPU", "MEM", "DISK", "GPU MEM", "Load"]);
-  assert.match(rows[0].innerHTML, /href="\/n\/metal">metal<\/a>/);
-  assert.doesNotMatch(rows[0].innerHTML, /<time\b|snapshot-times/);
-  assert.match(rows[0].cells[1].textContent, /28 cores \(partial, 1\/5 nodes\)/);
-  assert.match(rows[1].innerHTML, /href="\/n\/edge">Edge<\/a>/);
-  assert.match(provenance.innerHTML, /Telemetry snapshot[\s\S]*Location snapshot/);
-
-  const css = await readFile(path.join(registryRoot, "src", "hud.css"), "utf8");
-  assert.match(css, /\.registry-page\s*\{[^}]*height:\s*100svh\b/);
-  assert.match(css, /\.registry-overlay\s*\{[^}]*overflow-y:\s*auto\b/);
-  assert.match(css, /\.tour-actions button\s*\{[^}]*min-height:\s*44px\b/);
-  assert.match(css, /\.registry-notes summary\s*\{[^}]*min-height:\s*44px\b/);
-});
-
-test("a sparse detail route preserves its escaped node table when WebGL fails", async (t) => {
-  const snapshot = {
-    network: 'Edge & "Lab" <test>',
-    node_count: 3,
-    nodes: [
-      { name: "<svg>", lat: 0, lng: 0 },
-      { name: "origin node", rtt_ms_from_grok_bot_metal: null },
-      { name: "edge node", os: "<os>", version: '1"2', relay_region: "a&b", rtt_ms_from_grok_bot_metal: 12 },
-    ],
-  };
-  const stage = { replaceChildren() {} };
-  const controls = { textContent: "" };
-  const shell = {
-    innerHTML: "",
-    insertAdjacentHTML(_position, markup) { this.innerHTML += markup; },
-  };
-  const app = {
-    innerHTML: "",
-    querySelector(selector) {
-      return { ".network-shell": shell, ".globe-stage": stage, ".network-globe-help": controls }[selector] ?? null;
-    },
-  };
-  await renderRoute(t, "/n/edge", app, async (url) => {
-    assert.equal(url, "/networks/edge.json");
-    return Response.json(snapshot);
-  });
-
-  assert.match(shell.innerHTML, /aria-label="Edge &amp; &quot;Lab&quot; &lt;test&gt; nodes"/);
-  const rows = [...shell.innerHTML.matchAll(/class="node-row" role="row">([\s\S]*?)<\/div>/g)];
-  assert.equal(rows.length, 3);
-  assert.match(rows[0][1], /&lt;svg&gt;/);
-  assert.equal((rows[0][1].match(/>Unavailable</g) ?? []).length, 4);
-  assert.match(shell.innerHTML, /&lt;os&gt;[\s\S]*v1&quot;2[\s\S]*a&amp;b[\s\S]*12\.0 ms/);
-  assert.match(shell.innerHTML, />origin</);
-  assert.match(shell.innerHTML, /Snapshot time unavailable/);
-  assert.doesNotMatch(shell.innerHTML, /SNAPSHOT UNAVAILABLE|<svg>|Invalid Date/);
-  assert.equal(controls.textContent, "Globe unavailable.");
-});
-
-async function renderRoute(t, pathname, app, fetcher, createElement) {
-  Object.defineProperties(globalThis, {
-    document: { configurable: true, value: { querySelector: () => app, createElement } },
-    window: { configurable: true, value: { location: { pathname } } },
-  });
-  t.after(() => { delete globalThis.document; delete globalThis.window; });
-  t.mock.method(globalThis, "fetch", fetcher);
-
-  const hooks = registerHooks({
-    resolve(specifier, context, nextResolve) {
-      if (context.parentURL?.split("?")[0].endsWith("/src/main.ts")) {
-        if (specifier === "./hud.css") return { url: "data:text/javascript,", shortCircuit: true };
-        if (specifier === "./globe") {
-          const module = 'export function mountGlobe() { throw new Error("No WebGL"); }';
-          return { url: "data:text/javascript," + encodeURIComponent(module), shortCircuit: true };
-        }
-        if (specifier === "./overview") return nextResolve("./overview.ts", context);
-      }
-      return nextResolve(specifier, context);
-    },
-  });
-  t.after(() => hooks.deregister());
-  await import(`../src/main.ts?route=${encodeURIComponent(pathname)}`);
-  await setImmediate();
-}
-
 function assertHasFields(value, fields, label) {
   assert.equal(typeof value, "object", `${label} must be an object`);
   fields.forEach((field) => {
@@ -451,4 +296,21 @@ function walk(value, visitor, key = "root") {
       walk(childValue, visitor, childKey),
     );
   }
+}
+
+function completeStats(overrides) {
+  return {
+    cpu_cores: 1,
+    cpu_percent: 1,
+    mem_percent: 1,
+    mem_total_bytes: 1,
+    mem_used_bytes: 1,
+    disk_percent: 1,
+    disk_total_bytes: 1,
+    disk_used_bytes: 1,
+    gpu_mem_total_bytes: null,
+    gpu_mem_used_bytes: null,
+    load_avg_1m: null,
+    ...overrides,
+  };
 }

@@ -1,6 +1,6 @@
 {
   "network": "metal",
-  "generated_at": "2026-11-12T01:50:34Z",
+  "generated_at": "2026-11-12T18:08:46Z",
   "coordinates_generated_at": "2026-11-12T01:50:34Z",
   "telemetry_generated_at": "2026-11-12T18:00:00.0088759Z",
   "telemetry_source": "Legion mesh snapshot; explicitly whitelisted resource fields",
@@ -29,7 +29,20 @@
       "lng": -77,
       "heard": 4,
       "online": true,
-      "rtt_ms_from_grok_bot_metal": null
+      "rtt_ms_from_grok_bot_metal": null,
+      "stats": {
+        "cpu_cores": 8,
+        "cpu_percent": 0.5,
+        "mem_percent": 59.4,
+        "mem_total_bytes": 16779689984,
+        "mem_used_bytes": 9975177216,
+        "disk_percent": 6.6,
+        "disk_total_bytes": 136793825280,
+        "disk_used_bytes": 8992505856,
+        "gpu_mem_total_bytes": null,
+        "gpu_mem_used_bytes": null,
+        "load_avg_1m": null
+      }
     },
     {
       "name": "legion",
@@ -42,6 +55,19 @@
       "heard": 4,
       "online": true,
       "rtt_ms_from_grok_bot_metal": 69.7,
+      "stats": {
+        "cpu_cores": 28,
+        "cpu_percent": 15.9,
+        "mem_percent": 54.5,
+        "mem_total_bytes": 34059010048,
+        "mem_used_bytes": 18572169216,
+        "disk_percent": 68.3,
+        "disk_total_bytes": 1021821579264,
+        "disk_used_bytes": 698002452480,
+        "gpu_mem_total_bytes": null,
+        "gpu_mem_used_bytes": null,
+        "load_avg_1m": null
+      },
       "resources": {
         "cpu_logical_cores": 28,
         "mem_bytes": 34059010048,
@@ -58,7 +84,20 @@
       "lng": 4,
       "heard": 4,
       "online": true,
-      "rtt_ms_from_grok_bot_metal": 296.4
+      "rtt_ms_from_grok_bot_metal": 296.4,
+      "stats": {
+        "cpu_cores": 2,
+        "cpu_percent": 0.5,
+        "mem_percent": 8.0,
+        "mem_total_bytes": 8319709184,
+        "mem_used_bytes": 665411584,
+        "disk_percent": 29.6,
+        "disk_total_bytes": 19682557952,
+        "disk_used_bytes": 5832765440,
+        "gpu_mem_total_bytes": null,
+        "gpu_mem_used_bytes": null,
+        "load_avg_1m": null
+      }
     },
     {
       "name": "vm-us",
@@ -70,7 +109,20 @@
       "lng": -96,
       "heard": 4,
       "online": true,
-      "rtt_ms_from_grok_bot_metal": 185.5
+      "rtt_ms_from_grok_bot_metal": 185.5,
+      "stats": {
+        "cpu_cores": 2,
+        "cpu_percent": 1.5,
+        "mem_percent": 8.0,
+        "mem_total_bytes": 8319705088,
+        "mem_used_bytes": 661745664,
+        "disk_percent": 73.1,
+        "disk_total_bytes": 19682557952,
+        "disk_used_bytes": 14384943104,
+        "gpu_mem_total_bytes": null,
+        "gpu_mem_used_bytes": null,
+        "load_avg_1m": null
+      }
     },
     {
       "name": "vm-asia",
@@ -82,7 +134,21 @@
       "lng": 140,
       "heard": 4,
       "online": true,
-      "rtt_ms_from_grok_bot_metal": 458.3
+      "rtt_ms_from_grok_bot_metal": 458.3,
+      "stats": {
+        "cpu_cores": 2,
+        "cpu_percent": 0.8,
+        "mem_percent": 7.6,
+        "mem_total_bytes": 8319705088,
+        "mem_used_bytes": 634318848,
+        "disk_percent": 27.9,
+        "disk_total_bytes": 19682557952,
+        "disk_used_bytes": 5496975360,
+        "gpu_mem_total_bytes": null,
+        "gpu_mem_used_bytes": null,
+        "load_avg_1m": null
+      }
     }
-  ]
+  ],
+  "stats_note": "CPU cores and memory/disk totals come from each node's details; GPU memory and load average are not yet reported by dialtone 0.5.3 (null = not reported, see timcash/dialtone#32)."
 }
