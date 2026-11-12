@@ -1,10 +1,15 @@
 import "./hud.css";
-import type {
-  NetworkIndex,
-  NetworkIndexEntry,
-  NetworkNode,
-  NetworkSnapshot,
-} from "./types";
+import {
+  createGlobePlan,
+  formatResource,
+  loadNetworkIndex,
+  loadNetworkOverview,
+  resourceColumns,
+  snapshotTimes,
+  type OverviewEntry,
+  type SnapshotTime,
+} from "./overview";
+import type { NetworkNode, NetworkSnapshot } from "./types";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 if (!app) throw new Error("Missing app root");
@@ -27,71 +32,101 @@ async function renderRoute(): Promise<void> {
 }
 
 async function renderRegistry(): Promise<void> {
-  document.title = "dialtone.earth — network registry";
+  document.title = "dialtone.earth - network registry";
   app.innerHTML = `
-    <main class="hud-shell registry-page">
-      <div class="scene-shade" aria-hidden="true"></div>
-      <section class="terminal-overlay registry-terminal" aria-labelledby="registry-title">
-        <a class="hud-brand" href="/">dialtone // earth</a>
-        <div class="hud-title-row">
-          <h1 id="registry-title">DIALTONE NETWORK REGISTRY</h1>
-          <span id="registry-count">00 NETWORKS</span>
-        </div>
-        <p class="hud-caption">PUBLIC MESH SNAPSHOTS // SELECT NETWORK</p>
-        <div class="registry-table" role="table" aria-label="Dialtone networks">
-          <div class="registry-row registry-row-header" role="row">
-            <span role="columnheader">NETWORK</span>
-            <span role="columnheader">STATUS</span>
-            <span role="columnheader">NODES</span>
-            <span role="columnheader">ONLINE</span>
-            <span role="columnheader">RELEASE</span>
-            <span role="columnheader">UPDATED</span>
+    <main class="hud-shell registry-page" tabindex="0" aria-labelledby="registry-title">
+      <div class="registry-content">
+        <header class="registry-header">
+          <a class="hud-brand" href="/">dialtone // earth</a>
+          <h1 id="registry-title">Dialtone network registry</h1>
+        </header>
+        <figure class="registry-globe" aria-label="Network globe">
+          <div class="registry-scene">
+            <div class="globe-stage" aria-hidden="true"></div>
           </div>
-          <div class="loading-row" role="status">LOADING REGISTRY...</div>
-        </div>
-      </section>
-      <section class="tour-cc-bar" aria-label="Registry help">
-        <p class="cc-channel"><span class="dim">CH:</span> REGISTRY <span class="focus">READY</span></p>
-        <p class="cc-body">Choose a network row to open its H3 globe and node telemetry.</p>
-      </section>
+          <div class="registry-tour">
+            <p class="tour-stop">Loading globe.</p>
+            <div class="tour-actions">
+              <button type="button" class="tour-toggle" hidden>Pause tour</button>
+              <button type="button" class="tour-next" hidden>Next stop</button>
+            </div>
+          </div>
+          <figcaption>
+            Dots mark approximate published locations. Schematic lines show network membership only.
+            <span class="registry-map-status" role="status"></span>
+          </figcaption>
+        </figure>
+        <section aria-labelledby="networks-title">
+          <h2 id="networks-title">Networks</h2>
+          <p class="registry-note">Published snapshots. CPU, MEM, DISK and GPU MEM show total capacity.
+            Load is the mean one-minute load across reporting nodes.</p>
+          <p class="registry-list-status" role="status">Loading registry.</p>
+          <ul class="registry-list" aria-labelledby="networks-title"></ul>
+        </section>
+      </div>
     </main>
   `;
 
-  const list = app.querySelector<HTMLElement>(".registry-table");
-  if (!list) return;
+  const list = app.querySelector<HTMLUListElement>(".registry-list")!;
+  const listStatus = app.querySelector<HTMLElement>(".registry-list-status")!;
+  const mapStatus = app.querySelector<HTMLElement>(".registry-map-status")!;
+  const label = app.querySelector<HTMLElement>(".tour-stop")!;
+  const toggle = app.querySelector<HTMLButtonElement>(".tour-toggle")!;
+  const next = app.querySelector<HTMLButtonElement>(".tour-next")!;
+  const stage = app.querySelector<HTMLElement>(".registry-scene .globe-stage")!;
+  const index = await loadNetworkIndex().catch(() => null);
+  const entries = index?.entries ?? [];
+  if (!index || (index.skipped && !entries.length)) {
+    listStatus.textContent = "Registry index unavailable.";
+  } else if (index.skipped) {
+    listStatus.textContent = "Some network index entries are unavailable.";
+  } else {
+    listStatus.textContent = entries.length ? "" : "No networks are published.";
+  }
 
-  try {
-    const index = await fetchJson<NetworkIndex>("/networks/index.json");
-    const headingCount = app.querySelector("#registry-count");
-    if (headingCount) {
-      headingCount.textContent = `${String(index.networks.length).padStart(2, "0")} NETWORKS`;
-    }
-    const loading = list.querySelector(".loading-row");
-    loading?.remove();
-    index.networks.forEach((network) => {
-      list.append(createNetworkRow(network));
+  const overviews = await Promise.all(entries.map(async (entry) => {
+    const { row, nodeCount, resourceValues, dates } = createNetworkRow(entry);
+    list.append(row);
+    const overview = await loadNetworkOverview(entry);
+    const suffix = overview.snapshotStatus === "partial" ? " (partial)"
+      : overview.snapshotStatus === "unavailable" ? " (index only)" : "";
+    nodeCount.textContent = overview.nodeCount === null ? "Unavailable" : `${overview.nodeCount}${suffix}`;
+    resourceColumns.forEach(({ key }, index) => {
+      resourceValues[index].textContent = formatResource(key, overview.resources[key]);
     });
-  } catch (error) {
-    showLoadError(list, error);
+    dates.innerHTML = renderSnapshotTimes(overview.times);
+    return overview;
+  }));
+  const plan = createGlobePlan(overviews);
+  const incompleteMap = !!index?.skipped || overviews.some(({ nodes, nodeCount, snapshotStatus }) =>
+    snapshotStatus !== "available" || nodes.length !== nodeCount,
+  );
+  mapStatus.textContent = !plan.stops.length ? "No node locations available."
+    : incompleteMap ? "Some node locations are unavailable." : "";
+  try {
+    const { mountGlobe } = await import("./globe");
+    await mountGlobe(stage, { plan, ui: { toggle, next, label } });
+  } catch {
+    label.textContent = "Globe unavailable.";
+    toggle.hidden = true;
+    next.hidden = true;
   }
 }
 
-function createNetworkRow(network: NetworkIndexEntry): HTMLAnchorElement {
-  const row = document.createElement("a");
-  row.className = "registry-row registry-network-row";
-  row.href = `/n/${network.slug}`;
-  row.setAttribute("role", "row");
+function createNetworkRow(network: OverviewEntry) {
+  const row = document.createElement("li");
+  row.className = "registry-row";
   row.innerHTML = `
-    <span class="registry-name" role="cell"><i aria-hidden="true"></i>${escapeHtml(network.name)}</span>
-    <span role="cell">${network.online_count > 0 ? "ACTIVE" : "OFFLINE"}</span>
-    <span role="cell">${network.node_count}</span>
-    <span role="cell">${network.online_count}/${network.node_count}</span>
-    <span role="cell">${escapeHtml(network.latest_release)}</span>
-    <time role="cell" datetime="${network.generated_at}" title="${formatDate(network.generated_at)}">
-      ${formatRelativeTime(network.generated_at)}
-    </time>
+    <a class="registry-name" href="/n/${encodeURIComponent(network.slug)}">${escapeHtml(network.name)}</a>
+    <dl class="registry-metrics">
+      <div><dt>Nodes</dt><dd>${network.node_count ?? "Loading."}</dd></div>
+      ${resourceColumns.map(({ label }) => `<div><dt>${label}</dt><dd>Loading.</dd></div>`).join("")}
+    </dl>
+    <p class="registry-snapshot-times"></p>
   `;
-  return row;
+  const [nodeCount, ...resourceValues] = row.querySelectorAll("dd");
+  const dates = row.querySelector<HTMLParagraphElement>(".registry-snapshot-times")!;
+  return { row, nodeCount, resourceValues, dates };
 }
 
 async function renderNetwork(slug: string): Promise<void> {
@@ -100,7 +135,7 @@ async function renderNetwork(slug: string): Promise<void> {
       <div class="globe-stage" aria-hidden="true"></div>
       <div class="network-loading" role="status">
         <span></span>
-        acquiring network snapshot…
+        acquiring network snapshot.
       </div>
     </main>
   `;
@@ -109,8 +144,19 @@ async function renderNetwork(slug: string): Promise<void> {
     const snapshot = await fetchJson<NetworkSnapshot>(
       `/networks/${encodeURIComponent(slug)}.json`,
     );
-    document.title = `${snapshot.network} — dialtone.earth`;
-    const onlineCount = snapshot.nodes.filter((node) => node.online).length;
+    if (!Array.isArray(snapshot?.nodes)) throw new Error("Invalid node list");
+    const nodes = snapshot.nodes.filter((node) => node && typeof node === "object" && !Array.isArray(node));
+    const networkName = displayText(snapshot.network, slug);
+    document.title = `${networkName} - dialtone.earth`;
+    const nodeCount = typeof snapshot.node_count === "number" &&
+      Number.isSafeInteger(snapshot.node_count) && snapshot.node_count >= 0
+      ? snapshot.node_count : nodes.length;
+    const statusCount = nodes.filter((node) => typeof node.online === "boolean").length;
+    const onlineCount = nodes.filter((node) => node.online === true).length;
+    const online = statusCount === 0 && nodeCount > 0 ? "Unavailable"
+      : `${onlineCount}/${nodeCount}${statusCount !== nodeCount ? " (partial)" : ""}`;
+    const active = online === "Unavailable" ? "STATUS UNAVAILABLE" : `ACTIVE ${online}`;
+    const dates = renderSnapshotTimes(snapshotTimes(snapshot)) || "Snapshot time unavailable";
     const shell = app.querySelector<HTMLElement>(".network-shell");
     const stage = app.querySelector<HTMLElement>(".globe-stage");
     if (!shell || !stage) return;
@@ -120,18 +166,18 @@ async function renderNetwork(slug: string): Promise<void> {
       "beforeend",
       `
         <div class="scene-shade" aria-hidden="true"></div>
-        <section class="terminal-overlay network-terminal" aria-label="${escapeHtml(snapshot.network)} network status">
+        <section class="terminal-overlay network-terminal" aria-label="${escapeHtml(networkName)} network status">
           <a class="hud-brand" href="/">dialtone // earth</a>
           <div class="hud-title-row">
-            <h1>NETWORK // ${escapeHtml(snapshot.network).toUpperCase()}</h1>
-            <span>LIVE SNAPSHOT</span>
+            <h1>NETWORK // ${escapeHtml(networkName.toUpperCase())}</h1>
+            <span>SNAPSHOT</span>
           </div>
           <div class="network-summary" role="group" aria-label="Network summary">
-            <span><b>NDS</b> ${snapshot.node_count}</span>
-            <span><b>ONL</b> ${onlineCount}/${snapshot.node_count}</span>
-            <span><b>REL</b> ${escapeHtml(snapshot.latest_release)}</span>
+            <span><b>NDS</b> ${nodeCount}</span>
+            <span><b>ONL</b> ${online}</span>
+            <span><b>REL</b> ${escapeHtml(displayText(snapshot.latest_release))}</span>
           </div>
-          <div class="node-table" role="table" aria-label="Metal nodes">
+          <div class="node-table" role="table" aria-label="${escapeHtml(networkName)} nodes">
             <div class="node-row node-row-header" role="row">
               <span role="columnheader">NODE</span>
               <span role="columnheader">OS</span>
@@ -139,24 +185,30 @@ async function renderNetwork(slug: string): Promise<void> {
               <span role="columnheader">RELAY</span>
               <span role="columnheader">RTT</span>
             </div>
-            ${snapshot.nodes.map(renderNode).join("")}
+            ${nodes.map(renderNode).join("")}
           </div>
         </section>
         <section class="tour-cc-bar network-cc" aria-label="Globe controls and snapshot">
           <p class="cc-channel">
-            <span class="dim">CH:</span> ${escapeHtml(snapshot.network).toUpperCase()}
-            <span class="focus">ACTIVE ${onlineCount}/${snapshot.node_count}</span>
+            <span class="dim">CH:</span> ${escapeHtml(networkName.toUpperCase())}
+            <span class="focus">${active}</span>
           </p>
           <div class="cc-footer-line">
             <a href="/">[ ESC ] REGISTRY</a>
-            <span>DRAG TO ORBIT // SCROLL TO ZOOM</span>
-            <time datetime="${snapshot.generated_at}">SNAPSHOT ${formatDate(snapshot.generated_at).toUpperCase()}</time>
+            <span class="network-globe-help" role="status">DRAG TO ORBIT // SCROLL TO ZOOM</span>
+            <span class="network-snapshot-times">${dates}</span>
           </div>
         </section>
       `,
     );
-    const { mountGlobe } = await import("./globe");
-    await mountGlobe(stage, snapshot.nodes);
+    try {
+      const { mountGlobe } = await import("./globe");
+      await mountGlobe(stage, { nodes });
+    } catch {
+      stage.replaceChildren();
+      const help = app.querySelector(".network-globe-help");
+      if (help) help.textContent = "Globe unavailable.";
+    }
   } catch (error) {
     const shell = app.querySelector<HTMLElement>(".network-shell");
     if (shell) showNetworkError(shell, slug, error);
@@ -164,26 +216,32 @@ async function renderNetwork(slug: string): Promise<void> {
 }
 
 function renderNode(node: NetworkNode): string {
-  const rtt =
-    node.rtt_ms_from_grok_bot_metal === null
-      ? "origin"
-      : `${node.rtt_ms_from_grok_bot_metal.toFixed(1)} ms`;
+  const latency = node.rtt_ms_from_grok_bot_metal;
+  const rtt = latency === null ? "origin"
+    : typeof latency === "number" && Number.isFinite(latency) && latency >= 0
+      ? `${latency.toFixed(1)} ms` : "Unavailable";
+  const version = displayText(node.version, "");
+  const state = node.online === true ? "online" : node.online === false ? "offline" : "unknown";
   return `
     <div class="node-row" role="row">
       <span class="node-name" role="cell">
-        <i class="${node.online ? "online" : "offline"}" aria-hidden="true"></i>
-        ${escapeHtml(node.name)}
+        <i class="${state}" aria-hidden="true"></i>
+        ${escapeHtml(displayText(node.name))}
       </span>
-      <span class="dim" role="cell">${escapeHtml(node.os)}</span>
-      <span role="cell">v${escapeHtml(node.version)}</span>
-      <span class="dim" role="cell">${escapeHtml(node.relay_region)}</span>
+      <span class="dim" role="cell">${escapeHtml(displayText(node.os))}</span>
+      <span role="cell">${version ? `v${escapeHtml(version)}` : "Unavailable"}</span>
+      <span class="dim" role="cell">${escapeHtml(displayText(node.relay_region))}</span>
       <span role="cell">${rtt}</span>
     </div>
   `;
 }
 
+function displayText(value: unknown, fallback = "Unavailable"): string {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
 function renderNotFound(): void {
-  document.title = "not found — dialtone.earth";
+  document.title = "not found - dialtone.earth";
   app.innerHTML = `
     <main class="hud-shell error-page">
       <section class="terminal-overlay">
@@ -193,15 +251,6 @@ function renderNotFound(): void {
       </section>
     </main>
   `;
-}
-
-function showLoadError(container: HTMLElement, error: unknown): void {
-  const message = error instanceof Error ? error.message : "unknown error";
-  container.querySelector(".loading-row")?.remove();
-  container.insertAdjacentHTML(
-    "beforeend",
-    `<div class="error-row">REGISTRY UNAVAILABLE // ${escapeHtml(message)}</div>`,
-  );
 }
 
 function showNetworkError(
@@ -228,31 +277,10 @@ async function fetchJson<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-function formatDate(value: string): string {
-  return new Intl.DateTimeFormat("en", {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZoneName: "short",
-  }).format(new Date(value));
-}
-
-function formatRelativeTime(value: string): string {
-  const seconds = Math.round((new Date(value).getTime() - Date.now()) / 1000);
-  const formatter = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
-  const units: Array<[Intl.RelativeTimeFormatUnit, number]> = [
-    ["year", 31_536_000],
-    ["month", 2_592_000],
-    ["day", 86_400],
-    ["hour", 3_600],
-    ["minute", 60],
-  ];
-  const [unit, divisor] =
-    units.find(([, unitSeconds]) => Math.abs(seconds) >= unitSeconds) ??
-    (["second", 1] as const);
-  return formatter.format(Math.round(seconds / divisor), unit);
+function renderSnapshotTimes(times: SnapshotTime[]): string {
+  return times.map(({ label, dateTime, text }) =>
+    `<span>${escapeHtml(label)} <time datetime="${escapeHtml(dateTime)}">${escapeHtml(text)}</time></span>`,
+  ).join("");
 }
 
 function escapeHtml(value: string): string {
