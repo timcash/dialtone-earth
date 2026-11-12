@@ -315,6 +315,56 @@ test("the tour animates only when visible, in view, and motion is enabled", () =
   }
 });
 
+test("the main route places only network metrics over the full-height globe", async (t) => {
+  const metal = await readJson("metal.json");
+  const rows = [];
+  const provenance = { innerHTML: "" };
+  const elements = {
+    ".registry-list": { append: (row) => rows.push(row) },
+    ".registry-provenance": provenance,
+    ".globe-stage": {},
+  };
+  const app = {
+    innerHTML: "",
+    querySelector(selector) { return elements[selector] ?? {}; },
+  };
+  const createElement = () => ({
+    innerHTML: "",
+    cells: Array.from({ length: 6 }, () => ({ textContent: "" })),
+    querySelectorAll() { return this.cells; },
+  });
+  await renderRoute(t, "/", app, async (url) => {
+    switch (url) {
+      case "/networks/index.json": return Response.json({ networks: [
+        { slug: "metal", name: "metal", node_count: 5 },
+        { slug: "edge", name: "Edge", node_count: 1 },
+      ] });
+      case "/networks/metal.json": return Response.json(metal);
+      case "/networks/edge.json": return Response.json({ node_count: 1, nodes: [] });
+      default: throw new Error("Unexpected request");
+    }
+  }, createElement);
+
+  assert.match(app.innerHTML, /<main[^>]+class="hud-shell registry-page"[^>]*>\s*<div class="globe-stage registry-globe" aria-hidden="true"><\/div>/);
+  assert.match(app.innerHTML, /<section class="registry-overlay" tabindex="0" aria-label="Network resources">/);
+  assert.doesNotMatch(app.innerHTML, /<h[12]\b/);
+  assert.match(app.innerHTML, /<details[^>]*>[\s\S]*<summary>[^<]+<\/summary>[\s\S]*Schematic[\s\S]*registry-provenance[\s\S]*<\/details>/);
+  assert.equal(rows.length, 2);
+  assert.deepEqual([...rows[0].innerHTML.matchAll(/<dt>([^<]+)<\/dt>/g)].map(([, label]) => label),
+    ["Nodes", "CPU", "MEM", "DISK", "GPU MEM", "Load"]);
+  assert.match(rows[0].innerHTML, /href="\/n\/metal">metal<\/a>/);
+  assert.doesNotMatch(rows[0].innerHTML, /<time\b|snapshot-times/);
+  assert.match(rows[0].cells[1].textContent, /28 cores \(partial, 1\/5 nodes\)/);
+  assert.match(rows[1].innerHTML, /href="\/n\/edge">Edge<\/a>/);
+  assert.match(provenance.innerHTML, /Telemetry snapshot[\s\S]*Location snapshot/);
+
+  const css = await readFile(path.join(registryRoot, "src", "hud.css"), "utf8");
+  assert.match(css, /\.registry-page\s*\{[^}]*height:\s*100svh\b/);
+  assert.match(css, /\.registry-overlay\s*\{[^}]*overflow-y:\s*auto\b/);
+  assert.match(css, /\.tour-actions button\s*\{[^}]*min-height:\s*44px\b/);
+  assert.match(css, /\.registry-notes summary\s*\{[^}]*min-height:\s*44px\b/);
+});
+
 test("a sparse detail route preserves its escaped node table when WebGL fails", async (t) => {
   const snapshot = {
     network: 'Edge & "Lab" <test>',
@@ -337,32 +387,10 @@ test("a sparse detail route preserves its escaped node table when WebGL fails", 
       return { ".network-shell": shell, ".globe-stage": stage, ".network-globe-help": controls }[selector] ?? null;
     },
   };
-  Object.defineProperties(globalThis, {
-    document: { configurable: true, value: { querySelector: () => app } },
-    window: { configurable: true, value: { location: { pathname: "/n/edge" } } },
-  });
-  t.after(() => { delete globalThis.document; delete globalThis.window; });
-  t.mock.method(globalThis, "fetch", async (url) => {
+  await renderRoute(t, "/n/edge", app, async (url) => {
     assert.equal(url, "/networks/edge.json");
     return Response.json(snapshot);
   });
-
-  const hooks = registerHooks({
-    resolve(specifier, context, nextResolve) {
-      if (context.parentURL?.endsWith("/src/main.ts")) {
-        if (specifier === "./hud.css") return { url: "data:text/javascript,", shortCircuit: true };
-        if (specifier === "./globe") {
-          const module = 'export function mountGlobe() { throw new Error("No WebGL"); }';
-          return { url: "data:text/javascript," + encodeURIComponent(module), shortCircuit: true };
-        }
-        if (specifier === "./overview") return nextResolve("./overview.ts", context);
-      }
-      return nextResolve(specifier, context);
-    },
-  });
-  t.after(() => hooks.deregister());
-  await import("../src/main.ts");
-  await setImmediate();
 
   assert.match(shell.innerHTML, /aria-label="Edge &amp; &quot;Lab&quot; &lt;test&gt; nodes"/);
   const rows = [...shell.innerHTML.matchAll(/class="node-row" role="row">([\s\S]*?)<\/div>/g)];
@@ -375,6 +403,32 @@ test("a sparse detail route preserves its escaped node table when WebGL fails", 
   assert.doesNotMatch(shell.innerHTML, /SNAPSHOT UNAVAILABLE|<svg>|Invalid Date/);
   assert.equal(controls.textContent, "Globe unavailable.");
 });
+
+async function renderRoute(t, pathname, app, fetcher, createElement) {
+  Object.defineProperties(globalThis, {
+    document: { configurable: true, value: { querySelector: () => app, createElement } },
+    window: { configurable: true, value: { location: { pathname } } },
+  });
+  t.after(() => { delete globalThis.document; delete globalThis.window; });
+  t.mock.method(globalThis, "fetch", fetcher);
+
+  const hooks = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (context.parentURL?.split("?")[0].endsWith("/src/main.ts")) {
+        if (specifier === "./hud.css") return { url: "data:text/javascript,", shortCircuit: true };
+        if (specifier === "./globe") {
+          const module = 'export function mountGlobe() { throw new Error("No WebGL"); }';
+          return { url: "data:text/javascript," + encodeURIComponent(module), shortCircuit: true };
+        }
+        if (specifier === "./overview") return nextResolve("./overview.ts", context);
+      }
+      return nextResolve(specifier, context);
+    },
+  });
+  t.after(() => hooks.deregister());
+  await import(`../src/main.ts?route=${encodeURIComponent(pathname)}`);
+  await setImmediate();
+}
 
 function assertHasFields(value, fields, label) {
   assert.equal(typeof value, "object", `${label} must be an object`);
