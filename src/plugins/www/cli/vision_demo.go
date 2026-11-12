@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"dialtone/dev/browser"
+	chrome "dialtone/dev/plugins/chrome/src_v1/go"
 
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
@@ -25,7 +25,7 @@ func handleVisionDemo(webDir string) {
 
 	// 1. Port cleanup
 	logInfo("Cleaning up port 5173...")
-	_ = browser.CleanupPort(5173)
+	_ = chrome.CleanupPort(5173)
 	time.Sleep(1500 * time.Millisecond)
 
 	// 2. Kill existing Dialtone Chrome instances

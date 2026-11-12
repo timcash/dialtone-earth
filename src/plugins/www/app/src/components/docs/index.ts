@@ -141,8 +141,7 @@ export function mountDocs(container: HTMLElement) {
       <pre class="docs-bash"><code>./dialtone.sh www dev
 ./dialtone.sh www build
 ./dialtone.sh www publish
-./dialtone.sh www validate
-./dialtone.sh www logs &lt;url&gt;
+git push origin main  # registry deploys via GitHub Actions
 ./dialtone.sh www radio demo</code></pre>
     </div>
   `;
@@ -151,8 +150,8 @@ export function mountDocs(container: HTMLElement) {
     "[data-typing-subtitle]"
   ) as HTMLParagraphElement | null;
   const subtitles = [
-    "Develop locally, build, and deploy with the CLI.",
-    "Validate changes and inspect deployments.",
+    "Develop locally and deploy the registry to Cloudflare Workers.",
+    "Push registry changes to main for automatic deployment.",
     "Automate docs and workflows for teams.",
   ];
   const stopTyping = startTyping(subtitleEl, subtitles);

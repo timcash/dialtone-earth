@@ -35,8 +35,13 @@ Demos orchestrate a local dev server and a Chrome instance locked to a specific 
 ```powershell
 .\dialtone.ps1 www dev      # Start dev server
 .\dialtone.ps1 www build    # Production build
-.\dialtone.ps1 www publish  # Deploy to Vercel (Production)
+.\dialtone.ps1 www publish  # Test, build, and deploy the registry Worker
 ```
+
+The live `dialtone.earth` site is the standalone app in `registry/`. Pushes to
+`main` that touch `registry/**` automatically test, build, and deploy the
+`dialtone-earth` Cloudflare Worker through
+`.github/workflows/deploy-registry.yml`.
 
 ### 2. Architecture & Components
 
@@ -89,11 +94,17 @@ cd src/plugins/www/app
 node scripts/build_land_h3.cjs 3
 ```
 
-## Vercel Config
-```shell
-VERCEL_PROJECT_ID=prj_vynjSZFIhD8TlR8oOyuXTKjFUQxM
-VERCEL_ORG_ID=team_4tzswM6M6PoDxaszH2ZHs5J7
-```
+## Cloudflare Workers deployment
+
+The GitHub repository must define these Actions secrets:
+
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID`
+
+For a manual deployment from the repository root, export the same variables
+and run `./dialtone.sh www publish`. The command installs the locked registry
+dependencies, runs its tests and build, then runs `pnpm exec wrangler deploy`
+from `registry/`.
 
 # Log
 
