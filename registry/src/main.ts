@@ -157,7 +157,7 @@ async function renderNetwork(slug: string): Promise<void> {
           <div class="cc-footer-line">
             <a href="/">[ ESC ] REGISTRY</a>
             <span>DRAG TO ORBIT // SCROLL TO ZOOM</span>
-            <time datetime="${snapshot.generated_at}">SNAPSHOT ${formatDate(snapshot.generated_at).toUpperCase()}</time>
+            <span class="network-snapshot-times">${renderSnapshotTimes(snapshot)}</span>
           </div>
         </section>
       `,
@@ -228,11 +228,33 @@ function showNetworkError(
 }
 
 async function fetchJson<T>(path: string): Promise<T> {
-  const response = await fetch(path);
+  const response = await fetch(path, {
+    signal: AbortSignal.timeout(10_000),
+  });
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
   }
   return (await response.json()) as T;
+}
+
+function renderSnapshotTimes(snapshot: NetworkSnapshot): string {
+  const times = [
+    snapshot.telemetry_generated_at
+      ? ["TELEMETRY", snapshot.telemetry_generated_at]
+      : null,
+    snapshot.coordinates_generated_at
+      ? ["LOCATION", snapshot.coordinates_generated_at]
+      : ["SNAPSHOT", snapshot.generated_at],
+  ].filter(
+    (value): value is [string, string] => value !== null,
+  );
+  return times
+    .filter(([, value]) => Number.isFinite(Date.parse(value)))
+    .map(
+      ([label, value]) =>
+        `<span>${label} <time datetime="${escapeHtml(value)}">${formatDate(value).toUpperCase()}</time></span>`,
+    )
+    .join("");
 }
 
 function formatDate(value: string): string {

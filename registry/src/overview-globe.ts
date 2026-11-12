@@ -61,7 +61,9 @@ export async function mountOverviewGlobe(
 
 async function loadLandCells(): Promise<string[]> {
   try {
-    const response = await fetch("/land.h3.json");
+    const response = await fetch("/land.h3.json", {
+      signal: AbortSignal.timeout(10_000),
+    });
     if (response.ok) {
       const payload = (await response.json()) as LandPayload | string[];
       const cells = Array.isArray(payload) ? payload : payload.cells;

@@ -25,6 +25,14 @@ export type NodeStats = {
   load_avg_1m: number | null;
 };
 
+export type NodeResources = {
+  cpu_logical_cores?: number | null;
+  mem_bytes?: number | null;
+  disk_bytes?: number | null;
+  gpu_mem_bytes?: number | null;
+  load_1m?: number | null;
+};
+
 export type NetworkNode = {
   name: string;
   os: string;
@@ -38,11 +46,15 @@ export type NetworkNode = {
   rtt_ms?: number | null;
   rtt_ms_from_grok_bot_metal?: number | null;
   stats: NodeStats;
+  resources?: NodeResources;
 };
 
 export type NetworkSnapshot = {
   network: string;
   generated_at: string;
+  coordinates_generated_at?: string;
+  telemetry_generated_at?: string;
+  telemetry_source?: string;
   latest_release: string;
   node_count: number;
   nodes: NetworkNode[];

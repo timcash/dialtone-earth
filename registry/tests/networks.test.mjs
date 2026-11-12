@@ -5,6 +5,16 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { aggregateNetwork } from "../src/aggregates.ts";
+import {
+  createGlobePlan,
+  snapshotTimes,
+  summarizeNetwork,
+} from "../src/overview.ts";
+import {
+  sampleTour,
+  shouldAnimateTour,
+  TOUR_STOP_MS,
+} from "../src/tour.ts";
 
 const registryRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -166,6 +176,71 @@ test("network aggregates use only reported capacity or percentage values", async
     gpuMemory: "3/12 GB",
     load: "1 avg",
   });
+});
+
+test("preserves main snapshot provenance and whitelisted resources", async () => {
+  const metal = await readJson("metal.json");
+  assert.deepEqual(snapshotTimes(metal), [
+    {
+      label: "Telemetry snapshot",
+      dateTime: "2026-11-12T18:00:00.0088759Z",
+      text: "12 Nov 2026, 18:00:00 UTC",
+    },
+    {
+      label: "Location snapshot",
+      dateTime: "2026-11-12T01:50:34Z",
+      text: "12 Nov 2026, 01:50:34 UTC",
+    },
+  ]);
+  assert.deepEqual(
+    metal.nodes.find((node) => node.name === "legion").resources,
+    {
+      cpu_logical_cores: 28,
+      mem_bytes: 34059010048,
+      disk_bytes: 1021821579264,
+    },
+  );
+});
+
+test("main overview and tour helpers still plan generic network loops", () => {
+  const west = summarizeNetwork(
+    { slug: "west", name: "West", node_count: 2 },
+    {
+      node_count: 2,
+      nodes: [
+        { name: "one", lat: 0, lng: 0 },
+        { name: "two", lat: 10, lng: 20 },
+      ],
+    },
+  );
+  const plan = createGlobePlan([west]);
+  assert.deepEqual(
+    plan.stops.map(({ network, node }) => [network, node]),
+    [
+      ["West", null],
+      ["West", "one"],
+      ["West", "two"],
+    ],
+  );
+  assert.deepEqual(sampleTour(0, 3), {
+    from: 0,
+    to: 1,
+    progress: 0,
+  });
+  assert.deepEqual(
+    sampleTour(TOUR_STOP_MS * 3, 3),
+    sampleTour(0, 3),
+  );
+  assert.equal(
+    shouldAnimateTour({
+      hidden: false,
+      inView: true,
+      reducedMotion: false,
+      paused: false,
+      stopCount: 3,
+    }),
+    true,
+  );
 });
 
 test("public network data contains no private addressing or identifiers", async () => {
