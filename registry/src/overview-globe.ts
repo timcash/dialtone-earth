@@ -2,14 +2,20 @@ import { latLngToCell } from "h3-js";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { HexLayer } from "./hex-layer";
+import {
+  createHudAtmosphereMaterial,
+  createHudCloudMaterial,
+  createHudOutlineMaterial,
+} from "./hud-globe-materials";
 import type { NetworkNode, OverviewNetwork } from "./types";
 
 const EARTH_RADIUS = 50;
 const DEG_TO_RAD = Math.PI / 180;
-const NETWORK_DISTANCE = 205;
-const NODE_DISTANCE = 160;
-const TRANSITION_MS = 2_700;
-const DWELL_MS = 1_900;
+const HUD_GLOBE_DISTANCE = EARTH_RADIUS * (9.2 / 2.8);
+const NETWORK_DISTANCE = HUD_GLOBE_DISTANCE;
+const NODE_DISTANCE = HUD_GLOBE_DISTANCE;
+const TRANSITION_MS = 1_800;
+const DWELL_MS = 2_600;
 const RESUME_DELAY_MS = 5_000;
 
 type LandPayload = {
@@ -19,15 +25,15 @@ type LandPayload = {
 type TourStop = {
   networkIndex: number;
   nodeIndex: number | null;
-  direction: THREE.Vector3;
+  rotation: THREE.Quaternion;
   distance: number;
 };
 
 type MarkerVisual = {
   networkIndex: number;
   nodeIndex: number;
-  mesh: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
-  ring: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>;
+  mesh: THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>;
+  ring: THREE.LineLoop<THREE.BufferGeometry, THREE.LineBasicMaterial>;
   baseColor: THREE.Color;
   active: boolean;
 };
@@ -76,10 +82,11 @@ async function loadLandCells(): Promise<string[]> {
 
 class OverviewGlobe {
   private readonly scene = new THREE.Scene();
-  private readonly camera = new THREE.PerspectiveCamera(34, 1, 0.1, 2000);
+  private readonly camera = new THREE.PerspectiveCamera(34, 1, 0.05, 1000);
   private readonly renderer = new THREE.WebGLRenderer({
     antialias: true,
     alpha: true,
+    powerPreference: "high-performance",
   });
   private readonly controls: OrbitControls;
   private readonly globe = new THREE.Group();
@@ -88,6 +95,8 @@ class OverviewGlobe {
   private readonly arcs: ArcVisual[] = [];
   private readonly stops: TourStop[] = [];
   private readonly resizeObserver: ResizeObserver;
+  private limbMaterial!: THREE.ShaderMaterial;
+  private cloudMaterial!: THREE.ShaderMaterial;
   private readonly reducedMotion = window.matchMedia(
     "(prefers-reduced-motion: reduce)",
   ).matches;
@@ -99,6 +108,7 @@ class OverviewGlobe {
   private phaseStarted = performance.now();
   private transitionFromDirection = new THREE.Vector3(0, 0, 1);
   private transitionFromDistance = NETWORK_DISTANCE;
+  private transitionFromGlobeRotation = new THREE.Quaternion();
   private interrupted = false;
   private resumeAt = Number.POSITIVE_INFINITY;
 
@@ -139,9 +149,8 @@ class OverviewGlobe {
 
     if (this.stops.length > 0) {
       const first = this.stops[0];
-      this.camera.position
-        .copy(first.direction)
-        .multiplyScalar(first.distance);
+      this.camera.position.set(0, 0, first.distance);
+      this.globe.quaternion.copy(first.rotation);
       this.applyFocus(first);
     } else {
       this.camera.position.set(0, 0, NETWORK_DISTANCE);
@@ -184,8 +193,13 @@ class OverviewGlobe {
   }
 
   private addEarth(): void {
+    const sphereGeometry = new THREE.SphereGeometry(
+      EARTH_RADIUS,
+      48,
+      36,
+    );
     const earth = new THREE.Mesh(
-      new THREE.SphereGeometry(EARTH_RADIUS, 48, 36),
+      sphereGeometry,
       new THREE.MeshBasicMaterial({
         colorWrite: false,
         polygonOffset: true,
@@ -195,45 +209,31 @@ class OverviewGlobe {
     );
     this.globe.add(earth);
 
+    this.limbMaterial = createHudOutlineMaterial(1.6);
+    const limb = new THREE.Mesh(sphereGeometry, this.limbMaterial);
+    limb.scale.setScalar(1.002);
+    this.globe.add(limb);
+
     const graticule = new THREE.LineSegments(
       createGraticuleGeometry(EARTH_RADIUS * 1.002),
       new THREE.LineBasicMaterial({
         color: 0x474747,
         transparent: true,
-        opacity: 0.4,
+        opacity: 0.42,
       }),
     );
     this.globe.add(graticule);
 
+    this.cloudMaterial = createHudCloudMaterial();
+    const clouds = new THREE.Mesh(
+      new THREE.SphereGeometry(EARTH_RADIUS * 1.028, 40, 28),
+      this.cloudMaterial,
+    );
+    this.globe.add(clouds);
+
     const atmosphere = new THREE.Mesh(
-      new THREE.SphereGeometry(EARTH_RADIUS * 1.055, 48, 36),
-      new THREE.ShaderMaterial({
-        transparent: true,
-        side: THREE.BackSide,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        vertexShader: `
-          varying vec3 vNormal;
-          varying vec3 vWorldPosition;
-          void main() {
-            vNormal = normalize(mat3(modelMatrix) * normal);
-            vec4 worldPosition = modelMatrix * vec4(position, 1.0);
-            vWorldPosition = worldPosition.xyz;
-            gl_Position = projectionMatrix * viewMatrix * worldPosition;
-          }
-        `,
-        fragmentShader: `
-          varying vec3 vNormal;
-          varying vec3 vWorldPosition;
-          void main() {
-            vec3 viewDirection = normalize(cameraPosition - vWorldPosition);
-            float rim = 1.0 - abs(dot(normalize(vNormal), viewDirection));
-            float glow = pow(clamp(rim, 0.0, 1.0), 2.9) * 0.22;
-            if (glow < 0.01) discard;
-            gl_FragColor = vec4(vec3(0.62), glow);
-          }
-        `,
-      }),
+      new THREE.SphereGeometry(EARTH_RADIUS * 1.055, 40, 28),
+      createHudAtmosphereMaterial(),
     );
     this.globe.add(atmosphere);
   }
@@ -244,7 +244,7 @@ class OverviewGlobe {
   ): void {
     const style = networkStyle(networkIndex);
     network.snapshot.nodes.forEach((node, nodeIndex) => {
-      this.addNode(node, networkIndex, nodeIndex, style.color);
+      this.addNode(node, networkIndex, nodeIndex, style.nodeColor);
     });
 
     const nodes = network.snapshot.nodes;
@@ -268,12 +268,12 @@ class OverviewGlobe {
       const material =
         style.dashSize === null
           ? new THREE.LineBasicMaterial({
-              color: style.color,
+              color: style.arcColor,
               transparent: true,
               opacity: style.opacity,
             })
           : new THREE.LineDashedMaterial({
-              color: style.color,
+              color: style.arcColor,
               transparent: true,
               opacity: style.opacity,
               dashSize: style.dashSize,
@@ -302,38 +302,42 @@ class OverviewGlobe {
     const direction = latLngToVector(node.lat, node.lng, 1);
     const position = direction
       .clone()
-      .multiplyScalar(EARTH_RADIUS * 1.026);
+      .multiplyScalar(EARTH_RADIUS * 1.012);
     const material = new THREE.MeshBasicMaterial({
       color,
       transparent: true,
       opacity: node.online ? 1 : 0.45,
+      side: THREE.DoubleSide,
     });
     const mesh = new THREE.Mesh(
-      new THREE.SphereGeometry(0.62, 14, 14),
+      new THREE.CircleGeometry(EARTH_RADIUS * (0.1 / 2.8), 28),
       material,
     );
     mesh.position.copy(position);
+    mesh.quaternion.setFromUnitVectors(
+      new THREE.Vector3(0, 0, 1),
+      direction,
+    );
     mesh.renderOrder = 5;
 
-    const ringMaterial = new THREE.MeshBasicMaterial({
+    const ringMaterial = new THREE.LineBasicMaterial({
       color: 0xffffff,
       transparent: true,
-      opacity: 0,
-      side: THREE.DoubleSide,
-      depthWrite: false,
+      opacity: 0.35,
     });
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(0.88, 1.08, 32),
+    const ring = new THREE.LineLoop(
+      new THREE.BufferGeometry().setFromPoints(
+        circlePoints(EARTH_RADIUS * (0.28 / 2.8), 48),
+      ),
       ringMaterial,
     );
     ring.position.copy(
-      direction.clone().multiplyScalar(EARTH_RADIUS * 1.029),
+      direction.clone().multiplyScalar(EARTH_RADIUS * 1.013),
     );
     ring.quaternion.setFromUnitVectors(
       new THREE.Vector3(0, 0, 1),
       direction,
     );
-    ring.visible = false;
     ring.renderOrder = 6;
 
     this.markers.push({
@@ -361,17 +365,18 @@ class OverviewGlobe {
       this.stops.push({
         networkIndex,
         nodeIndex: null,
-        direction:
+        rotation: targetQuaternionForDirection(
           networkDirection.lengthSq() > 0
             ? networkDirection
             : new THREE.Vector3(0, 0, 1),
+        ),
         distance: NETWORK_DISTANCE,
       });
       directions.forEach((direction, nodeIndex) => {
         this.stops.push({
           networkIndex,
           nodeIndex,
-          direction,
+          rotation: targetQuaternionForDirection(direction),
           distance: NODE_DISTANCE,
         });
       });
@@ -394,7 +399,6 @@ class OverviewGlobe {
       marker.active =
         marker.networkIndex === stop.networkIndex &&
         marker.nodeIndex === stop.nodeIndex;
-      marker.ring.visible = marker.active;
       marker.mesh.material.color.copy(
         marker.active ? new THREE.Color(0xffffff) : marker.baseColor,
       );
@@ -402,8 +406,8 @@ class OverviewGlobe {
     this.arcs.forEach((arc) => {
       arc.material.opacity =
         arc.networkIndex === stop.networkIndex
-          ? Math.min(0.9, arc.baseOpacity + 0.24)
-          : Math.max(0.12, arc.baseOpacity * 0.38);
+          ? 0.65
+          : Math.max(0.12, arc.baseOpacity * 0.5);
     });
   }
 
@@ -414,6 +418,7 @@ class OverviewGlobe {
       .copy(this.camera.position)
       .normalize();
     this.transitionFromDistance = this.camera.position.length();
+    this.transitionFromGlobeRotation.copy(this.globe.quaternion);
     this.phase = "transition";
     this.phaseStarted = now;
     this.applyFocus(this.stops[this.targetStopIndex]);
@@ -445,13 +450,13 @@ class OverviewGlobe {
     );
     const eased = easeInOutCubic(progress);
     const target = this.stops[this.targetStopIndex];
-    const rotation = new THREE.Quaternion().setFromUnitVectors(
+    const cameraRotation = new THREE.Quaternion().setFromUnitVectors(
       this.transitionFromDirection,
-      target.direction,
+      new THREE.Vector3(0, 0, 1),
     );
     const partial = new THREE.Quaternion().slerpQuaternions(
       new THREE.Quaternion(),
-      rotation,
+      cameraRotation,
       eased,
     );
     const direction = this.transitionFromDirection
@@ -465,6 +470,11 @@ class OverviewGlobe {
     );
     this.camera.position.copy(direction).multiplyScalar(distance);
     this.camera.lookAt(0, 0, 0);
+    this.globe.quaternion.slerpQuaternions(
+      this.transitionFromGlobeRotation,
+      target.rotation,
+      eased,
+    );
 
     if (progress >= 1) {
       this.currentStopIndex = this.targetStopIndex;
@@ -494,21 +504,26 @@ class OverviewGlobe {
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height, false);
+    this.limbMaterial.uniforms.uResolution.value.set(width, height);
   }
 
   private animate = (): void => {
     this.frameId = requestAnimationFrame(this.animate);
     const now = performance.now();
     this.updateTour(now);
-    const pulse = 1.9 + Math.sin(now * 0.006) * 0.22;
+    this.cloudMaterial.uniforms.uTime.value = now / 1000;
+    const pulse = 1.3 + Math.sin(now * 0.006) * 0.04;
     this.markers.forEach((marker) => {
       marker.mesh.scale.setScalar(marker.active ? pulse : 1);
-      if (marker.active) {
-        marker.ring.scale.setScalar(
-          this.reducedMotion ? 1.4 : 1.35 + Math.sin(now * 0.004) * 0.2,
-        );
-        marker.ring.material.opacity = 0.82;
-      }
+      const progress = this.reducedMotion
+        ? 0.5
+        : (now * 0.00055 + marker.nodeIndex * 0.33) % 1;
+      const scale = marker.active
+        ? 0.75 + progress * 0.65
+        : 0.75 + progress * 0.4;
+      marker.ring.scale.setScalar(scale);
+      marker.ring.material.opacity =
+        (1 - progress) * (marker.active ? 0.75 : 0.35);
     });
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
@@ -516,16 +531,41 @@ class OverviewGlobe {
 }
 
 function networkStyle(index: number): {
-  color: number;
+  nodeColor: number;
+  arcColor: number;
   opacity: number;
   dashSize: number | null;
   gapSize: number;
 } {
   const styles = [
-    { color: 0xdedede, opacity: 0.58, dashSize: null, gapSize: 0 },
-    { color: 0xb5b5b5, opacity: 0.62, dashSize: 2.2, gapSize: 1.1 },
-    { color: 0x8c8c8c, opacity: 0.7, dashSize: 0.9, gapSize: 0.8 },
-    { color: 0xf2f2f2, opacity: 0.5, dashSize: 3.4, gapSize: 1.6 },
+    {
+      nodeColor: 0xececec,
+      arcColor: 0x474747,
+      opacity: 0.32,
+      dashSize: null,
+      gapSize: 0,
+    },
+    {
+      nodeColor: 0x9c9c9c,
+      arcColor: 0x9c9c9c,
+      opacity: 0.38,
+      dashSize: 2.2,
+      gapSize: 1.1,
+    },
+    {
+      nodeColor: 0xa6a6a6,
+      arcColor: 0x474747,
+      opacity: 0.42,
+      dashSize: 0.9,
+      gapSize: 0.8,
+    },
+    {
+      nodeColor: 0xf5f5f5,
+      arcColor: 0x9c9c9c,
+      opacity: 0.3,
+      dashSize: 3.4,
+      gapSize: 1.6,
+    },
   ];
   return styles[index % styles.length];
 }
@@ -541,7 +581,7 @@ function greatCirclePoints(
   );
   const sinAngle = Math.sin(angle);
   const points: THREE.Vector3[] = [];
-  const segments = 56;
+  const segments = 48;
 
   for (let index = 0; index <= segments; index += 1) {
     const progress = index / segments;
@@ -557,10 +597,13 @@ function greatCirclePoints(
         .add(end.clone().multiplyScalar(right))
         .normalize();
     }
+    const baseRadius = EARTH_RADIUS * 1.012;
     const lift =
-      Math.sin(Math.PI * progress) * (3.8 + angle * 2.4);
+      Math.sin(Math.PI * progress) *
+      (EARTH_RADIUS / 2.8) *
+      Math.min(0.45, 0.09 + angle * 0.24);
     points.push(
-      direction.multiplyScalar(EARTH_RADIUS * 1.026 + lift),
+      direction.multiplyScalar(baseRadius + lift),
     );
   }
   return points;
@@ -578,6 +621,23 @@ function latLngToVector(
     Math.sin(latRad),
     Math.cos(latRad) * Math.sin(lngRad),
   ).multiplyScalar(radius);
+}
+
+// Ported from the HUD's north-up overhead geospatial orientation.
+function targetQuaternionForDirection(
+  siteDirection: THREE.Vector3,
+): THREE.Quaternion {
+  const siteNormal = siteDirection.clone().normalize();
+  let east = new THREE.Vector3(0, 1, 0).cross(siteNormal);
+  if (east.lengthSq() < 0.0001) {
+    east = new THREE.Vector3(1, 0, 0);
+  }
+  east.normalize();
+  const north = siteNormal.clone().cross(east).normalize();
+  const basis = new THREE.Matrix4()
+    .makeBasis(east, north, siteNormal)
+    .invert();
+  return new THREE.Quaternion().setFromRotationMatrix(basis);
 }
 
 function createGraticuleGeometry(radius: number): THREE.BufferGeometry {
@@ -602,6 +662,21 @@ function createGraticuleGeometry(radius: number): THREE.BufferGeometry {
     new THREE.Float32BufferAttribute(positions, 3),
   );
   return geometry;
+}
+
+function circlePoints(radius: number, segments: number): THREE.Vector3[] {
+  const points: THREE.Vector3[] = [];
+  for (let index = 0; index < segments; index += 1) {
+    const angle = (index / segments) * Math.PI * 2;
+    points.push(
+      new THREE.Vector3(
+        Math.cos(angle) * radius,
+        Math.sin(angle) * radius,
+        0,
+      ),
+    );
+  }
+  return points;
 }
 
 function easeInOutCubic(value: number): number {

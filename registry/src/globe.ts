@@ -2,6 +2,11 @@ import { cellToBoundary, latLngToCell } from "h3-js";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { HexLayer } from "./hex-layer";
+import {
+  createHudAtmosphereMaterial,
+  createHudCloudMaterial,
+  createHudOutlineMaterial,
+} from "./hud-globe-materials";
 import type { NetworkNode } from "./types";
 
 const EARTH_RADIUS = 50;
@@ -43,10 +48,11 @@ async function loadLandCells(): Promise<string[]> {
 
 class RegistryGlobe {
   private readonly scene = new THREE.Scene();
-  private readonly camera = new THREE.PerspectiveCamera(34, 1, 0.1, 2000);
+  private readonly camera = new THREE.PerspectiveCamera(34, 1, 0.05, 1000);
   private readonly renderer = new THREE.WebGLRenderer({
     antialias: true,
     alpha: true,
+    powerPreference: "high-performance",
   });
   private readonly controls: OrbitControls;
   private readonly globe = new THREE.Group();
@@ -54,6 +60,8 @@ class RegistryGlobe {
   private readonly markerPulses: THREE.Mesh[] = [];
   private readonly resizeObserver: ResizeObserver;
   private readonly startTime = performance.now();
+  private limbMaterial!: THREE.ShaderMaterial;
+  private cloudMaterial!: THREE.ShaderMaterial;
   private frameId = 0;
 
   constructor(
@@ -70,7 +78,7 @@ class RegistryGlobe {
     );
     container.appendChild(this.renderer.domElement);
 
-    this.camera.position.set(0, 0, 185);
+    this.camera.position.set(0, 0, EARTH_RADIUS * (9.2 / 2.8));
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.055;
@@ -122,8 +130,13 @@ class RegistryGlobe {
   }
 
   private addEarth(): void {
+    const sphereGeometry = new THREE.SphereGeometry(
+      EARTH_RADIUS,
+      48,
+      36,
+    );
     const earth = new THREE.Mesh(
-      new THREE.SphereGeometry(EARTH_RADIUS, 48, 36),
+      sphereGeometry,
       new THREE.MeshBasicMaterial({
         colorWrite: false,
         polygonOffset: true,
@@ -132,6 +145,11 @@ class RegistryGlobe {
       }),
     );
     this.globe.add(earth);
+
+    this.limbMaterial = createHudOutlineMaterial(1.6);
+    const limb = new THREE.Mesh(sphereGeometry, this.limbMaterial);
+    limb.scale.setScalar(1.002);
+    this.globe.add(limb);
 
     const graticule = new THREE.LineSegments(
       createGraticuleGeometry(EARTH_RADIUS * 1.002),
@@ -143,35 +161,16 @@ class RegistryGlobe {
     );
     this.globe.add(graticule);
 
+    this.cloudMaterial = createHudCloudMaterial();
+    const clouds = new THREE.Mesh(
+      new THREE.SphereGeometry(EARTH_RADIUS * 1.028, 40, 28),
+      this.cloudMaterial,
+    );
+    this.globe.add(clouds);
+
     const atmosphere = new THREE.Mesh(
-      new THREE.SphereGeometry(EARTH_RADIUS * 1.055, 48, 36),
-      new THREE.ShaderMaterial({
-        transparent: true,
-        side: THREE.BackSide,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        vertexShader: `
-          varying vec3 vNormal;
-          varying vec3 vWorldPosition;
-          void main() {
-            vNormal = normalize(mat3(modelMatrix) * normal);
-            vec4 worldPosition = modelMatrix * vec4(position, 1.0);
-            vWorldPosition = worldPosition.xyz;
-            gl_Position = projectionMatrix * viewMatrix * worldPosition;
-          }
-        `,
-        fragmentShader: `
-          varying vec3 vNormal;
-          varying vec3 vWorldPosition;
-          void main() {
-            vec3 viewDirection = normalize(cameraPosition - vWorldPosition);
-            float rim = 1.0 - abs(dot(normalize(vNormal), viewDirection));
-            float glow = pow(clamp(rim, 0.0, 1.0), 2.9) * 0.22;
-            if (glow < 0.01) discard;
-            gl_FragColor = vec4(vec3(0.62), glow);
-          }
-        `,
-      }),
+      new THREE.SphereGeometry(EARTH_RADIUS * 1.055, 40, 28),
+      createHudAtmosphereMaterial(),
     );
     this.globe.add(atmosphere);
   }
@@ -247,12 +246,14 @@ class RegistryGlobe {
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height, false);
+    this.limbMaterial.uniforms.uResolution.value.set(width, height);
     this.positionGlobe();
   }
 
   private animate = (): void => {
     this.frameId = requestAnimationFrame(this.animate);
     const elapsed = (performance.now() - this.startTime) / 1000;
+    this.cloudMaterial.uniforms.uTime.value = elapsed;
     this.markerPulses.forEach((pulse) => {
       const wave = (elapsed * 0.7 + Number(pulse.userData.phase)) % 1;
       pulse.scale.setScalar(1 + wave * 1.8);
