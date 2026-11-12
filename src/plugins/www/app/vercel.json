@@ -1,9 +1,0 @@
-{
-  "git": {
-    "ignoreBuildStep": "git diff --quiet HEAD^ HEAD ./src/plugins/www/app"
-  },
-  "rewrites": [
-    { "source": "/about", "destination": "/src/pages/about.html" },
-    { "source": "/docs", "destination": "/src/pages/docs.html" }
-  ]
-}
