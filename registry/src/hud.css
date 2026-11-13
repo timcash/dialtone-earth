@@ -13,6 +13,10 @@
   --blue: #1366d6;
   --panel-bg: rgba(245, 245, 245, 0.9);
   --menu-bg: rgba(235, 235, 235, 0.94);
+  --load-low: #36d66b;
+  --load-medium: #f1c84b;
+  --load-high: #ef4136;
+  --load-unavailable: #9c9c9c;
   --sans: "Saira Variable", "Titillium Web", "Segoe UI", Arial, sans-serif;
   --mono: "B612 Mono", "JetBrains Mono", ui-monospace, "SF Mono", Menlo,
     Consolas, monospace;
@@ -207,6 +211,56 @@ a {
   width: min(100%, 1040px);
   border: none;
   background: transparent;
+}
+
+.node-load-legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  width: min(100%, 1040px);
+  margin-top: 4px;
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: clamp(10.5px, 0.92vw, 12.5px);
+  line-height: 1.38;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.node-load-legend-title {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.node-load-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.node-load-legend i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--load-unavailable);
+  box-shadow: 0 0 5px color-mix(in srgb, currentColor 55%, transparent);
+}
+
+.node-load-legend .load-low {
+  background: var(--load-low);
+}
+
+.node-load-legend .load-medium {
+  background: var(--load-medium);
+}
+
+.node-load-legend .load-high {
+  background: var(--load-high);
+}
+
+.node-load-legend .load-unavailable {
+  background: var(--load-unavailable);
 }
 
 .overview-row {

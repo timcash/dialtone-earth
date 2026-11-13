@@ -47,6 +47,17 @@ async function renderRegistry(): Promise<void> {
           </div>
           <div class="loading-row" role="status">LOADING NETWORKS...</div>
         </div>
+        <div
+          class="node-load-legend"
+          role="img"
+          aria-label="Node color uses the higher of CPU and RAM utilization: green low, yellow medium, red high, gray unavailable"
+        >
+          <span class="node-load-legend-title">NODE LOAD · MAX(CPU, RAM)</span>
+          <span><i class="load-low"></i>LOW</span>
+          <span><i class="load-medium"></i>MEDIUM</span>
+          <span><i class="load-high"></i>HIGH</span>
+          <span><i class="load-unavailable"></i>N/A</span>
+        </div>
       </section>
     </main>
   `;

@@ -7,6 +7,10 @@ import {
   createHudCloudMaterial,
   createHudOutlineMaterial,
 } from "./hud-globe-materials";
+import {
+  NODE_DOT_RADIUS_RATIO,
+  nodeLoadColor,
+} from "./node-load";
 import type { NetworkNode, OverviewNetwork } from "./types";
 
 const EARTH_RADIUS = 50;
@@ -17,6 +21,8 @@ const NODE_DISTANCE = HUD_GLOBE_DISTANCE;
 const TRANSITION_MS = 1_800;
 const DWELL_MS = 2_600;
 const RESUME_DELAY_MS = 5_000;
+const NODE_DOT_RADIUS = EARTH_RADIUS * NODE_DOT_RADIUS_RATIO;
+const NODE_RING_RADIUS = EARTH_RADIUS * (0.1 / 2.8);
 
 type LandPayload = {
   cells: string[];
@@ -246,7 +252,7 @@ class OverviewGlobe {
   ): void {
     const style = networkStyle(networkIndex);
     network.snapshot.nodes.forEach((node, nodeIndex) => {
-      this.addNode(node, networkIndex, nodeIndex, style.nodeColor);
+      this.addNode(node, networkIndex, nodeIndex);
     });
 
     const nodes = network.snapshot.nodes;
@@ -299,8 +305,8 @@ class OverviewGlobe {
     node: NetworkNode,
     networkIndex: number,
     nodeIndex: number,
-    color: number,
   ): void {
+    const color = nodeLoadColor(node.stats);
     const direction = latLngToVector(node.lat, node.lng, 1);
     const position = direction
       .clone()
@@ -312,7 +318,7 @@ class OverviewGlobe {
       side: THREE.DoubleSide,
     });
     const mesh = new THREE.Mesh(
-      new THREE.CircleGeometry(EARTH_RADIUS * (0.1 / 2.8), 28),
+      new THREE.CircleGeometry(NODE_DOT_RADIUS, 20),
       material,
     );
     mesh.position.copy(position);
@@ -329,7 +335,7 @@ class OverviewGlobe {
     });
     const ring = new THREE.LineLoop(
       new THREE.BufferGeometry().setFromPoints(
-        circlePoints(EARTH_RADIUS * (0.28 / 2.8), 48),
+        circlePoints(NODE_RING_RADIUS, 40),
       ),
       ringMaterial,
     );
@@ -340,6 +346,7 @@ class OverviewGlobe {
       new THREE.Vector3(0, 0, 1),
       direction,
     );
+    ring.visible = false;
     ring.renderOrder = 6;
 
     this.markers.push({
@@ -401,15 +408,16 @@ class OverviewGlobe {
       marker.active =
         marker.networkIndex === stop.networkIndex &&
         marker.nodeIndex === stop.nodeIndex;
+      marker.ring.visible = marker.active;
       marker.mesh.material.color.copy(
-        marker.active ? new THREE.Color(0xffffff) : marker.baseColor,
+        marker.baseColor,
       );
     });
     this.arcs.forEach((arc) => {
       arc.material.opacity =
         arc.networkIndex === stop.networkIndex
-          ? 0.65
-          : Math.max(0.12, arc.baseOpacity * 0.5);
+          ? 0.28
+          : Math.max(0.07, arc.baseOpacity * 0.45);
     });
   }
 
@@ -533,7 +541,6 @@ class OverviewGlobe {
 }
 
 function networkStyle(index: number): {
-  nodeColor: number;
   arcColor: number;
   opacity: number;
   dashSize: number | null;
@@ -541,30 +548,26 @@ function networkStyle(index: number): {
 } {
   const styles = [
     {
-      nodeColor: 0xececec,
       arcColor: 0x474747,
-      opacity: 0.32,
+      opacity: 0.18,
       dashSize: null,
       gapSize: 0,
     },
     {
-      nodeColor: 0x9c9c9c,
       arcColor: 0x9c9c9c,
-      opacity: 0.38,
+      opacity: 0.2,
       dashSize: 2.2,
       gapSize: 1.1,
     },
     {
-      nodeColor: 0xa6a6a6,
       arcColor: 0x474747,
-      opacity: 0.42,
+      opacity: 0.22,
       dashSize: 0.9,
       gapSize: 0.8,
     },
     {
-      nodeColor: 0xf5f5f5,
       arcColor: 0x9c9c9c,
-      opacity: 0.3,
+      opacity: 0.16,
       dashSize: 3.4,
       gapSize: 1.6,
     },

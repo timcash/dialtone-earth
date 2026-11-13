@@ -6,6 +6,12 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { aggregateNetwork } from "../src/aggregates.ts";
 import {
+  NODE_DOT_RADIUS_RATIO,
+  NODE_LOAD_COLORS,
+  nodeLoadColor,
+  nodeLoadPercent,
+} from "../src/node-load.ts";
+import {
   createGlobePlan,
   snapshotTimes,
   summarizeNetwork,
@@ -176,6 +182,31 @@ test("network aggregates use only reported capacity or percentage values", async
     gpuMemory: "3/12 GB",
     load: "1 avg",
   });
+});
+
+test("overview node color uses reported max CPU or RAM load", async () => {
+  const metal = await readJson("metal.json");
+  assert.deepEqual(
+    metal.nodes.map((node) => nodeLoadPercent(node.stats)),
+    [59.4, 54.5, 8, 8, 7.6],
+  );
+
+  const stats = completeStats({ cpu_percent: 0, mem_percent: 0 });
+  assert.equal(nodeLoadColor(stats), NODE_LOAD_COLORS.low);
+  stats.cpu_percent = 50;
+  assert.equal(nodeLoadColor(stats), NODE_LOAD_COLORS.medium);
+  stats.mem_percent = 100;
+  assert.equal(nodeLoadColor(stats), NODE_LOAD_COLORS.high);
+  stats.cpu_percent = null;
+  stats.mem_percent = null;
+  assert.equal(nodeLoadPercent(stats), null);
+  assert.equal(nodeLoadColor(stats), NODE_LOAD_COLORS.unavailable);
+
+  assert.equal(
+    NODE_DOT_RADIUS_RATIO / (0.1 / 2.8),
+    0.25,
+    "overview dots should be one quarter of the previous HUD disc radius",
+  );
 });
 
 test("preserves main snapshot provenance and whitelisted resources", async () => {
