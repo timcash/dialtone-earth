@@ -248,3 +248,113 @@ func Fatal(format string, args ...any) {
 	fmt.Fprintf(logOutput, "%s\n", formatPlain("FATAL", msg))
 	os.Exit(1)
 }
+
+// CallerFileLine returns the caller's base filename and line number formatted as "filename:line".
+func CallerFileLine(skip int) string {
+	_, file, line, ok := runtime.Caller(skip)
+	if !ok || strings.TrimSpace(file) == "" {
+		return "unknown:0"
+	}
+	if line < 0 {
+		line = 0
+	}
+	return fmt.Sprintf("%s:%d", filepath.Base(filepath.ToSlash(file)), line)
+}
+
+func formatFilenameLine(source string) string {
+	s := strings.TrimSpace(filepath.ToSlash(source))
+	if s == "" {
+		return callerFileLineSkipLogger()
+	}
+	filePart := s
+	linePart := ""
+	if idx := strings.LastIndex(s, ":"); idx >= 0 {
+		candidateLine := strings.TrimSpace(s[idx+1:])
+		if isDigits(candidateLine) {
+			filePart = s[:idx]
+			linePart = candidateLine
+		}
+	}
+	base := filepath.Base(strings.TrimSpace(filePart))
+	if base == "" || base == "." || base == "/" {
+		base = "unknown"
+	}
+	if linePart == "" {
+		linePart = "0"
+	}
+	return base + ":" + linePart
+}
+
+func callerFileLineSkipLogger() string {
+	for i := 2; i < 12; i++ {
+		_, file, line, ok := runtime.Caller(i)
+		if !ok {
+			break
+		}
+		norm := filepath.ToSlash(file)
+		if strings.Contains(norm, "/plugins/logs/src_v1/go/logger.go") || strings.Contains(norm, "/plugins/logs/src_v1/go/nats.go") {
+			continue
+		}
+		if line < 0 {
+			line = 0
+		}
+		return fmt.Sprintf("%s:%d", filepath.Base(norm), line)
+	}
+	return "unknown:0"
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// FormatStructuredLine formats one log line with an RFC3339 UTC timestamp,
+// conventional level, filename:line, and single-line message.
+func FormatStructuredLine(ts time.Time, level, source, message string) string {
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+	lvl := strings.ToUpper(strings.TrimSpace(level))
+	switch lvl {
+	case "DEBUG", "INFO", "WARN", "ERROR", "FATAL":
+	default:
+		lvl = "INFO"
+	}
+	src := formatFilenameLine(source)
+	msg := strings.TrimSpace(message)
+	if msg == "" {
+		msg = "(empty)"
+	}
+	return fmt.Sprintf("%s %s %s %s", ts.UTC().Format(time.RFC3339), lvl, src, msg)
+}
+
+// WriteStructuredLines writes one RFC3339 structured log line per non-empty line in text.
+func WriteStructuredLines(w io.Writer, level, source, text string) {
+	if w == nil {
+		w = logOutput
+	}
+	if w == nil {
+		return
+	}
+	src := formatFilenameLine(source)
+	normalized := strings.ReplaceAll(text, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	lines := strings.Split(normalized, "\n")
+
+	plainLogMu.Lock()
+	defer plainLogMu.Unlock()
+	for _, raw := range lines {
+		msg := strings.TrimSpace(raw)
+		if msg == "" {
+			continue
+		}
+		fmt.Fprintf(w, "%s\n", FormatStructuredLine(time.Now().UTC(), level, src, msg))
+	}
+}

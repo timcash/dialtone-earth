@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	guardauth "dialtone/dev/internal/guardauth"
 	configv1 "dialtone/dev/plugins/config/src_v1/go"
 	logs "dialtone/dev/plugins/logs/src_v1/go"
 	replv3 "dialtone/dev/plugins/repl/src_v3/go/repl"
@@ -117,6 +118,9 @@ func bootstrapDialtoneRuntimeEnv() {
 }
 
 func maybeReexecInNixShell() {
+	if isLocalCLITestArgs(os.Args[1:]) {
+		return
+	}
 	if v := strings.TrimSpace(strings.ToLower(os.Getenv("DIALTONE_USE_NIX"))); v == "0" || v == "false" || v == "no" || v == "off" {
 		return
 	}
@@ -153,6 +157,11 @@ func maybeReexecInNixShell() {
 }
 
 func initLogger() {
+	if isLocalCLITestArgs(os.Args[1:]) {
+		_ = os.Setenv("DIALTONE_LOG_NATS", "0")
+		logs.SetOutput(os.Stdout)
+		return
+	}
 	mirrorStdout := true
 	if raw := strings.TrimSpace(strings.ToLower(os.Getenv("DIALTONE_LOG_STDOUT"))); raw != "" {
 		switch raw {
@@ -317,7 +326,7 @@ func ensureGoRequirement(version string) error {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			return logs.Errorf("failed to install Go: %w", err)
+			return logs.Errorf("failed to install Go: %v", err)
 		}
 	}
 
@@ -327,7 +336,7 @@ func ensureGoRequirement(version string) error {
 
 	out, err := exec.Command(goBin, "version").CombinedOutput()
 	if err != nil {
-		return logs.Errorf("failed checking go version: %w", err)
+		return logs.Errorf("failed checking go version: %v", err)
 	}
 	want := "go" + version
 	if !strings.Contains(string(out), want) {
@@ -349,7 +358,7 @@ func ensureBunRequirement(version string) error {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
-			return logs.Errorf("failed to install Bun: %w", err)
+			return logs.Errorf("failed to install Bun: %v", err)
 		}
 	}
 
@@ -359,7 +368,7 @@ func ensureBunRequirement(version string) error {
 
 	out, err := exec.Command(bunBin, "--version").CombinedOutput()
 	if err != nil {
-		return logs.Errorf("failed checking bun version: %w", err)
+		return logs.Errorf("failed checking bun version: %v", err)
 	}
 	got := strings.TrimSpace(string(out))
 	if got != version {
@@ -429,39 +438,48 @@ func main() {
 			return
 		}
 		logs.Error("Unknown dev command: %v", args)
+	case "test":
+		if strings.TrimSpace(sshHost) == "" && strings.TrimSpace(targetHost) == "" && !isLegacyTestPluginInvocation(args) {
+			os.Exit(runLocalCLITest(args, os.Stdout))
+		}
+		dispatchNonBuiltinCommand(command, args, targetHost, sshHost)
 	default:
-		if strings.TrimSpace(sshHost) != "" {
-			if err := runViaSSHHost(strings.TrimSpace(sshHost), command, args); err != nil {
-				if exitErr, ok := err.(*exec.ExitError); ok {
-					os.Exit(exitErr.ExitCode())
-				}
-				logs.Error("SSH transport failed: %v", err)
-				os.Exit(1)
-			}
-			return
-		}
-		if shouldRouteCommandViaREPL(command, args) {
-			if err := dispatchViaREPL(command, args, targetHost); err != nil {
-				if strings.HasPrefix(strings.TrimSpace(err.Error()), "DIALTONE ERROR:") {
-					logs.System("%s", strings.TrimSpace(err.Error()))
-					os.Exit(1)
-				}
-				logs.Error("REPL dispatch failed: %v", err)
-				os.Exit(1)
-			}
-			return
-		}
-		if err := warmREPLForForegroundQuery(command, args, targetHost); err != nil {
-			logs.Error("REPL foreground warmup failed: %v", err)
-			os.Exit(1)
-		}
-		if err := runPluginScaffold(command, args); err != nil {
+		dispatchNonBuiltinCommand(command, args, targetHost, sshHost)
+	}
+}
+
+func dispatchNonBuiltinCommand(command string, args []string, targetHost, sshHost string) {
+	if strings.TrimSpace(sshHost) != "" {
+		if err := runViaSSHHost(strings.TrimSpace(sshHost), command, args); err != nil {
 			if exitErr, ok := err.(*exec.ExitError); ok {
 				os.Exit(exitErr.ExitCode())
 			}
-			logs.Error("Orchestrator error: %v", err)
+			logs.Error("SSH transport failed: %v", err)
 			os.Exit(1)
 		}
+		return
+	}
+	if shouldRouteCommandViaREPL(command, args) {
+		if err := dispatchViaREPL(command, args, targetHost); err != nil {
+			if strings.HasPrefix(strings.TrimSpace(err.Error()), "DIALTONE ERROR:") {
+				logs.System("%s", strings.TrimSpace(err.Error()))
+				os.Exit(1)
+			}
+			logs.Error("REPL dispatch failed: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if err := warmREPLForForegroundQuery(command, args, targetHost); err != nil {
+		logs.Error("REPL foreground warmup failed: %v", err)
+		os.Exit(1)
+	}
+	if err := runPluginScaffold(command, args); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		logs.Error("Orchestrator error: %v", err)
+		os.Exit(1)
 	}
 }
 
@@ -534,6 +552,8 @@ func shouldRouteCommandViaREPL(command string, args []string) bool {
 	switch strings.TrimSpace(command) {
 	case "", "help", "-h", "--help", "exit", "branch", "plugins", "dev":
 		return false
+	case "test":
+		return isLegacyTestPluginInvocation(args)
 	case "repl", "go", "bun":
 		return false
 	default:
@@ -667,6 +687,9 @@ func warmREPLForForegroundQuery(command string, args []string, targetHost string
 }
 
 func shouldLogBootstrapChecks() bool {
+	if isLocalCLITestArgs(os.Args[1:]) {
+		return false
+	}
 	if strings.TrimSpace(strings.ToLower(os.Getenv("DIALTONE_VERBOSE_BOOTSTRAP"))) == "1" {
 		return true
 	}
@@ -1421,6 +1444,7 @@ func printDevUsage() {
 	logs.Info("  --ssh-host <host>    Run any command over SSH transport via ssh src_v1 run --host <host>")
 	logs.Info("")
 	logs.Info("Dev orchestrator commands:")
+	logs.Info("  test                 Run ordered Dialtone Earth test inventory (offline guarded auth first, remaining live tests skipped)")
 	logs.Info("  plugins              List available plugin scaffolds")
 	logs.Info("  branch <name>        Create or checkout a feature branch")
 	logs.Info("  help                 Show this help")
@@ -1828,4 +1852,130 @@ func endpointReachable(natsURL string, timeout time.Duration) bool {
 	}
 	_ = conn.Close()
 	return true
+}
+
+type cliTestCase struct {
+	Title string
+	Run   func() error
+}
+
+func defaultCLITestInventory() []cliTestCase {
+	hosts := []string{"vm-us", "vm-eu", "vm-asia", "Rosie", "Legion", "Build-1"}
+	cases := make([]cliTestCase, 0, 3+len(hosts)*3)
+	cases = append(cases,
+		cliTestCase{
+			Title: "offline guarded authorization",
+			Run: func() error {
+				report, err := guardauth.RunOfflineGuardedAuthorizationCheck()
+				if err != nil {
+					return err
+				}
+				if report.ChecksExecuted < 9 || report.AuditEvents < 8 {
+					return fmt.Errorf("insufficient offline authorization assertions: checks=%d audit=%d", report.ChecksExecuted, report.AuditEvents)
+				}
+				return nil
+			},
+		},
+		cliTestCase{Title: "browser sign-in"},
+		cliTestCase{Title: "Metal/Test isolation"},
+	)
+	for _, host := range hosts {
+		cases = append(cases, cliTestCase{Title: "heartbeat " + host})
+	}
+	for _, host := range hosts {
+		cases = append(cases,
+			cliTestCase{Title: "fixed whoami " + host},
+			cliTestCase{Title: "audit " + host},
+		)
+	}
+	return cases
+}
+
+func isLegacyTestPluginInvocation(args []string) bool {
+	if len(args) >= 1 && strings.HasPrefix(strings.ToLower(strings.TrimSpace(args[0])), "src_v") {
+		return true
+	}
+	if len(args) >= 2 && strings.HasPrefix(strings.ToLower(strings.TrimSpace(args[1])), "src_v") {
+		return true
+	}
+	return false
+}
+
+func isLocalCLITestArgs(argv []string) bool {
+	filtered := make([]string, 0, len(argv))
+	for _, raw := range argv {
+		arg := strings.TrimSpace(raw)
+		if arg == "" || arg == "--stdout" || arg == "--no-stdout" {
+			continue
+		}
+		filtered = append(filtered, raw)
+	}
+	if len(filtered) == 0 {
+		return false
+	}
+	if strings.ToLower(strings.TrimSpace(filtered[0])) != "test" {
+		return false
+	}
+	targetHost, sshHost, rest := extractTransportFlags("test", filtered[1:])
+	if strings.TrimSpace(targetHost) != "" || strings.TrimSpace(sshHost) != "" {
+		return false
+	}
+	return !isLegacyTestPluginInvocation(rest)
+}
+
+func runLocalCLITest(args []string, out io.Writer) int {
+	cases := defaultCLITestInventory()
+	if len(args) > 0 {
+		// Reject unexpected arguments while preserving strict stdout log contract
+		// and nonzero failure exit.
+		cases[0].Run = func() error {
+			return fmt.Errorf("unexpected test arguments: %s", strings.Join(args, " "))
+		}
+	}
+	return runCLITestInventory(cases, out)
+}
+
+// runCLITestInventory executes ONLY the first ordered test and emits exactly one
+// RFC3339 structured log line per ordered test ("PASS <title>", "FAIL <title>",
+// or "SKIP <title>"). Remaining tests are never executed and always emit SKIP.
+func runCLITestInventory(cases []cliTestCase, out io.Writer) int {
+	if out == nil {
+		out = os.Stdout
+	}
+	exitCode := 0
+	for i, tc := range cases {
+		title := strings.TrimSpace(tc.Title)
+		if i == 0 && tc.Run != nil {
+			if err := tc.Run(); err != nil {
+				logs.WriteStructuredLines(out, "ERROR", logs.CallerFileLine(1), "FAIL "+title)
+				exitCode = 1
+			} else {
+				logs.WriteStructuredLines(out, "INFO", logs.CallerFileLine(1), "PASS "+title)
+			}
+			continue
+		}
+		// Never advance to test 2 or any subsequent planned live test.
+		logs.WriteStructuredLines(out, "WARN", logs.CallerFileLine(1), "SKIP "+title)
+	}
+	return exitCode
+}
+
+func buildOfflineTestEnv(base []string) []string {
+	if len(base) == 0 {
+		base = os.Environ()
+	}
+	out := make([]string, 0, len(base)+4)
+	for _, kv := range base {
+		k, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToUpper(k) {
+		case "DIALTONE_LOG_NATS", "DIALTONE_USE_NIX", "GOPROXY", "GOTOOLCHAIN":
+			continue
+		}
+		out = append(out, kv)
+	}
+	out = append(out, "DIALTONE_LOG_NATS=0", "DIALTONE_USE_NIX=0", "GOPROXY=off", "GOTOOLCHAIN=local")
+	return out
 }

@@ -641,22 +641,64 @@ function Run-BootstrapRepl {
     exit $LASTEXITCODE
 }
 
+function Test-IsLocalCliTestInvocation {
+    $filtered = New-Object System.Collections.Generic.List[string]
+    foreach ($raw in $ScriptArgs) {
+        $arg = [string]$raw
+        $trimmed = $arg.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed -eq "--stdout" -or $trimmed -eq "--no-stdout") {
+            continue
+        }
+        $filtered.Add($trimmed)
+    }
+    if ($filtered.Count -eq 0 -or $filtered[0].ToLowerInvariant() -ne "test") {
+        return $false
+    }
+    for ($i = 1; $i -lt $filtered.Count; $i++) {
+        $a = $filtered[$i].ToLowerInvariant()
+        if ($a -in @("--ssh-host", "--target-host", "--host") -or
+            $a.StartsWith("--ssh-host=") -or
+            $a.StartsWith("--target-host=") -or
+            $a.StartsWith("--host=")) {
+            return $false
+        }
+    }
+    if ($filtered.Count -ge 2 -and $filtered[1].ToLowerInvariant() -match '^src_v\d+$') {
+        return $false
+    }
+    if ($filtered.Count -ge 3 -and $filtered[2].ToLowerInvariant() -match '^src_v\d+$') {
+        return $false
+    }
+    return $true
+}
+
+$IsLocalCliTest = Test-IsLocalCliTestInvocation
+
 # 1. Load Environment
 if ([string]::IsNullOrWhiteSpace($env:DIALTONE_ENV_FILE)) {
     $env:DIALTONE_ENV_FILE = $EnvFile
 }
-if (!(Test-Path $EnvFile) -and [string]::IsNullOrWhiteSpace($env:DIALTONE_BOOTSTRAP_DONE)) {
-    Run-BootstrapRepl -EnvFilePath $EnvFile
-}
-if (Test-Path $EnvFile) {
-    $config = Get-Content $EnvFile -Raw | ConvertFrom-Json
-    $config.PSObject.Properties | ForEach-Object {
-        [System.Environment]::SetEnvironmentVariable($_.Name, [string]$_.Value, "Process")
+if (-not $IsLocalCliTest) {
+    if (!(Test-Path $EnvFile) -and [string]::IsNullOrWhiteSpace($env:DIALTONE_BOOTSTRAP_DONE)) {
+        Run-BootstrapRepl -EnvFilePath $EnvFile
     }
-}
-Use-WindowsLocalDialtonePaths
+    if (Test-Path $EnvFile) {
+        $config = Get-Content $EnvFile -Raw | ConvertFrom-Json
+        $config.PSObject.Properties | ForEach-Object {
+            [System.Environment]::SetEnvironmentVariable($_.Name, [string]$_.Value, "Process")
+        }
+    }
+    Use-WindowsLocalDialtonePaths
 
-Enter-NixShellIfNeeded
+    Enter-NixShellIfNeeded
+} else {
+    $env:DIALTONE_USE_NIX = "0"
+    $env:DIALTONE_LOG_NATS = "0"
+    $env:DIALTONE_REPO_ROOT = $ScriptDir
+    $env:DIALTONE_SRC_ROOT = Join-Path $ScriptDir "src"
+    $env:GOPROXY = "off"
+    $env:GOTOOLCHAIN = "local"
+}
 
 # Default DIALTONE_HOME if not set
 if ([string]::IsNullOrWhiteSpace($env:DIALTONE_HOME)) {
@@ -694,12 +736,25 @@ foreach ($arg in $args) {
 }
 
 # 2. Resolve Go
-if (!(Test-Path $GoBin) -or !(Test-Path $GoToolCompile)) {
+$HasManagedGo = $false
+if (-not $IsLocalCliTest) {
+    try {
+        $HasManagedGo = (Test-Path -LiteralPath $GoBin -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $GoToolCompile -ErrorAction SilentlyContinue)
+    } catch {
+        $HasManagedGo = $false
+    }
+}
+if (-not $HasManagedGo) {
     $goCmd = Get-Command go -ErrorAction SilentlyContinue
     if ($goCmd) {
         $GoBin = $goCmd.Source
         $env:GOROOT = Split-Path -Parent (Split-Path -Parent $GoBin)
     } else {
+        if ($IsLocalCliTest) {
+            $ts = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+            Write-Output "$ts ERROR dialtone.ps1:759 FAIL offline guarded authorization"
+            exit 1
+        }
         Write-Host "DIALTONE> Go runtime missing and 'go' is not on PATH."
         Write-Host "DIALTONE> Enable Nix mode (DIALTONE_USE_NIX=1) or install managed Go into DIALTONE_ENV."
         exit 1
@@ -708,11 +763,19 @@ if (!(Test-Path $GoBin) -or !(Test-Path $GoToolCompile)) {
 
 # 3. Setup PATH and GOROOT
 $SelectedGoBinDir = Split-Path -Parent $GoBin
-if (Test-Path $BunBin) {
+$HasManagedBun = $false
+if (-not $IsLocalCliTest) {
+    try {
+        $HasManagedBun = Test-Path -LiteralPath $BunBin -ErrorAction SilentlyContinue
+    } catch {
+        $HasManagedBun = $false
+    }
+}
+if ($HasManagedBun) {
     $env:PATH = "$SelectedGoBinDir;$(Join-Path $env:DIALTONE_ENV 'bun/bin');$env:PATH"
     $env:DIALTONE_BUN_BIN = $BunBin
 } else {
-    if (Test-Path $SelectedGoBinDir) {
+    if (Test-Path -LiteralPath $SelectedGoBinDir -ErrorAction SilentlyContinue) {
         $env:PATH = "$SelectedGoBinDir;$env:PATH"
     }
 }
