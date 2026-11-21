@@ -378,6 +378,9 @@ func ensureBunRequirement(version string) error {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "loop" {
+		os.Exit(runOfflineLoop(os.Args[2:], os.Stdout, os.Stderr, time.Sleep))
+	}
 	bootstrapDialtoneRuntimeEnv()
 	maybeReexecInNixShell()
 	normalizeGlobalFlags()
@@ -1978,4 +1981,34 @@ func buildOfflineTestEnv(base []string) []string {
 	}
 	out = append(out, "DIALTONE_LOG_NATS=0", "DIALTONE_USE_NIX=0", "GOPROXY=off", "GOTOOLCHAIN=local")
 	return out
+}
+
+// runOfflineLoop only repeats the fixed native offline inventory. The first
+// tick runs immediately; later ticks wait ten minutes after completion.
+func runOfflineLoop(args []string, out, errOut io.Writer, wait func(time.Duration)) int {
+	count := 0
+	if len(args) == 1 && args[0] == "--once" {
+		count = 1
+	} else if len(args) == 2 && args[0] == "--max-count" {
+		for n := 1; n <= 48; n++ {
+			if args[1] == fmt.Sprint(n) {
+				count = n
+				break
+			}
+		}
+	}
+	if count == 0 {
+		fmt.Fprintln(errOut, "usage: dialtone loop --once | --max-count N (1-48)")
+		return 2
+	}
+	logs.SetOutput(out)
+	for i := 0; i < count; i++ {
+		if i > 0 {
+			wait(10 * time.Minute)
+		}
+		if code := runLocalCLITest(nil, out); code != 0 {
+			return code
+		}
+	}
+	return 0
 }

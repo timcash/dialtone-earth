@@ -228,3 +228,12 @@ These are not the main reference set, but they support the core flow heavily:
 6. [`ssh src_v1`](src/plugins/ssh/src_v1/README.md)
 7. [`cad src_v1`](src/plugins/cad/src_v1/README.md)
 8. [`robot src_v2`](src/plugins/robot/src_v2/README.md)
+
+### Native offline test loop (Windows)
+
+From the repository root, run `.dialtone.ps1 loop --once` to run the same
+offline inventory as `.dialtone.ps1 test`. For foreground repetition use
+`.dialtone.ps1 loop --max-count 2` (1–48 runs, ten minutes after each completed
+run before the next). It stops on failure and does not run skipped live checks.
+The exact arguments also work with the native Go CLI; the Linux shell launcher
+is not qualified for this offline path.

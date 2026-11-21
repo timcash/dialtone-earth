@@ -651,6 +651,16 @@ function Test-IsLocalCliTestInvocation {
         }
         $filtered.Add($trimmed)
     }
+    if ($filtered.Count -gt 0 -and $filtered[0] -eq "loop") {
+        # Validate original argv before bootstrap and before global flag processing.
+        $validOnce = $ScriptArgs.Count -eq 2 -and $ScriptArgs[1] -ceq '--once'
+        $validRepeat = $ScriptArgs.Count -eq 3 -and $ScriptArgs[1] -ceq '--max-count' -and $ScriptArgs[2] -cmatch '^([1-9]|[1-3][0-9]|4[0-8])$'
+        if ($ScriptArgs[0] -cne 'loop' -or (-not $validOnce -and -not $validRepeat)) {
+            [Console]::Error.WriteLine('usage: dialtone loop --once | --max-count N (1-48)')
+            exit 2
+        }
+        return $true
+    }
     if ($filtered.Count -eq 0 -or $filtered[0].ToLowerInvariant() -ne "test") {
         return $false
     }
