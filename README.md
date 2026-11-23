@@ -45,7 +45,7 @@ go run . clean                        # remove generated artifacts; retain run l
 
 This repository follows [`timcash/template`](https://github.com/timcash/template):
 
-- **Pure-stdlib Go CLI at the root** (`go.mod`, `cli.go`, `live.go`, `test_runs.go`, `cli_test.go`, `internal/guardauth/`).
+- **Pure-stdlib Go CLI at the root** (`go.mod`, `cli.go`, `live.go`, `test_runs.go`, `cli_test.go`).
 - **Single-writer test state**: `dialtone-earth test` and `dialtone-earth dev` write `logs/state.json` and immutable `logs/<test-id>.{json,log}`; the Vite dashboard in `ui/` is read-only.
 - **No silent side effects**: opening `http://127.0.0.1:5174/` starts zero tests until **Start tests** is clicked; `auth status` defaults to `not_configured` (exit `1`) without reading credentials or contacting the network.
 
@@ -55,7 +55,7 @@ This repository follows [`timcash/template`](https://github.com/timcash/template
    ```sh
    ./dialtone-earth.sh install          # Windows PowerShell: .\dialtone-earth.ps1 install
    ```
-2. Run the full suite from the terminal (`internal/guardauth`, `registry/` gateway/simulation/origin-bridge tests, `ui/` tests, and CLI contract checks):
+2. Run the full suite from the terminal (`registry/` gateway/simulation/origin-bridge tests, `ui/` tests, and CLI contract checks):
    ```sh
    ./dialtone-earth.sh test
    ```

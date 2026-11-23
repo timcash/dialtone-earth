@@ -24,9 +24,16 @@ dialtone plugin remove shell
 - **Public Apex (`https://dialtone.earth/`):** Ships zero private network snapshots and runs a deterministic simulated tour with 3D H3 geospatial clusters, Holten + FDEB atmospheric ping arcs, whole-app tiling window manager, and a CSP-safe fullscreen TypeScript Camera Studio.
 - **Private Network Gateway (`https://metal.dialtone.earth/`):** Authenticated via grayscale email magic links (`/login`, `/auth/verify`) or Cloudflare Access JWTs, proxying allowlisted `GET /api/mesh/*` routes to enrolled Dialtone origin nodes and persisting per-user window layouts, saved queries, and camera policies in Cloudflare KV (`/api/user/ui-config`).
 
-### Running the Local Origin Bridge on Enrolled `metal` Nodes
+### Connecting Enrolled `metal` Origin Nodes
 
-Each enrolled `metal` origin node runs the read-only Bearer-authenticated origin bridge (`registry/scripts/mesh-origin-bridge.mjs`) in front of its loopback Dialtone API (`127.0.0.1:8788`) and optional template test dashboard (`127.0.0.1:5174`):
+Enrolled `metal` nodes expose a read-only Bearer-authenticated origin listener natively inside `timcash/dialtone` (no Node.js sidecar required):
+
+```sh
+DIALTONE_GATEWAY_TOKEN="<matching Cloudflare Worker MESH_ORIGIN_TOKEN>" \
+dialtone up --gateway-listen 127.0.0.1:8790
+```
+
+For older `dialtone <= v0.5.5` nodes not yet upgraded to `--gateway-listen`, `registry/scripts/mesh-origin-bridge.mjs` remains available as a temporary fallback sidecar in front of `127.0.0.1:8788`:
 
 ```sh
 MESH_ORIGIN_TOKEN="<matching Cloudflare Worker secret>" \

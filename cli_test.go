@@ -18,10 +18,6 @@ import (
 	"testing"
 )
 
-func TestDialtoneEarthOfflineGuardedAuth(t *testing.T) {
-	runTool(t, "go", "test", "-count=1", "./internal/guardauth")
-}
-
 func TestDialtoneEarthRegistryNetworks(t *testing.T) {
 	runToolInDir(t, "registry", "node", "--test", "tests/networks.test.mjs")
 }
