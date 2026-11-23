@@ -22,16 +22,9 @@ func TestDialtoneEarthLiveMetalDaemonE2E(t *testing.T) {
 	runToolInDir(t, "registry", "node", "--test", "--test-name-pattern=^metal-live-daemon-8788", "tests/metal-ui-e2e.test.mjs")
 }
 
-func TestDialtoneEarthMetalCloudflareLiveE2E(t *testing.T) {
-	if os.Getenv("DIALTONE_LIVE_CLOUDFLARE_E2E") != "1" {
-		t.Skip("set DIALTONE_LIVE_CLOUDFLARE_E2E=1 to run live https://metal.dialtone.earth magic-link + KV E2E")
-	}
-	runToolInDir(t, "registry", "node", "scripts/qa-live-login.mjs")
-}
-
 func TestDialtoneEarthMetalLiveBrowserE2E(t *testing.T) {
 	if os.Getenv("DIALTONE_LIVE_CLOUDFLARE_E2E") != "1" {
-		t.Skip("set DIALTONE_LIVE_CLOUDFLARE_E2E=1 to run live headless Chrome CDP login + metal UI E2E")
+		t.Skip("set DIALTONE_LIVE_CLOUDFLARE_E2E=1 (and optional QA_HEADED=1) to run live Chrome CDP login + metal UI E2E")
 	}
 	runToolInDir(t, "registry", "node", "scripts/qa-live-browser.mjs")
 }

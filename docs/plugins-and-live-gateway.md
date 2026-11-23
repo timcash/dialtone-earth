@@ -43,8 +43,15 @@ TEST_DASHBOARD_ORIGIN="http://127.0.0.1:5174" \
 node registry/scripts/mesh-origin-bridge.mjs
 ```
 
-### Automated Live Login & Gateway E2E Test
+### Automated Live Chrome CDP E2E Test (Headless & Headed Debug Mode)
 
 ```sh
+# Headless Chrome CDP E2E (401 default-deny -> /login -> Gmail magic link -> live metal -> 1|2 KV -> Camera Studio -> reload -> sign out)
 pnpm --dir registry test:live
+
+# Visible headed Chrome debug browser driven live by CDP
+pnpm --dir registry test:live:headed
+
+# Run inside the Go test system (updates http://127.0.0.1:5174/ live)
+DIALTONE_LIVE_CLOUDFLARE_E2E=1 QA_HEADED=1 go run . test
 ```
