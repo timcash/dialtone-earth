@@ -5,6 +5,14 @@ import {
   type MagicLinkDeps,
   type MagicLinkEnv,
 } from "./auth.ts";
+import {
+  buildRedactedShellAuditLog,
+  listNetworkPresence,
+  normalizePresenceNode,
+  normalizePresenceView,
+  recordUserPresence,
+} from "./presence.ts";
+import { redactText } from "./redact.ts";
 
 export interface AssetFetcher {
   fetch(request: Request): Promise<Response>;
@@ -30,6 +38,7 @@ export interface GatewayEnv extends MagicLinkEnv {
 export interface AccessVerificationResult {
   valid: boolean;
   subject?: string;
+  sessionId?: string;
   reason?: string;
 }
 
@@ -105,7 +114,14 @@ export async function handleGatewayRequest(
     return jsonResponse({ error: "Not found" }, 404);
   }
 
-  if (request.method !== "GET" && request.method !== "HEAD") {
+  const isPresenceUpdate =
+    url.pathname === "/api/mesh/presence" && request.method === "POST";
+
+  if (
+    !isPresenceUpdate &&
+    request.method !== "GET" &&
+    request.method !== "HEAD"
+  ) {
     return jsonResponse({ error: "Method not allowed; gateway is read-only" }, 405);
   }
 
@@ -129,6 +145,7 @@ export async function handleGatewayRequest(
     auth = await verifyJwt(assertion, expectedAud, teamDomain, fetchImpl);
     if (auth.valid) {
       gatewayMode = "cloudflare-access";
+      auth.sessionId = `cf-${auth.subject ?? "user"}`;
     }
   } else if (!magicLinkEnabled && assertion && (!expectedAud || !teamDomain)) {
     auth = { valid: false, reason: "host_not_enrolled" };
@@ -145,13 +162,24 @@ export async function handleGatewayRequest(
 
   if (url.pathname === "/api/session") {
     if (auth.valid && origins.length > 0) {
+      const subject = auth.subject ?? "verified-user";
+      const sessionId = auth.sessionId ?? `sess-${subject}`;
+      await recordUserPresence(env.DIALTONE_AUTH_TOKENS, {
+        request,
+        host,
+        subject,
+        sessionId,
+        nowSec,
+        preserveExistingView: true,
+      });
       return jsonResponse(
         {
           authenticated: true,
           mode: "live",
           network: networkLabelForHost(host),
           hostname: host,
-          subject: auth.subject ?? "verified-user",
+          subject,
+          session_id: sessionId,
           origin_count: origins.length,
           gateway: gatewayMode,
           login_url: loginUrl,
@@ -173,6 +201,7 @@ export async function handleGatewayRequest(
           "tour",
           "networks",
           "hosts",
+          "users",
           "plugins",
           "blobs",
           "recovery",
@@ -180,6 +209,114 @@ export async function handleGatewayRequest(
           "tests",
           "logs",
         ],
+      },
+      200,
+    );
+  }
+
+  if (url.pathname === "/api/mesh/presence") {
+    if (!auth.valid) {
+      return jsonResponse(
+        {
+          error: magicLinkEnabled
+            ? "Sign-in required"
+            : "Cloudflare Access sign-in required",
+          reason: auth.reason ?? "unauthenticated",
+        },
+        401,
+      );
+    }
+    let body: Record<string, unknown> = {};
+    try {
+      const parsed: unknown = await request.json();
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        body = parsed as Record<string, unknown>;
+      }
+    } catch {
+      body = {};
+    }
+    const subject = auth.subject ?? "verified-user";
+    const sessionId = auth.sessionId ?? `sess-${subject}`;
+    const record = await recordUserPresence(env.DIALTONE_AUTH_TOKENS, {
+      request,
+      host,
+      subject,
+      sessionId,
+      viewingView: normalizePresenceView(body.view),
+      viewingNode: normalizePresenceNode(body.node),
+      nowSec,
+    });
+    return jsonResponse({ ok: true, presence: record }, 200);
+  }
+
+  if (url.pathname === "/api/mesh/users") {
+    if (!auth.valid) {
+      return jsonResponse(
+        {
+          error: magicLinkEnabled
+            ? "Sign-in required"
+            : "Cloudflare Access sign-in required",
+          reason: auth.reason ?? "unauthenticated",
+        },
+        401,
+      );
+    }
+    const subject = auth.subject ?? "verified-user";
+    const sessionId = auth.sessionId ?? `sess-${subject}`;
+    const currentPresence = await recordUserPresence(env.DIALTONE_AUTH_TOKENS, {
+      request,
+      host,
+      subject,
+      sessionId,
+      nowSec,
+      preserveExistingView: true,
+    });
+    const [sessionsPayload, fullStatePayload] =
+      origins.length > 0
+        ? await Promise.all([
+            fetchJsonFromOrigins(
+              origins,
+              "/api/shell/sessions",
+              env.MESH_ORIGIN_TOKEN,
+              fetchImpl,
+            ),
+            fetchJsonFromOrigins(
+              origins,
+              "/api/state",
+              env.MESH_ORIGIN_TOKEN,
+              fetchImpl,
+            ),
+          ])
+        : [null, null];
+
+    const defaultNode =
+      typeof fullStatePayload?.node === "string" && fullStatePayload.node
+        ? fullStatePayload.node
+        : networkLabelForHost(host);
+
+    const shellAuditLog = buildRedactedShellAuditLog({
+      sessionsPayload,
+      fullStatePayload,
+      defaultNode,
+      defaultUser: subject,
+      nowSec,
+    });
+    const users = await listNetworkPresence(
+      env.DIALTONE_AUTH_TOKENS,
+      host,
+      currentPresence,
+      shellAuditLog,
+      nowSec,
+    );
+
+    return jsonResponse(
+      {
+        hostname: host,
+        network: networkLabelForHost(host),
+        generated_at: new Date(nowSec * 1000).toISOString(),
+        redaction_policy: "keys-and-passwords-redacted",
+        users,
+        shell_audit_log: shellAuditLog,
       },
       200,
     );
@@ -288,6 +425,29 @@ async function proxyToEnrolledOrigins(
         lastStatus = upstream.status;
         continue;
       }
+      if (upstreamPath === "/api/shell/sessions" && upstream.ok) {
+        try {
+          const parsed = (await upstream.json()) as Record<string, unknown>;
+          if (Array.isArray(parsed.sessions)) {
+            parsed.sessions = parsed.sessions.map((entry) => {
+              if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+                return entry;
+              }
+              const s = { ...(entry as Record<string, unknown>) };
+              if (typeof s.last_command === "string") {
+                s.last_command = redactText(s.last_command);
+              }
+              if (typeof s.last_output === "string") {
+                s.last_output = redactText(s.last_output);
+              }
+              return s;
+            });
+          }
+          return jsonResponse(parsed, upstream.status);
+        } catch {
+          // Fall through to standard proxy error if invalid JSON
+        }
+      }
       const responseHeaders = new Headers(SECURITY_HEADERS);
       responseHeaders.set("Cache-Control", "private, no-store");
       responseHeaders.set(
@@ -307,6 +467,30 @@ async function proxyToEnrolledOrigins(
     { error: "All enrolled Dialtone mesh origins are unavailable" },
     lastStatus,
   );
+}
+
+async function fetchJsonFromOrigins(
+  origins: string[],
+  upstreamPath: string,
+  bearerToken: string | undefined,
+  fetchImpl: typeof fetch,
+): Promise<Record<string, unknown> | null> {
+  const resp = await proxyToEnrolledOrigins(
+    origins,
+    upstreamPath,
+    bearerToken,
+    fetchImpl,
+  );
+  if (!resp.ok) return null;
+  try {
+    const parsed: unknown = await resp.json();
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Ignore non-JSON upstream payloads
+  }
+  return null;
 }
 
 export async function verifyCloudflareAccessJwt(

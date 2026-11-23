@@ -961,11 +961,63 @@ button.sim-table-row:hover,
 
 .sim-mini-card,
 .sim-recovery-card,
-.sim-session-card {
+.sim-session-card,
+.sim-user-card {
   padding: 10px 12px;
   border: 1px solid var(--line-2);
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.025);
+}
+
+.sim-user-locs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0;
+}
+
+.sim-user-loc-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  font-size: 11px;
+  color: #d6d6d6;
+}
+
+.sim-user-loc-row b,
+.sim-user-shell-nodes b {
+  color: var(--ink-2);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  margin-right: 4px;
+}
+
+.sim-user-shell-nodes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 11px;
+}
+
+.sim-inline-node {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #ececec;
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.sim-inline-node:hover {
+  border-color: var(--ink-2);
+  background: rgba(255, 255, 255, 0.14);
 }
 
 .sim-mini-card h3,

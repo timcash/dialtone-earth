@@ -7,11 +7,18 @@ import {
   summarizeSystemResources,
 } from "../src/simulation.ts";
 
-test("simulated tour covers overview, network, host, plugins/blobs, recovery, tests, and logs", () => {
+test("simulated tour covers overview, network, host, users, plugins/blobs, recovery, tests, and logs", () => {
   const views = new Set(SIMULATED_TOUR_STEPS.map((s) => s.view));
-  for (const required of ["overview", "network", "host", "tests", "log"]) {
+  for (const required of ["overview", "network", "host", "users", "tests", "log"]) {
     assert.ok(views.has(required), `simulated tour missing view ${required}`);
   }
+  // Verify multi-location users and redacted dialtone-shell logs exist on simulated networks
+  const atlas = SIMULATED_NETWORKS[0];
+  assert.ok(atlas.users.some((u) => u.locations.length >= 2), "sim-atlas must demonstrate multi-location user");
+  assert.ok(atlas.shellAuditLog.some((e) => e.redactedCount > 0 && e.command.includes("[REDACTED]")));
+  const rawAudit = JSON.stringify(atlas.shellAuditLog);
+  assert.ok(!rawAudit.includes("sim_demo_bearer_9a8f7e6d5c4b"), "simulated shell log must not retain raw bearer token");
+  assert.ok(!rawAudit.includes("sim_edge_tok_1122334455"), "simulated shell log must not retain raw CLI token");
   const tabs = new Set(
     SIMULATED_TOUR_STEPS.map((s) => s.networkTab).filter(Boolean),
   );

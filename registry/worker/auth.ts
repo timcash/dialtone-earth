@@ -1,3 +1,5 @@
+import { clearUserPresence } from "./presence.ts";
+
 export interface KvNamespaceBinding {
   get(key: string): Promise<string | null>;
   put(
@@ -6,6 +8,9 @@ export interface KvNamespaceBinding {
     options?: { expirationTtl?: number },
   ): Promise<void>;
   delete(key: string): Promise<void>;
+  list?(options?: {
+    prefix?: string;
+  }): Promise<{ keys: Array<{ name: string }> }>;
 }
 
 export interface SendEmailPayload {
@@ -41,6 +46,7 @@ export interface MagicLinkDeps {
 export interface SessionCheckResult {
   valid: boolean;
   subject?: string;
+  sessionId?: string;
   reason?: string;
 }
 
@@ -65,6 +71,7 @@ interface SessionTokenPayload {
   typ: "session";
   sub: string;
   host: string;
+  sid?: string;
   iat: number;
   exp: number;
 }
@@ -152,7 +159,12 @@ export async function verifySessionCookie(
     return { valid: false, reason: "subject_not_allowlisted" };
   }
 
-  return { valid: true, subject: payload.sub.toLowerCase() };
+  const sessionId =
+    typeof payload.sid === "string" && /^[a-f0-9]{8,64}$/.test(payload.sid)
+      ? payload.sid
+      : `legacy-${payload.iat}`;
+
+  return { valid: true, subject: payload.sub.toLowerCase(), sessionId };
 }
 
 export async function handleAuthRoute(
@@ -255,6 +267,7 @@ export async function handleAuthRoute(
       typ: "session",
       sub: check.payload.sub,
       host,
+      sid: randomHex(12),
       iat: nowSec,
       exp: nowSec + SESSION_TTL_SEC,
     };
@@ -291,6 +304,10 @@ export async function handleAuthRoute(
       request.method !== "POST"
     ) {
       return methodNotAllowed(securityHeaders);
+    }
+    const existing = await verifySessionCookie(request, env, host, nowSec);
+    if (existing.valid && existing.sessionId) {
+      await clearUserPresence(env.DIALTONE_AUTH_TOKENS, host, existing.sessionId);
     }
     const clearCookie = buildSessionCookie("", 0, isSecure);
     if (prefersJson(request)) {

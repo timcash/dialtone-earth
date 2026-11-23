@@ -1,4 +1,39 @@
 import type { NetworkNode, NetworkSnapshot, OverviewNetwork } from "./types";
+import { redactSecrets } from "../worker/redact.ts";
+
+export type MeshUserLocation = {
+  sessionId: string;
+  location: string;
+  city: string | null;
+  region: string | null;
+  country: string | null;
+  colo: string | null;
+  viewingView: string;
+  viewingNode: string | null;
+  lastSeenAt: string;
+};
+
+export type MeshUserPresence = {
+  email: string;
+  role: string;
+  status: "active" | "idle";
+  locations: MeshUserLocation[];
+  shellNodes: string[];
+  lastCommandAt: string | null;
+};
+
+export type ShellAuditEntry = {
+  id: string;
+  timestamp: string;
+  user: string;
+  node: string;
+  sessionName: string;
+  shell: "bash" | "powershell";
+  cwd: string;
+  command: string;
+  output: string;
+  redactedCount: number;
+};
 
 export type SimPluginDeployment = {
   name: string;
@@ -86,6 +121,8 @@ export type SimNetwork = {
   blobStore: SimBlobStoreStats;
   recoveryEvents: SimRecoveryEvent[];
   tests: SimTestRun[];
+  users: MeshUserPresence[];
+  shellAuditLog: ShellAuditEntry[];
 };
 
 export type MeshNetwork = SimNetwork;
@@ -95,6 +132,7 @@ export type SystemResourceSummary = {
   networks: number;
   totalNodes: number;
   onlineNodes: number;
+  activeUsers: number;
   cpuCores: number;
   avgCpuPercent: number;
   memUsedGb: number;
@@ -112,7 +150,7 @@ export type SystemResourceSummary = {
   totalTests: number;
 };
 
-export type TourView = "overview" | "network" | "host" | "tests" | "log";
+export type TourView = "overview" | "network" | "host" | "users" | "tests" | "log";
 export type NetworkFocusTab = "hosts" | "plugins" | "blobs" | "recovery";
 
 export type TourStep = {
@@ -194,6 +232,16 @@ export const SIMULATED_TOUR_STEPS: TourStep[] = [
       "When atlas-edge-02 stalls, the Dialtone watchdog exits with EXIT_RESTART, the OS daemon relaunches, the node rejoins the encrypted channel, re-pulls missing plugin blobs, and probes return to 7/7 PASS in 4.2s.",
   },
   {
+    id: "network-users",
+    label: "SIGNED-IN USERS",
+    view: "users",
+    networkSlug: "sim-atlas",
+    hostName: null,
+    headline: "Signed-In Users, Locations & Redacted dialtone-shell Log",
+    caption:
+      "Every private network lists its logged-in members, multiple active locations, the node each session is inspecting, and a shared dialtone-shell audit log with keys, tokens, and passwords automatically redacted.",
+  },
+  {
     id: "network-tests",
     label: "NETWORK TESTS",
     view: "tests",
@@ -221,6 +269,7 @@ export function summarizeSystemResources(
 ): SystemResourceSummary {
   let totalNodes = 0;
   let onlineNodes = 0;
+  let activeUsers = 0;
   let cpuCores = 0;
   let cpuPercentSum = 0;
   let cpuPercentCount = 0;
@@ -239,6 +288,7 @@ export function summarizeSystemResources(
   let totalTests = 0;
 
   for (const net of networks) {
+    activeUsers += net.users.length;
     blobObjects += net.blobStore.objects;
     blobTotalBytes += net.blobStore.totalBytes;
     activePlugins += net.plugins.length;
@@ -269,6 +319,7 @@ export function summarizeSystemResources(
     networks: networks.length,
     totalNodes,
     onlineNodes,
+    activeUsers,
     cpuCores,
     avgCpuPercent:
       cpuPercentCount > 0
@@ -727,6 +778,96 @@ function buildAtlasNetwork(): SimNetwork {
     },
     recoveryEvents,
     tests,
+    users: [
+      {
+        email: "maya@sim-atlas.example",
+        role: "mesh-operator",
+        status: "active",
+        locations: [
+          {
+            sessionId: "sim-a1",
+            location: "Seattle, WA, US (SEA)",
+            city: "Seattle",
+            region: "WA",
+            country: "US",
+            colo: "SEA",
+            viewingView: "host",
+            viewingNode: "atlas-gpu-01",
+            lastSeenAt: "2026-11-22T22:14:52Z",
+          },
+          {
+            sessionId: "sim-a2",
+            location: "Frankfurt, DE (FRA)",
+            city: "Frankfurt",
+            region: "HE",
+            country: "DE",
+            colo: "FRA",
+            viewingView: "host",
+            viewingNode: "atlas-edge-02",
+            lastSeenAt: "2026-11-22T22:13:18Z",
+          },
+        ],
+        shellNodes: ["atlas-gpu-01", "atlas-edge-02"],
+        lastCommandAt: "2026-11-22T22:14:40Z",
+      },
+      {
+        email: "devon@sim-atlas.example",
+        role: "authorized-member",
+        status: "active",
+        locations: [
+          {
+            sessionId: "sim-a3",
+            location: "Tokyo, JP (NRT)",
+            city: "Tokyo",
+            region: "13",
+            country: "JP",
+            colo: "NRT",
+            viewingView: "users",
+            viewingNode: "atlas-relay-03",
+            lastSeenAt: "2026-11-22T22:12:09Z",
+          },
+        ],
+        shellNodes: ["atlas-relay-03"],
+        lastCommandAt: "2026-11-22T22:11:44Z",
+      },
+    ],
+    shellAuditLog: [
+      makeRedactedAuditEntry({
+        id: "sim-sh-a1",
+        timestamp: "2026-11-22T22:14:40Z",
+        user: "maya@sim-atlas.example",
+        node: "atlas-gpu-01",
+        sessionName: "gpu-deploy",
+        shell: "bash",
+        cwd: "/srv/dialtone/plugins",
+        rawCommand:
+          'curl -s -H "Authorization: Bearer sim_demo_bearer_9a8f7e6d5c4b" https://127.0.0.1:8788/api/plugins | jq .count',
+        rawOutput: "3 verified plugins loaded; SHA-256 checksums match",
+      }),
+      makeRedactedAuditEntry({
+        id: "sim-sh-a2",
+        timestamp: "2026-11-22T22:13:05Z",
+        user: "maya@sim-atlas.example",
+        node: "atlas-edge-02",
+        sessionName: "edge-check",
+        shell: "bash",
+        cwd: "/srv/dialtone",
+        rawCommand:
+          "dialtone shell exec --token sim_edge_tok_1122334455 --node atlas-edge-02 -- probe status",
+        rawOutput: "7/7 PASS (MSH NBR BEAT STO PUL PRC SEC) · MESH_ORIGIN_TOKEN=sim_origin_hex_00ff11ee22dd",
+      }),
+      makeRedactedAuditEntry({
+        id: "sim-sh-a3",
+        timestamp: "2026-11-22T22:11:44Z",
+        user: "devon@sim-atlas.example",
+        node: "atlas-relay-03",
+        sessionName: "relay-ops",
+        shell: "bash",
+        cwd: "/var/lib/dialtone",
+        rawCommand: "dialtone mesh peers --verify-blobs",
+        rawOutput: "3/3 peers online · 230 blobs verified (100% SHA-256)",
+      }),
+    ],
   };
 }
 
@@ -996,6 +1137,42 @@ function buildFoundryNetwork(): SimNetwork {
         ].join("\n"),
       },
     ],
+    users: [
+      {
+        email: "lin@sim-foundry.example",
+        role: "build-engineer",
+        status: "active",
+        locations: [
+          {
+            sessionId: "sim-f1",
+            location: "Los Angeles, CA, US (LAX)",
+            city: "Los Angeles",
+            region: "CA",
+            country: "US",
+            colo: "LAX",
+            viewingView: "host",
+            viewingNode: "foundry-arm-01",
+            lastSeenAt: "2026-11-22T22:14:11Z",
+          },
+        ],
+        shellNodes: ["foundry-arm-01"],
+        lastCommandAt: "2026-11-22T22:13:50Z",
+      },
+    ],
+    shellAuditLog: [
+      makeRedactedAuditEntry({
+        id: "sim-sh-f1",
+        timestamp: "2026-11-22T22:13:50Z",
+        user: "lin@sim-foundry.example",
+        node: "foundry-arm-01",
+        sessionName: "release-sign",
+        shell: "bash",
+        cwd: "~/dialtone-cad",
+        rawCommand:
+          "SIGNING_KEY=sim_release_signing_secret_778899 ./dialtone.sh build --release",
+        rawOutput: "darwin/arm64 + linux/amd64 artifacts signed and pinned to iroh-blobs",
+      }),
+    ],
   };
 }
 
@@ -1192,5 +1369,68 @@ function buildOrbitNetwork(): SimNetwork {
         ].join("\n"),
       },
     ],
+    users: [
+      {
+        email: "sam@sim-orbit.example",
+        role: "authorized-member",
+        status: "active",
+        locations: [
+          {
+            sessionId: "sim-o1",
+            location: "Singapore, SG (SIN)",
+            city: "Singapore",
+            region: null,
+            country: "SG",
+            colo: "SIN",
+            viewingView: "host",
+            viewingNode: "orbit-gw-02",
+            lastSeenAt: "2026-11-22T22:11:30Z",
+          },
+        ],
+        shellNodes: ["orbit-gw-02"],
+        lastCommandAt: "2026-11-22T22:10:42Z",
+      },
+    ],
+    shellAuditLog: [
+      makeRedactedAuditEntry({
+        id: "sim-sh-o1",
+        timestamp: "2026-11-22T22:10:42Z",
+        user: "sam@sim-orbit.example",
+        node: "orbit-gw-02",
+        sessionName: "gateway-verify",
+        shell: "bash",
+        cwd: "/etc/dialtone",
+        rawCommand:
+          "dialtone gateway check --password sim_gw_pass_42 --origin https://admin:sim_pass@origin-b.example.test",
+        rawOutput: "origin-b healthy · failover verified in 310ms",
+      }),
+    ],
+  };
+}
+
+function makeRedactedAuditEntry(opts: {
+  id: string;
+  timestamp: string;
+  user: string;
+  node: string;
+  sessionName: string;
+  shell: "bash" | "powershell";
+  cwd: string;
+  rawCommand: string;
+  rawOutput: string;
+}): ShellAuditEntry {
+  const cmd = redactSecrets(opts.rawCommand);
+  const out = redactSecrets(opts.rawOutput);
+  return {
+    id: opts.id,
+    timestamp: opts.timestamp,
+    user: opts.user,
+    node: opts.node,
+    sessionName: opts.sessionName,
+    shell: opts.shell,
+    cwd: opts.cwd,
+    command: cmd.text,
+    output: out.text,
+    redactedCount: cmd.redactedCount + out.redactedCount,
   };
 }

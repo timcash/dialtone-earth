@@ -5,6 +5,7 @@ import {
   resolveAllowedUpstreamPath,
   verifyCloudflareAccessJwt,
 } from "../worker/gateway.ts";
+import { redactSecrets } from "../worker/redact.ts";
 
 test("unauthenticated /api/session returns simulated mode with zero origin fetches", async () => {
   let fetchCalls = 0;
@@ -249,6 +250,16 @@ function createMemoryKv() {
     async delete(key) {
       store.delete(key);
     },
+    async list(options = {}) {
+      const prefix = options?.prefix ?? "";
+      const keys = [];
+      for (const name of store.keys()) {
+        if (!prefix || name.startsWith(prefix)) {
+          keys.push({ name });
+        }
+      }
+      return { keys };
+    },
   };
 }
 
@@ -472,6 +483,226 @@ test("magic-link end-to-end: request, scanner-safe GET verify, single-use POST v
   assert.equal(logout.status, 303);
   assert.equal(logout.headers.get("Location"), "/");
   assert.ok((logout.headers.get("Set-Cookie") ?? "").includes("Max-Age=0"));
+});
+
+test("redactSecrets strips private keys, SSH keys, bearer/API tokens, passwords, and URL credentials", () => {
+  const sample = [
+    "-----BEGIN OPENSSH PRIVATE KEY-----\nabc123secretbody\n-----END OPENSSH PRIVATE KEY-----",
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockKeyPayloadForTesting123456 qa@host",
+    'curl -H "Authorization: Bearer super_secret_token_987654" https://admin:mySecretPass@api.example.test',
+    "dialtone shell exec --password topsecret --token tok_live_abc123456789 --node legion",
+    "export MESH_ORIGIN_TOKEN=deadbeef0123456789abcdef API_KEY=sk-proj-secret1234567890abcd",
+    "ghp_1234567890abcdefghij1234567890",
+  ].join("\n");
+
+  const result = redactSecrets(sample);
+  assert.ok(result.redactedCount >= 7);
+  for (const leaked of [
+    "abc123secretbody",
+    "AAAAC3NzaC1lZDI1NTE5AAAAIMockKeyPayloadForTesting123456",
+    "super_secret_token_987654",
+    "mySecretPass",
+    "topsecret",
+    "tok_live_abc123456789",
+    "deadbeef0123456789abcdef",
+    "sk-proj-secret1234567890abcd",
+    "ghp_1234567890abcdefghij1234567890",
+  ]) {
+    assert.ok(!result.text.includes(leaked), `secret leaked after redaction: ${leaked}`);
+  }
+  assert.ok(result.text.includes("[REDACTED]"));
+  assert.ok(result.text.includes("--node legion"), "non-secret flags must remain readable");
+});
+
+test("multi-location user presence and redacted dialtone-shell audit log per private network", async () => {
+  const kv = createMemoryKv();
+  const sentEmails = [];
+  const now = 1_800_000_000;
+  const env = {
+    DIALTONE_AUTH_TOKENS: kv,
+    SESSION_SIGNING_KEY: "0123456789abcdef0123456789abcdef",
+    MAGIC_LINK_ALLOWLIST: JSON.stringify({
+      "metal.dialtone.earth": ["owner@example.test"],
+    }),
+    MESH_ORIGINS_MAP: JSON.stringify({
+      "metal.dialtone.earth": ["https://origin-metal.example.test"],
+    }),
+  };
+  const deps = {
+    nowSec: () => now,
+    sendEmail: async (payload) => {
+      sentEmails.push(payload);
+    },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/api/shell/sessions")) {
+        return new Response(
+          JSON.stringify({
+            sessions: [
+              {
+                name: "ops-shell",
+                node: "legion",
+                user: "owner@example.test",
+                shell: "powershell",
+                cwd: "C:\\Users\\timca",
+                last_command:
+                  'curl -H "Authorization: Bearer live_secret_bearer_999" --password my_pw_123 http://127.0.0.1:8788/api/mesh',
+                last_output: "MESH_ORIGIN_TOKEN=0123456789abcdef0123456789abcdef ok",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ node: "legion", events: [] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    },
+  };
+
+  // Unauthenticated /api/mesh/users and /api/mesh/presence fail closed with 401
+  const unauthUsers = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/mesh/users"),
+    env,
+    deps,
+  );
+  assert.equal(unauthUsers.status, 401);
+  const unauthPresence = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/mesh/presence", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ view: "host", node: "legion" }),
+    }),
+    env,
+    deps,
+  );
+  assert.equal(unauthPresence.status, 401);
+
+  // Mint 2 distinct sessions for the same user (simulating 2 different locations)
+  const mintSession = async () => {
+    await handleGatewayRequest(
+      new Request("https://metal.dialtone.earth/api/auth/request-link", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: "email=owner%40example.test",
+      }),
+      env,
+      deps,
+    );
+    const email = sentEmails[sentEmails.length - 1];
+    const token = decodeURIComponent(
+      email.text.match(/\/auth\/verify\?token=([^\s]+)/)[1],
+    );
+    const verify = await handleGatewayRequest(
+      new Request("https://metal.dialtone.earth/api/auth/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: `token=${encodeURIComponent(token)}`,
+      }),
+      env,
+      deps,
+    );
+    return (verify.headers.get("Set-Cookie") ?? "").split(";")[0];
+  };
+
+  const cookieSeattle = await mintSession();
+  const cookieTokyo = await mintSession();
+
+  const makeGeoReq = (url, init, cf) => {
+    const req = new Request(url, init);
+    Object.defineProperty(req, "cf", { value: cf });
+    return req;
+  };
+
+  await handleGatewayRequest(
+    makeGeoReq(
+      "https://metal.dialtone.earth/api/mesh/presence",
+      {
+        method: "POST",
+        headers: { Cookie: cookieSeattle, "Content-Type": "application/json" },
+        body: JSON.stringify({ view: "host", node: "legion" }),
+      },
+      { city: "Seattle", regionCode: "WA", country: "US", colo: "SEA" },
+    ),
+    env,
+    deps,
+  );
+  await handleGatewayRequest(
+    makeGeoReq(
+      "https://metal.dialtone.earth/api/mesh/presence",
+      {
+        method: "POST",
+        headers: { Cookie: cookieTokyo, "Content-Type": "application/json" },
+        body: JSON.stringify({ view: "host", node: "vm-02" }),
+      },
+      { city: "Tokyo", regionCode: "13", country: "JP", colo: "NRT" },
+    ),
+    env,
+    deps,
+  );
+
+  // GET /api/mesh/users aggregates BOTH locations under owner@example.test and redacts shell secrets
+  const usersResp = await handleGatewayRequest(
+    makeGeoReq(
+      "https://metal.dialtone.earth/api/mesh/users",
+      { headers: { Cookie: cookieSeattle } },
+      { city: "Seattle", regionCode: "WA", country: "US", colo: "SEA" },
+    ),
+    env,
+    deps,
+  );
+  assert.equal(usersResp.status, 200);
+  const usersBody = await usersResp.json();
+  assert.equal(usersBody.redaction_policy, "keys-and-passwords-redacted");
+  assert.equal(usersBody.users.length, 1);
+  assert.equal(usersBody.users[0].email, "owner@example.test");
+  assert.equal(usersBody.users[0].locations.length, 2);
+  const locLabels = usersBody.users[0].locations.map((l) => l.location).sort();
+  assert.deepEqual(locLabels, ["Seattle, WA, US (SEA)", "Tokyo, 13, JP (NRT)"]);
+  const viewedNodes = usersBody.users[0].locations.map((l) => l.viewingNode).sort();
+  assert.deepEqual(viewedNodes, ["legion", "vm-02"]);
+  assert.deepEqual(usersBody.users[0].shellNodes, ["legion"]);
+
+  // Verify raw secrets were scrubbed server-side
+  const serialized = JSON.stringify(usersBody.shell_audit_log);
+  assert.ok(!serialized.includes("live_secret_bearer_999"));
+  assert.ok(!serialized.includes("my_pw_123"));
+  assert.ok(!serialized.includes("0123456789abcdef0123456789abcdef"));
+  assert.ok(serialized.includes("[REDACTED]"));
+  assert.ok(usersBody.shell_audit_log[0].redactedCount >= 3);
+
+  // Also verify /api/mesh/shell/sessions redacts secrets directly
+  const directSessions = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/mesh/shell/sessions", {
+      headers: { Cookie: cookieSeattle },
+    }),
+    env,
+    deps,
+  );
+  const directText = await directSessions.text();
+  assert.ok(!directText.includes("live_secret_bearer_999"));
+  assert.ok(directText.includes("[REDACTED]"));
+
+  // Logging out the Tokyo session removes ONLY that location
+  await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/auth/logout", {
+      headers: { Cookie: cookieTokyo },
+    }),
+    env,
+    deps,
+  );
+  const afterLogoutResp = await handleGatewayRequest(
+    makeGeoReq(
+      "https://metal.dialtone.earth/api/mesh/users",
+      { headers: { Cookie: cookieSeattle } },
+      { city: "Seattle", regionCode: "WA", country: "US", colo: "SEA" },
+    ),
+    env,
+    deps,
+  );
+  const afterLogoutBody = await afterLogoutResp.json();
+  assert.equal(afterLogoutBody.users[0].locations.length, 1);
+  assert.equal(afterLogoutBody.users[0].locations[0].location, "Seattle, WA, US (SEA)");
 });
 
 async function signJwt(privateKey, header, payload) {

@@ -39,9 +39,11 @@ type AppState = {
   tourStepIndex: number;
   liveError: string | null;
   loadedLogCache: Record<string, SimTestRun>;
+  shellFilterNode: string;
 };
 
 const TOUR_INTERVAL_MS = 6_500;
+const PRESENCE_INTERVAL_MS = 30_000;
 
 const appElement = document.querySelector<HTMLDivElement>("#app");
 if (!appElement) throw new Error("Missing app root");
@@ -67,10 +69,12 @@ const state: AppState = {
   tourStepIndex: 0,
   liveError: null,
   loadedLogCache: {},
+  shellFilterNode: "all",
 };
 
 let globeController: OverviewGlobeController | null = null;
 let tourTimer: number | null = null;
+let presenceTimer: number | null = null;
 
 void boot();
 
@@ -109,6 +113,7 @@ async function boot(): Promise<void> {
   }
 
   startTourTimer();
+  startPresenceHeartbeat();
 }
 
 async function detectSession(): Promise<SessionInfo> {
@@ -148,7 +153,7 @@ async function loadLiveNetwork(
   session: SessionInfo,
 ): Promise<MeshNetwork | null> {
   try {
-    const [mesh, plugins, sessions, processes, probe, fullState, tests] =
+    const [mesh, plugins, sessions, processes, probe, fullState, tests, users] =
       await Promise.all([
         fetchOptionalJson("/api/mesh/state"),
         fetchOptionalJson("/api/mesh/plugins"),
@@ -157,15 +162,17 @@ async function loadLiveNetwork(
         fetchOptionalJson("/api/mesh/probe"),
         fetchOptionalJson("/api/mesh/full-state"),
         fetchOptionalJson("/api/mesh/tests"),
+        fetchOptionalJson("/api/mesh/users"),
       ]);
     if (!mesh) {
       state.liveError =
-        "Authenticated via Cloudflare Access, but enrolled Dialtone origin did not return /api/mesh/state.";
+        "Authenticated session active, but enrolled Dialtone origin did not return /api/mesh/state.";
       return null;
     }
     return adaptLiveMeshToNetwork({
       hostname: session.hostname || window.location.hostname,
       networkName: session.network ?? undefined,
+      currentUser: session.subject,
       mesh,
       plugins,
       sessions,
@@ -173,12 +180,65 @@ async function loadLiveNetwork(
       probe,
       fullState,
       tests,
+      users,
     });
   } catch (error) {
     state.liveError =
       error instanceof Error ? error.message : "Failed to load live mesh data.";
     return null;
   }
+}
+
+async function reportLivePresence(): Promise<void> {
+  if (!state.session.authenticated || state.session.mode !== "live") return;
+  try {
+    await fetch("/api/mesh/presence", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      body: JSON.stringify({
+        view: state.view,
+        node: state.view === "overview" ? null : state.hostName || null,
+      }),
+    });
+  } catch {
+    // Non-blocking heartbeat
+  }
+}
+
+async function refreshLiveUsers(): Promise<void> {
+  if (!state.session.authenticated || state.session.mode !== "live") return;
+  const payload = await fetchOptionalJson("/api/mesh/users");
+  if (!payload) return;
+  const net = activeNetwork();
+  const adapted = adaptLiveMeshToNetwork({
+    hostname: net.hostname,
+    networkName: net.slug,
+    currentUser: state.session.subject,
+    mesh: { nodes: [], mesh_config: { channel: net.slug } },
+    users: payload,
+  });
+  net.users = adapted.users;
+  if (adapted.shellAuditLog.length > 0 || Array.isArray(payload.shell_audit_log)) {
+    net.shellAuditLog = adapted.shellAuditLog;
+  }
+  renderPanels();
+}
+
+function startPresenceHeartbeat(): void {
+  if (presenceTimer !== null) {
+    window.clearInterval(presenceTimer);
+    presenceTimer = null;
+  }
+  if (!state.session.authenticated || state.session.mode !== "live") return;
+  void reportLivePresence();
+  presenceTimer = window.setInterval(() => {
+    if (document.hidden) return;
+    void reportLivePresence();
+    if (state.view === "users") {
+      void refreshLiveUsers();
+    }
+  }, PRESENCE_INTERVAL_MS);
 }
 
 async function fetchOptionalJson(
@@ -237,6 +297,10 @@ async function loadLiveTestRunLog(testId: string): Promise<void> {
 function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
   const firstHost = net.hosts[0]?.name ?? null;
   const firstTestId = net.tests[0]?.testId;
+  const authLabel =
+    state.session.gateway === "dialtone-magic-link"
+      ? "dialtone.earth email link"
+      : "Cloudflare Access";
   return [
     {
       id: "live-overview",
@@ -245,7 +309,7 @@ function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
       networkSlug: net.slug,
       hostName: null,
       headline: `Live Authenticated Mesh: ${net.slug} (${net.hosts.length} peers)`,
-      caption: `Signed in as ${state.session.subject ?? "verified user"} via Cloudflare Access. Displaying real live Dialtone v${net.snapshot.latest_release} telemetry using the exact same UI model as the signed-out simulated tour.`,
+      caption: `Signed in as ${state.session.subject ?? "verified user"} via ${authLabel}. Displaying real live Dialtone v${net.snapshot.latest_release} telemetry using the exact same UI model as the signed-out simulated tour.`,
     },
     {
       id: "live-network",
@@ -266,6 +330,16 @@ function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
       headline: `Live Host: ${firstHost ?? "origin"}`,
       caption:
         "Live CPU, RAM, Disk, supervised blob processes, iroh-blobs store, and persistent dialtone/shell/1 sessions.",
+    },
+    {
+      id: "live-users",
+      label: "LIVE USERS",
+      view: "users",
+      networkSlug: net.slug,
+      hostName: null,
+      headline: `Signed-In Users & Redacted Shell Log (${net.users.length} active)`,
+      caption:
+        "Logged-in members for this private network, active locations, viewed nodes, and shared dialtone-shell log with keys and passwords redacted.",
     },
     {
       id: "live-tests",
@@ -361,6 +435,7 @@ function renderPanels(): void {
         ${navButton("overview", "Overview")}
         ${navButton("network", `Network: ${net.slug}`)}
         ${navButton("host", `Host: ${host?.name ?? "none"}`)}
+        ${navButton("users", `Users (${net.users.length})`)}
         ${navButton("tests", `Tests (${net.tests.length})`)}
         ${navButton("log", "Log")}
         ${authAction}
@@ -369,6 +444,7 @@ function renderPanels(): void {
     <section class="sim-resource-strip" aria-label="System-wide resource statistics">
       <span><b>NETS</b> ${summary.networks}</span>
       <span><b>NODES</b> ${summary.onlineNodes}/${summary.totalNodes}</span>
+      <span><b>USERS</b> ${summary.activeUsers}</span>
       <span><b>CPU</b> ${summary.cpuCores}c (${summary.avgCpuPercent}%)</span>
       <span><b>RAM</b> ${summary.memUsedGb}/${summary.memTotalGb} GB</span>
       <span><b>DISK</b> ${summary.diskUsedTb}/${summary.diskTotalTb} TB</span>
@@ -386,6 +462,8 @@ function renderPanels(): void {
     drawerEl.innerHTML = renderNetworkView(net);
   } else if (state.view === "host" && host) {
     drawerEl.innerHTML = renderHostView(net, host);
+  } else if (state.view === "users") {
+    drawerEl.innerHTML = renderUsersView(net, isLive);
   } else if (state.view === "tests") {
     drawerEl.innerHTML = renderTestsView(net);
   } else if (testRun) {
@@ -424,11 +502,15 @@ function renderOverviewView(
   summary: ReturnType<typeof summarizeSystemResources>,
   isLive: boolean,
 ): string {
+  const authLabel =
+    state.session.gateway === "dialtone-magic-link"
+      ? "dialtone.earth email link"
+      : "Cloudflare Access";
   const banner = state.liveError
     ? `<p class="sim-callout">${escapeHtml(state.liveError)}</p>`
     : isLive
-      ? `<p class="sim-callout is-live">Authenticated via <strong>Cloudflare Access</strong> as <code>${escapeHtml(state.session.subject ?? "user")}</code>. Showing <strong>live real-time telemetry</strong> from your enrolled Dialtone v0.5.5 mesh (identical data model and screens to the signed-out simulated tour).</p>`
-      : `<p class="sim-callout">You are viewing <strong>simulated Dialtone v0.5.5 telemetry</strong> (zero private data). Select any network below to inspect hosts, blob-backed plugins, error recovery, and test logs—or sign in via Cloudflare Access to inspect your live mesh.</p>`;
+      ? `<p class="sim-callout is-live">Authenticated via <strong>${escapeHtml(authLabel)}</strong> as <code>${escapeHtml(state.session.subject ?? "user")}</code>. Showing <strong>live real-time telemetry</strong> from your enrolled Dialtone v0.5.5 mesh (identical data model and screens to the signed-out simulated tour).</p>`
+      : `<p class="sim-callout">You are viewing <strong>simulated Dialtone v0.5.5 telemetry</strong> (zero private data). Select any network below to inspect hosts, signed-in users, blob-backed plugins, error recovery, and test logs—or sign in to inspect your live mesh.</p>`;
 
   const rows = state.networks
     .map((net) => {
@@ -599,7 +681,8 @@ function renderNetworkView(net: MeshNetwork): string {
         <p class="sim-sub">${escapeHtml(net.regionSummary)} · Dialtone v${escapeHtml(net.snapshot.latest_release)} · Click any host or inspect plugins, blobs, recovery, and tests.</p>
       </div>
       <div class="sim-head-actions">
-        <button type="button" class="sim-btn" data-nav="tests">Open Network Tests (${net.tests.length}) →</button>
+        <button type="button" class="sim-btn" data-nav="users">Users &amp; Shell Log (${net.users.length}) →</button>
+        <button type="button" class="sim-btn" data-nav="tests">Network Tests (${net.tests.length}) →</button>
       </div>
     </div>
     <div class="sim-subtabs" role="tablist">
@@ -690,6 +773,128 @@ function renderHostView(net: MeshNetwork, host: MeshHost): string {
   `;
 }
 
+function renderUsersView(net: MeshNetwork, isLive: boolean): string {
+  const totalLocations = net.users.reduce((sum, u) => sum + u.locations.length, 0);
+  const allShellNodes = Array.from(
+    new Set(net.shellAuditLog.map((e) => e.node).filter(Boolean)),
+  );
+  const activeFilter =
+    state.shellFilterNode === "all" ||
+    allShellNodes.includes(state.shellFilterNode)
+      ? state.shellFilterNode
+      : "all";
+  const filteredLog =
+    activeFilter === "all"
+      ? net.shellAuditLog
+      : net.shellAuditLog.filter((e) => e.node === activeFilter);
+  const totalRedactions = net.shellAuditLog.reduce(
+    (sum, e) => sum + e.redactedCount,
+    0,
+  );
+
+  const usersHtml =
+    net.users.length > 0
+      ? net.users
+          .map((user) => {
+            const locRows = user.locations
+              .map((loc) => {
+                const nodeChip = loc.viewingNode
+                  ? `<button type="button" class="sim-inline-node" data-select-host="${escapeHtml(loc.viewingNode)}">${escapeHtml(loc.viewingNode)}</button>`
+                  : `<span class="sim-dim">${escapeHtml(loc.viewingView)}</span>`;
+                return `
+                  <div class="sim-user-loc-row">
+                    <span><b>LOC</b> ${escapeHtml(loc.location)}</span>
+                    <span><b>VIEWING</b> ${nodeChip}</span>
+                    <span class="sim-dim">${escapeHtml(loc.lastSeenAt)}</span>
+                  </div>
+                `;
+              })
+              .join("");
+
+            const shellNodeChips =
+              user.shellNodes.length > 0
+                ? user.shellNodes
+                    .map(
+                      (node) =>
+                        `<button type="button" class="sim-inline-node" data-select-host="${escapeHtml(node)}">${escapeHtml(node)}</button>`,
+                    )
+                    .join(" ")
+                : `<span class="sim-dim">none recorded</span>`;
+
+            return `
+              <article class="sim-user-card" data-testid="network-user-card">
+                <div class="sim-recovery-head">
+                  <span class="sim-strong"><i class="sim-dot"></i> ${escapeHtml(user.email)}</span>
+                  <span class="sim-pill is-ok">${escapeHtml(user.status.toUpperCase())}</span>
+                  <span class="sim-pill">${user.locations.length} ${user.locations.length === 1 ? "LOCATION" : "LOCATIONS"}</span>
+                  <span class="sim-dim">${escapeHtml(user.role)}</span>
+                </div>
+                <div class="sim-user-locs">${locRows}</div>
+                <div class="sim-user-shell-nodes">
+                  <b>DIALTONE-SHELL NODES</b> ${shellNodeChips}
+                </div>
+              </article>
+            `;
+          })
+          .join("")
+      : `<p class="sim-dim">No active logged-in users reported for ${escapeHtml(net.hostname)} yet.</p>`;
+
+  const filterBar = `
+    <div class="sim-subtabs" role="tablist" aria-label="Filter shell audit log by node">
+      <button type="button" class="sim-subtab ${activeFilter === "all" ? "is-active" : ""}" data-shell-filter="all">All nodes (${net.shellAuditLog.length})</button>
+      ${allShellNodes
+        .map(
+          (node) =>
+            `<button type="button" class="sim-subtab ${activeFilter === node ? "is-active" : ""}" data-shell-filter="${escapeHtml(node)}">${escapeHtml(node)}</button>`,
+        )
+        .join("")}
+    </div>
+  `;
+
+  const auditHtml =
+    filteredLog.length > 0
+      ? filteredLog
+          .map(
+            (entry) => `
+              <article class="sim-session-card" data-testid="shell-audit-entry">
+                <div class="sim-recovery-head">
+                  <button type="button" class="sim-inline-node" data-select-host="${escapeHtml(entry.node)}">${escapeHtml(entry.node)}</button>
+                  <strong>${escapeHtml(entry.user)}</strong>
+                  <span>${escapeHtml(entry.sessionName)} · ${escapeHtml(entry.shell)} · ${escapeHtml(entry.cwd)}</span>
+                  <span class="sim-dim">${escapeHtml(entry.timestamp)}</span>
+                  ${entry.redactedCount > 0 ? `<span class="sim-pill is-warn">${entry.redactedCount} REDACTED</span>` : ""}
+                </div>
+                <pre class="sim-code">$ ${escapeHtml(entry.command)}${entry.output ? `\n${escapeHtml(entry.output)}` : ""}</pre>
+              </article>
+            `,
+          )
+          .join("")
+      : `<p class="sim-dim">No dialtone-shell commands recorded for this filter yet.</p>`;
+
+  return `
+    <div class="sim-panel-head">
+      <div>
+        <h2>SIGNED-IN USERS // ${escapeHtml(net.slug.toUpperCase())} <span class="sim-dim">(${escapeHtml(net.hostname)})</span></h2>
+        <p class="sim-sub">${net.users.length} logged-in user(s) across ${totalLocations} active location(s) · Shared <code>dialtone-shell</code> audit log visible to all signed-in members (${totalRedactions} secret value(s) redacted).</p>
+      </div>
+      <div class="sim-head-actions">
+        <span class="sim-pill is-warn" data-testid="redaction-badge">KEYS &amp; PASSWORDS REDACTED</span>
+        ${isLive ? `<button type="button" class="sim-btn" data-action="refresh-users">↻ Refresh</button>` : ""}
+        <button type="button" class="sim-btn" data-nav="network">← Back to ${escapeHtml(net.slug)}</button>
+      </div>
+    </div>
+    <div class="sim-section-block">
+      <h3>LOGGED-IN MEMBERS &amp; ACTIVE LOCATIONS</h3>
+      <div class="sim-recovery-list">${usersHtml}</div>
+    </div>
+    <div class="sim-section-block" style="margin-top:14px">
+      <h3>SHARED DIALTONE-SHELL LOG (KEYS &amp; PASSWORDS REDACTED)</h3>
+      ${filterBar}
+      <div class="sim-recovery-list">${auditHtml}</div>
+    </div>
+  `;
+}
+
 function renderTestsView(net: MeshNetwork): string {
   const passed = net.tests.filter((t) => t.status === "pass").length;
   return `
@@ -751,6 +956,10 @@ function bindInteractions(): void {
       state.view = target;
       renderPanels();
       syncGlobeFocus();
+      void reportLivePresence();
+      if (target === "users") {
+        void refreshLiveUsers();
+      }
       if (target === "log" && state.testId) {
         void loadLiveTestRunLog(state.testId);
       }
@@ -787,7 +996,26 @@ function bindInteractions(): void {
         state.view = "host";
         renderPanels();
         syncGlobeFocus();
+        void reportLivePresence();
       });
+    });
+
+  app
+    .querySelectorAll<HTMLButtonElement>("[data-shell-filter]")
+    .forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const node = btn.dataset.shellFilter;
+        if (!node) return;
+        pauseTour();
+        state.shellFilterNode = node;
+        renderPanels();
+      });
+    });
+
+  app
+    .querySelector<HTMLButtonElement>('[data-action="refresh-users"]')
+    ?.addEventListener("click", () => {
+      void reportLivePresence().then(() => refreshLiveUsers());
     });
 
   app.querySelectorAll<HTMLButtonElement>("[data-net-tab]").forEach((btn) => {
