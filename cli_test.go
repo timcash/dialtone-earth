@@ -30,6 +30,14 @@ func TestDialtoneEarthRegistrySecurityHeaders(t *testing.T) {
 	runToolInDir(t, "registry", "node", "--test", "tests/security-headers.test.mjs")
 }
 
+func TestDialtoneEarthSimulatedTour(t *testing.T) {
+	runToolInDir(t, "registry", "node", "--test", "tests/simulation.test.mjs")
+}
+
+func TestDialtoneEarthCloudflareGateway(t *testing.T) {
+	runToolInDir(t, "registry", "node", "--test", "tests/gateway.test.mjs")
+}
+
 func TestLintAllSources(t *testing.T) {
 	runAction(t, "lint")
 }
