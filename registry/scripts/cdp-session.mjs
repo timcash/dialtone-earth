@@ -73,22 +73,34 @@ export function runDialtone(bin, args, timeoutMs = 20_000) {
 }
 
 export function readLatestMagicLinkUrl(minIatSec, opts = {}) {
+  const res = tryReadLatestMagicLinkUrl(minIatSec, opts);
+  if (res.authError) throw new Error(res.authError);
+  return res.url;
+}
+
+export function tryReadLatestMagicLinkUrl(minIatSec, opts = {}) {
   const targetOrigin = (opts.targetOrigin || DEFAULT_TARGET_ORIGIN).replace(/\/+$/, "");
   const qaEmail = (opts.qaEmail || process.env.QA_EMAIL || "test@dialtone.earth")
     .trim()
     .toLowerCase();
   const gmailCmd = opts.gmailCmd || process.env.QA_GMAIL_CMD || "gmail";
   const query = `in:anywhere from:login@dialtone.earth ${qaEmail} newer_than:1d`;
-  const output =
-    process.platform === "win32"
-      ? execSync(`${gmailCmd} readonly read "${query}" --max 3`, {
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-        })
-      : execFileSync(gmailCmd, ["readonly", "read", query, "--max", "3"], {
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-        });
+  let output = "";
+  try {
+    output =
+      process.platform === "win32"
+        ? execSync(`${gmailCmd} readonly read "${query}" --max 3`, {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+          })
+        : execFileSync(gmailCmd, ["readonly", "read", query, "--max", "3"], {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+  } catch (err) {
+    const detail = String(err?.stderr || err?.message || err).trim();
+    return { url: null, authError: detail };
+  }
   const regex = new RegExp(
     `${targetOrigin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/auth/verify\\?token=([A-Za-z0-9._~%-]+)`,
     "g",
@@ -107,13 +119,13 @@ export function readLatestMagicLinkUrl(minIatSec, opts = {}) {
         typeof payload.iat === "number" &&
         payload.iat >= minIatSec
       ) {
-        return match[0];
+        return { url: match[0], authError: null };
       }
     } catch {
       // ignore malformed match
     }
   }
-  return null;
+  return { url: null, authError: null };
 }
 
 export class CdpClient {

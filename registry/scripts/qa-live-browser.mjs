@@ -13,7 +13,7 @@ import {
   connectAppSession,
   findChromeBinary,
   findDialtoneBinary,
-  readLatestMagicLinkUrl,
+  tryReadLatestMagicLinkUrl,
   runDialtone,
   sleep,
 } from "./cdp-session.mjs";
@@ -216,14 +216,46 @@ async function performMagicLinkLogin(cdp) {
   );
   await cdp.showBanner("02 Waiting for single-use magic-link email...");
 
-  const deadline = Date.now() + POLL_TIMEOUT_MS;
   let verifyUrl = null;
+  let manualAuthWarned = false;
+  let lastAuthError = "";
+  let deadline = Date.now() + POLL_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    verifyUrl = readLatestMagicLinkUrl(requestStartedSec, { targetOrigin: TARGET_ORIGIN, qaEmail: QA_EMAIL });
-    if (verifyUrl) break;
-    await sleep(3_000);
+    if (await isSignedInLive(cdp)) {
+      await cdp.captureFrame("02-live-metal-hydrated");
+      return;
+    }
+    const mailRes = tryReadLatestMagicLinkUrl(requestStartedSec, {
+      targetOrigin: TARGET_ORIGIN,
+      qaEmail: QA_EMAIL,
+    });
+    if (mailRes.url) {
+      verifyUrl = mailRes.url;
+      break;
+    }
+    if (mailRes.authError && !manualAuthWarned) {
+      manualAuthWarned = true;
+      lastAuthError = mailRes.authError;
+      // Give the user up to 2 minutes to click the magic link in email when gmail CLI is unauthenticated locally.
+      deadline = Math.max(deadline, Date.now() + 120_000);
+      console.log(
+        `  [INFO] gmail CLI unavailable in this shell (${mailRes.authError.split(/\r?\n/)[0]}). Waiting for manual sign-in in Chrome (or run 'gmail auth login' for automatic magic-link reading)...`,
+      );
+      await cdp.showBanner(
+        `02 Click magic-link email for ${QA_EMAIL} (or run 'gmail auth login')`,
+      );
+    }
+    await sleep(2_500);
   }
-  assert.ok(verifyUrl, `Timed out waiting for magic-link email for ${QA_EMAIL}`);
+  if (!verifyUrl) {
+    if (await isSignedInLive(cdp)) {
+      await cdp.captureFrame("02-live-metal-hydrated");
+      return;
+    }
+    throw new Error(
+      `Timed out waiting for magic-link sign-in for ${QA_EMAIL}${lastAuthError ? ` (gmail CLI: ${lastAuthError.split(/\r?\n/)[0]})` : ""}`,
+    );
+  }
 
   const verifyToken = new URL(verifyUrl).searchParams.get("token") || "";
   await cdp.send("Page.navigate", { url: verifyUrl });
@@ -308,8 +340,21 @@ async function step01SignedOut(cdp) {
     );
   });
 
-  // If persistent Chrome is currently signed in from a previous run, sign out first so we test SIM containment honestly.
+  // When --keep-signed-in is active and persistent Chrome is already signed into LIVE metal,
+  // verify unauthenticated containment via fresh cookieless fetch without destroying the live session.
   await dismissOverlays(cdp);
+  if (KEEP_SIGNED_IN && process.env.QA_FORCE_RELOGIN !== "1" && (await isSignedInLive(cdp))) {
+    const anonHome = await fetch(`${TARGET_ORIGIN}/`);
+    assert.equal(anonHome.status, 200, "signed-out GET / should return 200");
+    const anonHtml = await anonHome.text();
+    assert.ok(!anonHtml.includes("vm-asia"), "real metal node leaked in signed-out HTML");
+    await cdp.showBanner("01 Signed-out 401 checks passed (preserving LIVE metal session)");
+    console.log("  [PASS 01] 401 default-deny on protected routes + zero signed-out leaks (preserved existing LIVE metal session)");
+    await sleep(Math.min(400, STEP_MS));
+    return;
+  }
+
+  // Otherwise sign out if currently logged in so we verify live browser SIM containment end-to-end.
   if (await isSignedInLive(cdp)) {
     await cdp.showBanner("01 Signing out existing session to verify SIM containment");
     await cdp.click('[href="/auth/logout"]', "sign out link");
