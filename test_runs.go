@@ -8,10 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -37,6 +41,8 @@ type testState struct {
 type testEntry struct {
 	Name      string `json:"name"`
 	Title     string `json:"title"`
+	Section   string `json:"section,omitempty"`
+	Source    string `json:"source,omitempty"`
 	Status    string `json:"status"`
 	Elapsed   string `json:"elapsed"`
 	Timestamp string `json:"timestamp"`
@@ -47,6 +53,8 @@ type testRunRecord struct {
 	TestID      string `json:"test-id"`
 	Name        string `json:"name"`
 	Title       string `json:"title"`
+	Section     string `json:"section,omitempty"`
+	Source      string `json:"source,omitempty"`
 	Command     string `json:"command"`
 	Status      string `json:"status"`
 	Timestamp   string `json:"timestamp"`
@@ -57,6 +65,7 @@ type testRunRecord struct {
 
 // goTestEvent is one line of `go test -json`.
 type goTestEvent struct {
+	Time    string
 	Action  string
 	Test    string
 	Output  string
@@ -100,7 +109,172 @@ func newTestState(names []string) testState {
 }
 
 func newTestEntry(name string) testEntry {
-	return testEntry{Name: name, Title: testTitle(name), Status: "pending", Elapsed: "0", Timestamp: "none"}
+	return testEntry{
+		Name:      name,
+		Title:     testTitle(name),
+		Section:   testSection(name),
+		Status:    "pending",
+		Elapsed:   "0",
+		Timestamp: "none",
+	}
+}
+
+func testSection(name string) string {
+	switch name {
+	case "TestDialtoneEarthLiveMetalUIParity",
+		"TestDialtoneEarthGlobeH3AndBundledArcs",
+		"TestDialtoneEarthTilingWindowManagerAndQueryRates",
+		"TestDialtoneEarthCameraStudioTypeScript",
+		"TestDialtoneEarthCloudflareKVConfigAndTour",
+		"TestDialtoneEarthSimulatedTour":
+		return "Live metal Data & UI"
+	case "TestDialtoneEarthCloudflareGateway",
+		"TestDialtoneEarthRegistrySecurityHeaders",
+		"TestDialtoneEarthOriginBridge",
+		"TestDialtoneEarthRegistryNetworks":
+		return "Cloudflare Gateway & Security"
+	case "TestDialtoneEarthLiveControlCLI",
+		"TestLintAllSources",
+		"TestBuildArtifacts",
+		"TestDeployLocalBundle",
+		"TestUIUnitTests",
+		"TestWebUIInstallablePWA":
+		return "Build, Live CLI & PWA"
+	default:
+		return "CLI & Test Runner Contracts"
+	}
+}
+
+// discoverTestSources scans *_test.go files in root using go/parser so every
+// test entry and structured log line carries an exact file:line code location.
+func discoverTestSources(root string) map[string]string {
+	locations := map[string]string{}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return locations
+	}
+	fset := token.NewFileSet()
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "_test.go") {
+			continue
+		}
+		path := filepath.Join(root, entry.Name())
+		parsed, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			continue
+		}
+		for _, decl := range parsed.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv != nil || !strings.HasPrefix(fn.Name.Name, "Test") {
+				continue
+			}
+			pos := fset.Position(fn.Pos())
+			locations[fn.Name.Name] = fmt.Sprintf("%s:%d", entry.Name(), pos.Line)
+		}
+	}
+	return locations
+}
+
+func populateTestSources(root string, state *testState) {
+	locations := discoverTestSources(root)
+	for i := range state.Tests {
+		if state.Tests[i].Section == "" {
+			state.Tests[i].Section = testSection(state.Tests[i].Name)
+		}
+		if src, ok := locations[state.Tests[i].Name]; ok {
+			state.Tests[i].Source = src
+		}
+	}
+}
+
+var inlineSourceLocRe = regexp.MustCompile(`([A-Za-z0-9_.-]+(?:[/\\][A-Za-z0-9_.-]+)*\.(?:go|ts|tsx|js|mjs|cjs|rs|css|html)):(\d+)`)
+
+func detectLogLevel(line string) string {
+	trimmed := strings.TrimSpace(line)
+	lower := strings.ToLower(trimmed)
+	switch {
+	case strings.Contains(trimmed, "--- FAIL:") ||
+		trimmed == "FAIL" ||
+		strings.HasPrefix(trimmed, "FAIL\t") ||
+		strings.HasPrefix(trimmed, "FAIL ") ||
+		strings.HasPrefix(trimmed, "✖") ||
+		strings.HasPrefix(trimmed, "not ok ") ||
+		strings.Contains(trimmed, "AssertionError") ||
+		strings.Contains(trimmed, "Error:") ||
+		strings.Contains(trimmed, "panic:") ||
+		strings.Contains(lower, "exit status") ||
+		strings.Contains(lower, "failed:") ||
+		strings.HasPrefix(trimmed, "at file://"):
+		return "ERROR"
+	case strings.Contains(trimmed, "--- SKIP:") ||
+		strings.HasPrefix(trimmed, "(!)") ||
+		strings.Contains(lower, "warn:") ||
+		strings.Contains(lower, "warning:"):
+		return "WARN "
+	case strings.Contains(trimmed, "--- PASS:") ||
+		trimmed == "PASS" ||
+		strings.HasPrefix(trimmed, "✔") ||
+		strings.HasPrefix(trimmed, "ok \t") ||
+		strings.HasPrefix(trimmed, "ok  "):
+		return "PASS "
+	default:
+		return "INFO "
+	}
+}
+
+func formatLogTimestamp(eventTime string) string {
+	if t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(eventTime)); err == nil {
+		return t.UTC().Format("2006-01-02T15:04:05.000Z")
+	}
+	return time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+}
+
+func extractLineSource(root, line, fallback string) string {
+	if match := inlineSourceLocRe.FindStringSubmatch(line); len(match) == 3 {
+		file := strings.ReplaceAll(match[1], "\\", "/")
+		rootSlash := strings.TrimSuffix(strings.ReplaceAll(root, "\\", "/"), "/")
+		rootNoDrive := rootSlash
+		if len(rootNoDrive) >= 2 && rootNoDrive[1] == ':' {
+			rootNoDrive = strings.TrimPrefix(rootNoDrive[2:], "/")
+		}
+		file = strings.TrimPrefix(file, rootSlash+"/")
+		file = strings.TrimPrefix(file, rootNoDrive+"/")
+		return file + ":" + match[2]
+	}
+	if fallback != "" {
+		return fallback
+	}
+	return "test:0"
+}
+
+// formatStructuredLogOutput enriches real `go test -json` output lines with
+// UTC timestamp, log level ([INFO ]/[PASS ]/[WARN ]/[ERROR]), and file:line.
+// Synthetic test fixtures without Event.Time keep raw lines unchanged.
+func formatStructuredLogOutput(root, eventTime, defaultSource, rawOutput string) string {
+	if strings.TrimSpace(eventTime) == "" {
+		return rawOutput
+	}
+	ts := formatLogTimestamp(eventTime)
+	hasTrailingNewline := strings.HasSuffix(rawOutput, "\n")
+	trimmed := strings.TrimSuffix(rawOutput, "\n")
+	lines := strings.Split(trimmed, "\n")
+	var out strings.Builder
+	for i, line := range lines {
+		clean := strings.TrimRight(line, "\r")
+		if strings.TrimSpace(clean) == "" {
+			if hasTrailingNewline || i < len(lines)-1 {
+				out.WriteByte('\n')
+			}
+			continue
+		}
+		level := detectLogLevel(clean)
+		source := extractLineSource(root, clean, defaultSource)
+		fmt.Fprintf(&out, "%s [%s] %s | %s", ts, level, source, clean)
+		if hasTrailingNewline || i < len(lines)-1 {
+			out.WriteByte('\n')
+		}
+	}
+	return out.String()
 }
 
 func (state *testState) entry(name string) *testEntry {
@@ -154,6 +328,7 @@ func runGoTests(root string, state *testState, pattern string, stdout io.Writer)
 // consumeGoTestEvents reads `go test -json` lines and records what happened.
 // Subtest output is folded into the log of the test that owns it.
 func consumeGoTestEvents(root string, state *testState, events io.Reader, stdout io.Writer) ([]string, error) {
+	populateTestSources(root, state)
 	active := map[string]*activeTest{}
 	var failures []string
 	scanner := bufio.NewScanner(events)
@@ -171,7 +346,8 @@ func consumeGoTestEvents(root string, state *testState, events io.Reader, stdout
 				return failures, err
 			}
 			if run := active[owner]; run != nil {
-				if _, err := io.WriteString(run.log, event.Output); err != nil {
+				formatted := formatStructuredLogOutput(root, event.Time, run.record.Source, event.Output)
+				if _, err := io.WriteString(run.log, formatted); err != nil {
 					return failures, err
 				}
 			}
@@ -234,6 +410,8 @@ func beginTestRun(root string, state *testState, name string) (*activeTest, erro
 		TestID:    id,
 		Name:      name,
 		Title:     entry.Title,
+		Section:   entry.Section,
+		Source:    entry.Source,
 		Command:   fmt.Sprintf("go run . test --filter %q", "^"+name+"$"),
 		Status:    "running",
 		Timestamp: entry.Timestamp,

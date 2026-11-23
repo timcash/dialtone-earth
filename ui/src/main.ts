@@ -1,9 +1,18 @@
 import "./style.css";
-import { elapsedSeconds, normalizeStatus, statusLabel, testLogHref } from "./model.js";
+import {
+  elapsedSeconds,
+  groupTestsBySection,
+  normalizeStatus,
+  parseStructuredLogLine,
+  statusLabel,
+  testLogHref,
+} from "./model.js";
 
 type TestRow = {
   name: string;
   title: string;
+  section?: string;
+  source?: string;
   status: string;
   elapsed: string;
   timestamp: string;
@@ -33,6 +42,7 @@ function render(): void {
   const passed = tests.filter((test) => normalizeStatus(test.status) === "pass").length;
   const failed = tests.filter((test) => normalizeStatus(test.status) === "fail").length;
   const running = tests.some((test) => normalizeStatus(test.status) === "running");
+  const sections = groupTestsBySection(tests);
 
   app.innerHTML = `
     <main>
@@ -48,13 +58,18 @@ function render(): void {
         </section>
         <section class="summary" aria-label="Test summary">
           <span><strong>${tests.length}</strong> total</span>
+          <span><strong>${sections.length}</strong> sections</span>
           <span class="passed"><strong>${passed}</strong> passed</span>
           <span class="${failed > 0 ? "failed" : ""}"><strong>${failed}</strong> failed</span>
         </section>
         ${errorMessage ? `<p class="error" role="alert">${escapeHtml(errorMessage)}</p>` : ""}
       </header>
-      <section class="test-list" aria-label="Tests">
-        ${tests.length > 0 ? tests.map(renderTest).join("") : `<p class="empty">${loaded ? "No tests listed yet. Press Start tests." : "Loading tests…"}</p>`}
+      <section class="test-sections" aria-label="Test sections">
+        ${
+          tests.length > 0
+            ? sections.map(renderSection).join("")
+            : `<section class="test-list"><p class="empty">${loaded ? "No tests listed yet. Press Start tests." : "Loading tests…"}</p></section>`
+        }
       </section>
     </main>
   `;
@@ -65,15 +80,46 @@ function render(): void {
   });
 }
 
+function renderSection(section: { title: string; description: string; tests: TestRow[] }): string {
+  const secPassed = section.tests.filter((t) => normalizeStatus(t.status) === "pass").length;
+  const secFailed = section.tests.filter((t) => normalizeStatus(t.status) === "fail").length;
+  const secRunning = section.tests.some((t) => normalizeStatus(t.status) === "running");
+  const badgeClass = secFailed > 0 ? "failed" : secRunning ? "running" : secPassed === section.tests.length ? "passed" : "";
+  const badgeText =
+    secFailed > 0
+      ? `${secFailed} failed · ${secPassed}/${section.tests.length} passed`
+      : secRunning
+        ? `running · ${secPassed}/${section.tests.length}`
+        : `${secPassed}/${section.tests.length} passed`;
+
+  return `
+    <section class="test-section" data-testid="test-section" data-section="${escapeHtml(section.title)}">
+      <div class="section-head">
+        <div>
+          <h2 class="section-title">${escapeHtml(section.title)}</h2>
+          ${section.description ? `<p class="section-desc">${escapeHtml(section.description)}</p>` : ""}
+        </div>
+        <span class="section-badge ${badgeClass}">${escapeHtml(badgeText)}</span>
+      </div>
+      <div class="test-list">
+        ${section.tests.map(renderTest).join("")}
+      </div>
+    </section>
+  `;
+}
+
 function renderTest(test: TestRow): string {
   const status = normalizeStatus(test.status);
   const elapsed = elapsedSeconds(test).toFixed(2);
   const logHref = testLogHref(test["test-id"], import.meta.env.BASE_URL);
   return `
-    <article class="test-card ${status}" data-status="${status}" data-testid="test-row">
+    <article class="test-card ${status}" data-status="${status}" data-testid="test-row" data-test-name="${escapeHtml(test.name)}">
       <section class="test-copy">
-        <h2>${escapeHtml(test.title)}</h2>
-        <code>${escapeHtml(test.name)}</code>
+        <h3>${escapeHtml(test.title)}</h3>
+        <div class="test-meta">
+          <code>${escapeHtml(test.name)}</code>
+          ${test.source ? `<span class="test-src">${escapeHtml(test.source)}</span>` : ""}
+        </div>
       </section>
       <section class="result" aria-label="${escapeHtml(test.title)} result">
         <strong>${statusLabel(test.status)}</strong>
@@ -137,7 +183,9 @@ let renderedRun = "";
 function runDetails(run: TestRun): string {
   const details = [
     ["test-id", `<code data-testid="test-run-id">${escapeHtml(run["test-id"])}</code>`],
+    ...(run.section ? [["Section", escapeHtml(run.section)]] : []),
     ["Go test", `<code>${escapeHtml(run.name)}</code>`],
+    ...(run.source ? [["Source", `<code data-testid="test-run-source">${escapeHtml(run.source)}</code>`]] : []),
     ["Status", statusLabel(run.status)],
     ["Elapsed", `<span data-testid="test-run-elapsed">${elapsedSeconds(run).toFixed(2)}s</span>`],
     ["Started", `<time>${escapeHtml(run.timestamp)}</time>`],
@@ -145,6 +193,22 @@ function runDetails(run: TestRun): string {
     ...(run.artifact ? [["Log file", `<code>${escapeHtml(run.artifact)}</code>`]] : []),
   ];
   return details.map(([label, value]) => `<dt>${label}</dt><dd>${value}</dd>`).join("");
+}
+
+function renderFormattedLog(rawLog: string): string {
+  if (!rawLog) return "Waiting for output…";
+  return rawLog
+    .split("\n")
+    .map((line) => {
+      if (!line) return "";
+      const parsed = parseStructuredLogLine(line);
+      const cls = `log-line log-line-${parsed.level.toLowerCase()}`;
+      if (!parsed.structured) {
+        return `<span class="${cls}">${escapeHtml(line)}</span>`;
+      }
+      return `<span class="${cls}"><span class="log-ts">${escapeHtml(parsed.timestamp)}</span> <span class="log-lvl">[${escapeHtml(parsed.level)}]</span> <span class="log-src">${escapeHtml(parsed.source)}</span> <span class="log-sep">|</span> ${escapeHtml(parsed.message)}</span>`;
+    })
+    .join("\n");
 }
 
 async function refreshLogPage(testId: string): Promise<void> {
@@ -169,8 +233,8 @@ async function refreshLogPage(testId: string): Promise<void> {
         <pre class="command" data-testid="test-run-command"><code>${escapeHtml(run.command)}</code></pre>
         <a href="/api/test-runs/${encodeURIComponent(testId)}/log" target="_blank" rel="noreferrer">Raw log</a>
       </header>
-      <h2>Output</h2>
-      <pre class="log-output" data-testid="test-log-output" aria-label="Test run output">${escapeHtml(run.log || "Waiting for output…")}</pre>
+      <h2>Output (timestamp · level · file:line)</h2>
+      <pre class="log-output" data-testid="test-log-output" aria-label="Test run output">${renderFormattedLog(run.log)}</pre>
     </main>`;
 }
 
@@ -195,10 +259,10 @@ if (location.pathname.replace(/\/$/, "").endsWith("/logs")) {
     refreshTests().catch(showError);
   }, 500);
   setInterval(() => {
-    const rows = app.querySelectorAll<HTMLElement>('[data-testid="test-row"]');
-    tests.forEach((test, index) => {
+    tests.forEach((test) => {
       if (normalizeStatus(test.status) !== "running") return;
-      const time = rows[index]?.querySelector("time");
+      const row = app.querySelector<HTMLElement>(`[data-test-name="${CSS.escape(test.name)}"]`);
+      const time = row?.querySelector("time");
       if (time) time.textContent = `${elapsedSeconds(test).toFixed(2)}s`;
     });
   }, 100);

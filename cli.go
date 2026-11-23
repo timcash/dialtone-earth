@@ -204,6 +204,7 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 		return nil
 	}
 	state := newTestState(names)
+	populateTestSources(root, &state)
 	if err := writeTestState(root, &state); err != nil {
 		return err
 	}
@@ -305,6 +306,7 @@ func runDev(args []string, stdout, stderr io.Writer) error {
 	}
 	if !fileExists(filepath.Join(root, stateFile)) {
 		state := newTestState(names)
+		populateTestSources(root, &state)
 		if err := writeTestState(root, &state); err != nil {
 			return err
 		}

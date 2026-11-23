@@ -18,6 +18,26 @@ import (
 	"testing"
 )
 
+func TestDialtoneEarthLiveMetalUIParity(t *testing.T) {
+	runToolInDir(t, "registry", "node", "--test", "--test-name-pattern=^metal-live-parity", "tests/metal-ui-e2e.test.mjs")
+}
+
+func TestDialtoneEarthGlobeH3AndBundledArcs(t *testing.T) {
+	runToolInDir(t, "registry", "node", "--test", "--test-name-pattern=^metal-globe-h3-arcs", "tests/metal-ui-e2e.test.mjs")
+}
+
+func TestDialtoneEarthTilingWindowManagerAndQueryRates(t *testing.T) {
+	runToolInDir(t, "registry", "node", "--test", "--test-name-pattern=^metal-tiling-wm-rates", "tests/metal-ui-e2e.test.mjs")
+}
+
+func TestDialtoneEarthCameraStudioTypeScript(t *testing.T) {
+	runToolInDir(t, "registry", "node", "--test", "--test-name-pattern=^metal-camera-studio", "tests/metal-ui-e2e.test.mjs")
+}
+
+func TestDialtoneEarthCloudflareKVConfigAndTour(t *testing.T) {
+	runToolInDir(t, "registry", "node", "--test", "--test-name-pattern=^metal-kv-config-and-captions", "tests/metal-ui-e2e.test.mjs")
+}
+
 func TestDialtoneEarthRegistryNetworks(t *testing.T) {
 	runToolInDir(t, "registry", "node", "--test", "tests/networks.test.mjs")
 }
@@ -57,6 +77,40 @@ func TestUIUnitTests(t *testing.T) {
 func TestWebUIInstallablePWA(t *testing.T) {
 	runTool(t, "npm", "--prefix", "ui", "run", "build")
 	runTool(t, "node", "--test", "ui/acceptance/pwa-install.mjs")
+}
+
+func TestStructuredTestLogsIncludeTimestampLevelAndSource(t *testing.T) {
+	root := t.TempDir()
+	writeFixture(t, filepath.Join(root, "sample_test.go"), "package main\n\nfunc TestSampleFailure() {}\n")
+	state := newTestState([]string{"TestSampleFailure"})
+	stream := strings.Join([]string{
+		`{"Time":"2026-11-23T18:30:01.100Z","Action":"run","Test":"TestSampleFailure"}`,
+		`{"Time":"2026-11-23T18:30:01.120Z","Action":"output","Test":"TestSampleFailure","Output":"starting metal channel check\n"}`,
+		`{"Time":"2026-11-23T18:30:01.245Z","Action":"output","Test":"TestSampleFailure","Output":"    registry/tests/metal-ui-e2e.test.mjs:290: AssertionError: expected vm-us-metal\n"}`,
+		`{"Time":"2026-11-23T18:30:01.250Z","Action":"output","Test":"TestSampleFailure","Output":"--- FAIL: TestSampleFailure (0.15s)\n"}`,
+		`{"Time":"2026-11-23T18:30:01.251Z","Action":"fail","Test":"TestSampleFailure","Elapsed":0.15}`,
+	}, "\n")
+	failures, err := consumeGoTestEvents(root, &state, strings.NewReader(stream), &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failures) != 1 || failures[0] != "TestSampleFailure" {
+		t.Fatalf("failures = %v, want [TestSampleFailure]", failures)
+	}
+	entry := state.Tests[0]
+	if entry.Source != "sample_test.go:3" {
+		t.Fatalf("entry.Source = %q, want sample_test.go:3", entry.Source)
+	}
+	log := readFileString(t, filepath.Join(root, "logs", entry.TestID+".log"))
+	for _, want := range []string{
+		"2026-11-23T18:30:01.120Z [INFO ] sample_test.go:3 | starting metal channel check",
+		"2026-11-23T18:30:01.245Z [ERROR] registry/tests/metal-ui-e2e.test.mjs:290 |",
+		"2026-11-23T18:30:01.250Z [ERROR] sample_test.go:3 | --- FAIL: TestSampleFailure (0.15s)",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("structured log missing %q:\n%s", want, log)
+		}
+	}
 }
 
 func TestHelpListsEveryAction(t *testing.T) {
