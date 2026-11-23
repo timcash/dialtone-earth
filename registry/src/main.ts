@@ -841,9 +841,23 @@ function renderTourCaptions(): void {
   const ccEl = app.querySelector<HTMLElement>("#tour-captions");
   if (!ccEl) return;
 
-  if (!state.tourCaptionsVisible || state.tableFullscreen) {
+  if (state.tableFullscreen) {
     ccEl.innerHTML = "";
     ccEl.hidden = true;
+    return;
+  }
+
+  const controlsHtml = `
+    <span class="cc-controls">
+      <button type="button" class="tbl-chip" data-action="prev-step" title="Previous tour step">◀</button>
+      <button type="button" class="tbl-chip ${state.tourPlaying ? "is-active" : ""}" data-action="toggle-tour" data-testid="toggle-tour" aria-pressed="${state.tourPlaying}">${state.tourPlaying ? "⏸ tour" : "▶ tour"}</button>
+      <button type="button" class="tbl-chip" data-action="next-step" title="Next tour step">▶</button>
+    </span>
+  `;
+
+  if (!state.tourCaptionsVisible) {
+    ccEl.hidden = false;
+    ccEl.innerHTML = `<div class="cc-head-row">${controlsHtml}</div>`;
     return;
   }
 
@@ -852,8 +866,8 @@ function renderTourCaptions(): void {
   const liveCtrl = !isLive ? state.liveSite : null;
   const step = state.tourSteps[state.tourStepIndex] ?? state.tourSteps[0];
   if (!step) {
-    ccEl.innerHTML = "";
-    ccEl.hidden = true;
+    ccEl.hidden = false;
+    ccEl.innerHTML = `<div class="cc-head-row">${controlsHtml}</div>`;
     return;
   }
 
@@ -862,7 +876,10 @@ function renderTourCaptions(): void {
 
   ccEl.hidden = false;
   ccEl.innerHTML = `
-    <div class="cc-line cc-kicker">CC · TOUR ${state.tourStepIndex + 1}/${state.tourSteps.length} · ${escapeHtml(step.label)}</div>
+    <div class="cc-head-row">
+      <span class="cc-line cc-kicker">CC · TOUR ${state.tourStepIndex + 1}/${state.tourSteps.length} · ${escapeHtml(step.label)}</span>
+      ${controlsHtml}
+    </div>
     <div class="cc-line cc-headline">${escapeHtml(headline)}</div>
     <div class="cc-line cc-body">${escapeHtml(caption)}</div>
   `;
@@ -983,9 +1000,6 @@ function renderBottomWorkspace(): void {
           <span class="tbl-split-group" aria-label="Split table layout">${layoutButtons}</span>
           <button type="button" class="tbl-chip ${!state.tableMinimized && !state.tableFullscreen ? "is-active" : ""}" data-action="toggle-minimize" data-testid="toggle-minimize" aria-pressed="${state.tableMinimized}">${state.tableMinimized ? "table" : "min"}</button>
           <button type="button" class="tbl-chip ${state.tableFullscreen ? "is-active" : ""}" data-action="toggle-fullscreen" data-testid="toggle-fullscreen" aria-pressed="${state.tableFullscreen}">${state.tableFullscreen ? "dock" : "full"}</button>
-          <button type="button" class="tbl-chip" data-action="prev-step" title="Previous tour step">◀</button>
-          <button type="button" class="tbl-chip ${state.tourPlaying ? "is-active" : ""}" data-action="toggle-tour" aria-pressed="${state.tourPlaying}">${state.tourPlaying ? "⏸ tour" : "▶ tour"}</button>
-          <button type="button" class="tbl-chip" data-action="next-step" title="Next tour step">▶</button>
           ${authAction}
         </div>
       </div>

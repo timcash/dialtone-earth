@@ -127,6 +127,21 @@ a {
   display: none;
 }
 
+.cc-head-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.cc-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  pointer-events: auto;
+  background: var(--panel);
+}
+
 .cc-line {
   background: var(--panel);
   padding: 3px 8px;
