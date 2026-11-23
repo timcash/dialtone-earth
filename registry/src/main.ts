@@ -26,8 +26,24 @@ type SessionInfo = {
   logout_url?: string | null;
 };
 
+type LiveSiteState = {
+  revision: number;
+  updated_at: string | null;
+  updated_by: string | null;
+  title: string | null;
+  badge: string | null;
+  banner: string | null;
+  headline: string | null;
+  subline: string | null;
+  theme: "light" | "dark" | null;
+  view: TourView | null;
+  network: string | null;
+  tour_playing: boolean | null;
+};
+
 type AppState = {
   session: SessionInfo;
+  liveSite: LiveSiteState | null;
   networks: MeshNetwork[];
   tourSteps: TourStep[];
   view: TourView;
@@ -44,6 +60,7 @@ type AppState = {
 
 const TOUR_INTERVAL_MS = 6_500;
 const PRESENCE_INTERVAL_MS = 30_000;
+const LIVE_POLL_INTERVAL_MS = 1_500;
 
 const appElement = document.querySelector<HTMLDivElement>("#app");
 if (!appElement) throw new Error("Missing app root");
@@ -56,6 +73,7 @@ const state: AppState = {
     network: null,
     gateway: "cloudflare-access",
   },
+  liveSite: null,
   networks: SIMULATED_NETWORKS,
   tourSteps: SIMULATED_TOUR_STEPS,
   view: "overview",
@@ -75,6 +93,7 @@ const state: AppState = {
 let globeController: OverviewGlobeController | null = null;
 let tourTimer: number | null = null;
 let presenceTimer: number | null = null;
+let livePollTimer: number | null = null;
 
 void boot();
 
@@ -96,6 +115,8 @@ async function boot(): Promise<void> {
       state.tourSteps = buildLiveTourSteps(liveNetwork);
       state.tourStepIndex = 0;
     }
+  } else {
+    await pollLiveSiteState(true);
   }
 
   mountShell();
@@ -114,6 +135,7 @@ async function boot(): Promise<void> {
 
   startTourTimer();
   startPresenceHeartbeat();
+  startLiveSitePolling();
 }
 
 async function detectSession(): Promise<SessionInfo> {
@@ -239,6 +261,88 @@ function startPresenceHeartbeat(): void {
       void refreshLiveUsers();
     }
   }, PRESENCE_INTERVAL_MS);
+}
+
+async function pollLiveSiteState(initial = false): Promise<void> {
+  if (state.session.authenticated) return;
+  const payload = await fetchOptionalJson("/api/live");
+  if (!payload || typeof payload.revision !== "number") return;
+  const next: LiveSiteState = {
+    revision: Math.floor(payload.revision),
+    updated_at: typeof payload.updated_at === "string" ? payload.updated_at : null,
+    updated_by: typeof payload.updated_by === "string" ? payload.updated_by : null,
+    title: typeof payload.title === "string" ? payload.title : null,
+    badge: typeof payload.badge === "string" ? payload.badge : null,
+    banner: typeof payload.banner === "string" ? payload.banner : null,
+    headline: typeof payload.headline === "string" ? payload.headline : null,
+    subline: typeof payload.subline === "string" ? payload.subline : null,
+    theme:
+      payload.theme === "light" || payload.theme === "dark"
+        ? payload.theme
+        : null,
+    view:
+      payload.view === "overview" ||
+      payload.view === "network" ||
+      payload.view === "host" ||
+      payload.view === "users" ||
+      payload.view === "tests" ||
+      payload.view === "log"
+        ? payload.view
+        : null,
+    network: typeof payload.network === "string" ? payload.network : null,
+    tour_playing:
+      typeof payload.tour_playing === "boolean" ? payload.tour_playing : null,
+  };
+  const changed =
+    state.liveSite === null || state.liveSite.revision !== next.revision;
+  if (!changed) return;
+
+  state.liveSite = next;
+  applyLiveSiteState(next, initial);
+}
+
+function applyLiveSiteState(live: LiveSiteState, initial: boolean): void {
+  document.documentElement.dataset.theme =
+    live.theme === "light" ? "light" : "dark";
+  if (live.title) {
+    document.title = `${live.title} — dialtone.earth`;
+  } else if (!state.session.authenticated) {
+    document.title = "dialtone.earth — simulated system tour";
+  }
+  if (live.network) {
+    const matched = state.networks.find((n) => n.slug === live.network);
+    if (matched) {
+      state.networkSlug = matched.slug;
+      state.hostName = matched.hosts[0]?.name ?? "";
+      state.testId = matched.tests[0]?.testId ?? "";
+    }
+  }
+  if (live.view) {
+    state.view = live.view;
+  }
+  if (typeof live.tour_playing === "boolean") {
+    state.tourPlaying = live.tour_playing;
+    if (!initial) {
+      if (state.tourPlaying) startTourTimer();
+      else clearTourTimer();
+    }
+  }
+  if (!initial) {
+    renderPanels();
+    syncGlobeFocus();
+  }
+}
+
+function startLiveSitePolling(): void {
+  if (livePollTimer !== null) {
+    window.clearInterval(livePollTimer);
+    livePollTimer = null;
+  }
+  if (state.session.authenticated) return;
+  livePollTimer = window.setInterval(() => {
+    if (document.hidden) return;
+    void pollLiveSiteState(false);
+  }, LIVE_POLL_INTERVAL_MS);
 }
 
 async function fetchOptionalJson(
@@ -415,9 +519,26 @@ function renderPanels(): void {
   const testRun = activeTestRun(net);
 
   const isLive = state.session.authenticated && !net.simulated;
+  const liveCtrl = !isLive ? state.liveSite : null;
+  const wordmarkText = liveCtrl?.title || "dialtone // earth";
   const modeBadge = isLive
     ? `<span class="sim-badge is-live" data-testid="live-badge">LIVE MESH · ${escapeHtml(net.slug.toUpperCase())} (${escapeHtml(state.session.subject ?? "CLOUDFLARE ACCESS")})</span>`
-    : `<span class="sim-badge is-sim" data-testid="simulated-badge">SIMULATED TOUR · NOT SIGNED IN</span>`;
+    : liveCtrl?.badge
+      ? `<span class="sim-badge is-live" data-testid="live-cli-badge">${escapeHtml(liveCtrl.badge)}</span>`
+      : `<span class="sim-badge is-sim" data-testid="simulated-badge">SIMULATED TOUR · NOT SIGNED IN</span>`;
+
+  const liveBannerHtml = liveCtrl?.banner
+    ? `<div class="sim-live-banner" data-testid="live-cli-banner" role="status">
+        <span class="sim-live-dot" aria-hidden="true"></span>
+        <span class="sim-live-label">LIVE CLI · REV #${liveCtrl.revision}</span>
+        <span class="sim-live-text">${escapeHtml(liveCtrl.banner)}</span>
+        ${liveCtrl.updated_at ? `<span class="sim-live-time">${escapeHtml(liveCtrl.updated_at)}</span>` : ""}
+      </div>`
+    : "";
+  const shellEl = app.querySelector<HTMLElement>(".sim-shell");
+  if (shellEl) {
+    shellEl.classList.toggle("has-live-banner", Boolean(liveCtrl?.banner));
+  }
 
   const authAction = isLive
     ? `<a class="sim-nav-btn" data-testid="auth-logout" href="${escapeHtml(state.session.logout_url || "/cdn-cgi/access/logout")}">Sign out</a>`
@@ -428,7 +549,7 @@ function renderPanels(): void {
   topEl.innerHTML = `
     <header class="sim-header">
       <div class="sim-brand-group">
-        <a class="overview-wordmark" href="/">dialtone // earth</a>
+        <a class="overview-wordmark" href="/">${escapeHtml(wordmarkText)}</a>
         ${modeBadge}
       </div>
       <nav class="sim-nav" aria-label="System tour views">
@@ -454,6 +575,7 @@ function renderPanels(): void {
       <span><b>SHELLS</b> ${summary.activeShellSessions}</span>
       <span><b>TESTS</b> ${summary.passingTests}/${summary.totalTests} PASS</span>
     </section>
+    ${liveBannerHtml}
   `;
 
   if (state.view === "overview") {
@@ -473,13 +595,15 @@ function renderPanels(): void {
   }
 
   const currentStep = state.tourSteps[state.tourStepIndex] ?? state.tourSteps[0];
+  const tourHeadline = liveCtrl?.headline || currentStep.headline;
+  const tourCaption = liveCtrl?.subline || currentStep.caption;
   tourEl.innerHTML = `
     <div class="sim-tour-copy">
       <div class="sim-tour-meta">
         <span class="sim-step-tag">STEP ${state.tourStepIndex + 1}/${state.tourSteps.length} · ${escapeHtml(currentStep.label)}</span>
-        <strong class="sim-tour-headline">${escapeHtml(currentStep.headline)}</strong>
+        <strong class="sim-tour-headline">${escapeHtml(tourHeadline)}</strong>
       </div>
-      <p class="sim-tour-caption">${escapeHtml(currentStep.caption)}</p>
+      <p class="sim-tour-caption">${escapeHtml(tourCaption)}</p>
     </div>
     <div class="sim-tour-controls">
       <button type="button" class="sim-btn" data-action="prev-step">◀ Prev</button>
@@ -531,11 +655,19 @@ function renderOverviewView(
     })
     .join("");
 
+  const liveCtrl = !isLive ? state.liveSite : null;
+  const heading = liveCtrl?.headline
+    ? escapeHtml(liveCtrl.headline)
+    : `SYSTEM-WIDE OVERVIEW (${isLive ? "LIVE MESH" : "SIMULATED"})`;
+  const subline = liveCtrl?.subline
+    ? escapeHtml(liveCtrl.subline)
+    : "Click any network to inspect its hosts, plugin rollouts, iroh-blobs store, error recovery, and tests.";
+
   return `
     <div class="sim-panel-head">
       <div>
-        <h2>SYSTEM-WIDE OVERVIEW (${isLive ? "LIVE MESH" : "SIMULATED"})</h2>
-        <p class="sim-sub">Click any network to inspect its hosts, plugin rollouts, iroh-blobs store, error recovery, and tests.</p>
+        <h2>${heading}</h2>
+        <p class="sim-sub">${subline}</p>
       </div>
       <div class="node-load-legend">
         <span class="node-load-legend-title">LOAD</span>

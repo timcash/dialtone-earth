@@ -39,6 +39,10 @@ go run . test --list                  # list without running
 go run . test --filter TestDialtoneEarth
 go run . dev --port 5174              # local test dashboard (http://127.0.0.1:5174/)
 go run . deploy                       # LOCAL bundle in deploy/local only
+go run . deploy --live                # build registry/ and publish live to https://dialtone.earth/
+go run . live status                  # inspect live overrides on https://dialtone.earth/
+go run . live set --banner "Hello!"   # update https://dialtone.earth/ live in ~1.5s (no refresh)
+go run . live reset                   # clear live overrides back to stock defaults
 go run . clean                        # generated artifacts; retains run logs
 ```
 

@@ -5,6 +5,7 @@ import {
   type MagicLinkDeps,
   type MagicLinkEnv,
 } from "./auth.ts";
+import { handleLiveRoute, type LiveControlEnv } from "./live.ts";
 import {
   buildRedactedShellAuditLog,
   listNetworkPresence,
@@ -18,7 +19,7 @@ export interface AssetFetcher {
   fetch(request: Request): Promise<Response>;
 }
 
-export interface GatewayEnv extends MagicLinkEnv {
+export interface GatewayEnv extends MagicLinkEnv, LiveControlEnv {
   ASSETS?: AssetFetcher;
   /** Cloudflare Access team domain, e.g. "https://myteam.cloudflareaccess.com" */
   ACCESS_TEAM_DOMAIN?: string;
@@ -103,6 +104,19 @@ export async function handleGatewayRequest(
     );
     if (authResponse) {
       return authResponse;
+    }
+  }
+
+  if (url.pathname === "/api/live") {
+    const liveNowSec = deps.nowSec ? deps.nowSec() : Math.floor(Date.now() / 1000);
+    const liveResponse = await handleLiveRoute(
+      request,
+      env,
+      SECURITY_HEADERS,
+      liveNowSec,
+    );
+    if (liveResponse) {
+      return liveResponse;
     }
   }
 

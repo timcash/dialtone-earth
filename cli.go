@@ -26,7 +26,8 @@ Actions:
   auth      Inspect provider authentication status without logging in
   test      Run the Go tests in cli_test.go
   clean     Remove generated local state
-  deploy    Build and copy artifacts to deploy/local
+  deploy    Build local bundle (deploy/local) or publish live (--live)
+  live      Modify public https://dialtone.earth/ live without redeploying
   dev       Start the test dashboard without running tests
   help      Show this help
 
@@ -34,6 +35,8 @@ Flags:
   auth status [--json]     Report configured and verified auth state
   test --filter <regexp>   Run only the Go tests matching this pattern
   test --list              Print the selected test names without running them
+  deploy --live            Build registry/ and deploy live to Cloudflare Workers
+  live <status|set|reset|init-token>  Control public dialtone.earth live (<2s)
   dev --port <port>        Serve the dashboard on another port
 
 Run an action with "go run . <action>", or with "bin/dialtone-earth <action>" after build.
@@ -64,7 +67,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	case "clean":
 		err = runClean(stdout)
 	case "deploy":
-		err = runDeploy(stdout, stderr)
+		err = runDeploy(args[1:], stdout, stderr)
+	case "live":
+		err = runLive(args[1:], stdout, stderr)
 	case "dev":
 		err = runDev(args[1:], stdout, stderr)
 	default:
@@ -227,7 +232,19 @@ func runClean(stdout io.Writer) error {
 	return nil
 }
 
-func runDeploy(stdout, stderr io.Writer) error {
+func runDeploy(args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("deploy", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	live := flags.Bool("live", false, "Build registry/ and publish live to Cloudflare Workers (https://dialtone.earth/)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("deploy accepts no positional arguments; use --live to publish to Cloudflare")
+	}
+	if *live {
+		return runDeployLive(stdout, stderr)
+	}
 	root, err := projectRoot()
 	if err != nil {
 		return err

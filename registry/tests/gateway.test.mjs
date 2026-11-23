@@ -769,6 +769,128 @@ test("MAGIC_LINK_DELIVERY_MAP routes test@dialtone.earth to verified mailbox whi
   assert.equal(sessionBody.subject, "test@dialtone.earth");
 });
 
+test("public /api/live supports Bearer-authenticated PATCH/DELETE on dialtone.earth only", async () => {
+  const store = new Map();
+  const kv = {
+    async get(k) {
+      return store.get(k) ?? null;
+    },
+    async put(k, v) {
+      store.set(k, v);
+    },
+    async delete(k) {
+      store.delete(k);
+    },
+  };
+  const env = {
+    DIALTONE_AUTH_TOKENS: kv,
+    LIVE_CONTROL_TOKEN: "secret-live-control-token-123",
+  };
+  const deps = { nowSec: () => 1_795_420_000 };
+
+  // Private mesh host is strictly excluded from public /api/live
+  const privateResp = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/live"),
+    env,
+    deps,
+  );
+  assert.equal(privateResp.status, 404);
+
+  // Public GET returns default revision 0
+  const getInitial = await handleGatewayRequest(
+    new Request("https://dialtone.earth/api/live"),
+    env,
+    deps,
+  );
+  assert.equal(getInitial.status, 200);
+  assert.equal(getInitial.headers.get("Cache-Control"), "no-store");
+  assert.equal(getInitial.headers.get("X-Frame-Options"), "DENY");
+  const initialBody = await getInitial.json();
+  assert.equal(initialBody.revision, 0);
+  assert.equal(initialBody.banner, null);
+
+  // Unauthenticated or wrong-token PATCH -> 401
+  const unauthPatch = await handleGatewayRequest(
+    new Request("https://dialtone.earth/api/live", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ banner: "hack" }),
+    }),
+    env,
+    deps,
+  );
+  assert.equal(unauthPatch.status, 401);
+
+  const wrongTokenPatch = await handleGatewayRequest(
+    new Request("https://dialtone.earth/api/live", {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer wrong-token",
+      },
+      body: JSON.stringify({ banner: "hack" }),
+    }),
+    env,
+    deps,
+  );
+  assert.equal(wrongTokenPatch.status, 401);
+
+  // Valid Bearer PATCH updates live state & increments revision
+  const patchResp = await handleGatewayRequest(
+    new Request("https://dialtone.earth/api/live", {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer secret-live-control-token-123",
+      },
+      body: JSON.stringify({
+        banner: "Live update from dialtone-earth CLI",
+        headline: "LIVE DEMO",
+        theme: "light",
+        network: "sim-orbit",
+        view: "network",
+        tour_playing: false,
+      }),
+    }),
+    env,
+    deps,
+  );
+  assert.equal(patchResp.status, 200);
+  const patched = await patchResp.json();
+  assert.equal(patched.ok, true);
+  assert.equal(patched.state.revision, 1);
+  assert.equal(patched.state.banner, "Live update from dialtone-earth CLI");
+  assert.equal(patched.state.theme, "light");
+  assert.equal(patched.state.network, "sim-orbit");
+  assert.equal(patched.state.view, "network");
+  assert.equal(patched.state.tour_playing, false);
+
+  // Subsequent public GET sees the live mutation
+  const getAfter = await handleGatewayRequest(
+    new Request("https://dialtone.earth/api/live"),
+    env,
+    deps,
+  );
+  const afterBody = await getAfter.json();
+  assert.equal(afterBody.revision, 1);
+  assert.equal(afterBody.headline, "LIVE DEMO");
+
+  // Authenticated DELETE resets fields & increments revision so browsers revert live
+  const delResp = await handleGatewayRequest(
+    new Request("https://dialtone.earth/api/live", {
+      method: "DELETE",
+      headers: { Authorization: "Bearer secret-live-control-token-123" },
+    }),
+    env,
+    deps,
+  );
+  assert.equal(delResp.status, 200);
+  const deleted = await delResp.json();
+  assert.equal(deleted.state.revision, 2);
+  assert.equal(deleted.state.banner, null);
+  assert.equal(deleted.state.theme, null);
+});
+
 async function signJwt(privateKey, header, payload) {
   const enc = (obj) =>
     Buffer.from(JSON.stringify(obj))
