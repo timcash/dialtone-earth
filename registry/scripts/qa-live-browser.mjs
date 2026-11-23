@@ -404,20 +404,26 @@ async function main() {
     await cdp.click('[data-testid="open-config"]', "config button");
     await cdp.waitFor("config page open", `document.querySelector('[data-testid="layout-1_2"]') !== null`);
     await cdp.click('[data-testid="layout-1_2"]', "1|2 layout button");
+    await sleep(Math.min(400, STEP_MS));
+
+    // Pane #1 -> 3D H3 GLOBE
+    await cdp.click('[data-testid="cfg-pane-0"]', "pane #1 slot");
+    await cdp.click('[data-testid="cfg-assign-globe"]', "assign 3D H3 GLOBE");
+    // Pane #2 -> metal:hosts
+    await cdp.click('[data-testid="cfg-pane-1"]', "pane #2 slot");
     await cdp.eval(`(() => {
-      const setSelect = (testId, matchFn) => {
-        const sel = document.querySelector('[data-testid="' + testId + '"]');
-        if (!sel) return;
-        const opt = Array.from(sel.options).find(matchFn);
-        if (opt && sel.value !== opt.value) {
-          sel.value = opt.value;
-          sel.dispatchEvent(new Event("change", { bubbles: true }));
-        }
-      };
-      setSelect("cfg-pane-0", (o) => o.value === "globe");
-      setSelect("cfg-pane-1", (o) => o.textContent.toLowerCase().includes("hosts"));
-      setSelect("cfg-pane-2", (o) => o.textContent.toLowerCase().includes("plugins"));
-      return true;
+      const btn = Array.from(document.querySelectorAll('[data-cfg-assign]'))
+        .find((b) => b.closest('tr')?.innerText.toLowerCase().includes('hosts'));
+      if (btn) btn.click();
+      return Boolean(btn);
+    })()`);
+    // Pane #3 -> metal:plugins
+    await cdp.click('[data-testid="cfg-pane-2"]', "pane #3 slot");
+    await cdp.eval(`(() => {
+      const btn = Array.from(document.querySelectorAll('[data-cfg-assign]'))
+        .find((b) => b.closest('tr')?.innerText.toLowerCase().includes('plugins'));
+      if (btn) btn.click();
+      return Boolean(btn);
     })()`);
     await cdp.waitFor("Cloudflare KV save", `document.body.innerText.includes("CF SAVED")`, 10_000);
     await sleep(STEP_MS);
