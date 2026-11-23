@@ -18,6 +18,8 @@ let activeRun: ChildProcess | null = null;
 type TestRecord = {
   name: string;
   title: string;
+  section: string;
+  source: string;
   status: string;
   elapsed: string;
   timestamp: string;
@@ -106,6 +108,8 @@ async function readTests(): Promise<TestRecord[]> {
   return tests.filter(isRecord).map((value) => ({
     name: text(value.name),
     title: text(value.title, text(value.name)),
+    section: text(value.section),
+    source: text(value.source),
     status: normalizeStatus(value.status),
     elapsed: text(value.elapsed, "0"),
     timestamp: text(value.timestamp, "none"),

@@ -59,7 +59,7 @@ export function classifyTestSection(row) {
   }
   const name = typeof row?.name === "string" ? row.name : "";
   if (
-    /LiveMetal|GlobeH3|TilingWindowManager|CameraStudio|CloudflareKVConfig|SimulatedTour/.test(name)
+    /LiveMetal|MetalCloudflareLive|GlobeH3|TilingWindowManager|CameraStudio|CloudflareKVConfig|SimulatedTour/.test(name)
   ) {
     return "Live metal Data & UI";
   }
