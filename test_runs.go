@@ -297,6 +297,7 @@ func writeTestState(root string, state *testState) error {
 // runGoTests runs the selected tests and turns the event stream into live
 // output, per-execution logs, and dashboard state.
 func runGoTests(root string, state *testState, pattern string, stdout io.Writer) error {
+	started := time.Now()
 	args := []string{"test", "-json", "-count=1", "-timeout", goTestTimeout}
 	if pattern != "" {
 		args = append(args, "-run", pattern)
@@ -318,6 +319,7 @@ func runGoTests(root string, state *testState, pattern string, stdout io.Writer)
 	if toolErrors.Len() > 0 {
 		fmt.Fprint(stdout, toolErrors.String())
 	}
+	printTestSummary(stdout, state, time.Since(started))
 	if consumeErr != nil {
 		return consumeErr
 	}
@@ -325,6 +327,32 @@ func runGoTests(root string, state *testState, pattern string, stdout io.Writer)
 		return fmt.Errorf("%d test(s) failed: %s", len(failures), strings.Join(failures, ", "))
 	}
 	return waitErr
+}
+
+func printTestSummary(stdout io.Writer, state *testState, elapsed time.Duration) {
+	if len(state.Tests) == 0 {
+		return
+	}
+	var passed, failed, skipped int
+	var failedEntries []testEntry
+	for _, t := range state.Tests {
+		switch t.Status {
+		case "pass":
+			passed++
+		case "fail":
+			failed++
+			failedEntries = append(failedEntries, t)
+		case "skip":
+			skipped++
+		}
+	}
+	ts := time.Now().UTC().Format("15:04:05Z")
+	fmt.Fprintf(stdout, "\n[%s] === DIALTONE-EARTH TEST SUMMARY (%.2fs) ===\n", ts, elapsed.Seconds())
+	fmt.Fprintf(stdout, "[%s] PASS: %d | FAIL: %d | SKIP: %d | TOTAL: %d | STATE: %s\n",
+		ts, passed, failed, skipped, len(state.Tests), stateFile)
+	for _, f := range failedEntries {
+		fmt.Fprintf(stdout, "[%s] [ERROR] %s (%s) -> logs/%s.log\n", ts, f.Name, f.Source, f.TestID)
+	}
 }
 
 // consumeGoTestEvents reads `go test -json` lines and records what happened.
