@@ -1,8 +1,16 @@
+import {
+  handleAuthRoute,
+  isMagicLinkEnabledForHost,
+  verifySessionCookie,
+  type MagicLinkDeps,
+  type MagicLinkEnv,
+} from "./auth.ts";
+
 export interface AssetFetcher {
   fetch(request: Request): Promise<Response>;
 }
 
-export interface GatewayEnv {
+export interface GatewayEnv extends MagicLinkEnv {
   ASSETS?: AssetFetcher;
   /** Cloudflare Access team domain, e.g. "https://myteam.cloudflareaccess.com" */
   ACCESS_TEAM_DOMAIN?: string;
@@ -25,7 +33,7 @@ export interface AccessVerificationResult {
   reason?: string;
 }
 
-export interface GatewayDeps {
+export interface GatewayDeps extends MagicLinkDeps {
   fetchImpl?: typeof fetch;
   verifyJwt?: (
     token: string,
@@ -73,6 +81,22 @@ export async function handleGatewayRequest(
   const url = new URL(request.url);
   const host = url.hostname.toLowerCase();
 
+  if (
+    url.pathname === "/login" ||
+    url.pathname.startsWith("/auth/") ||
+    url.pathname.startsWith("/api/auth/")
+  ) {
+    const authResponse = await handleAuthRoute(
+      request,
+      env,
+      SECURITY_HEADERS,
+      deps,
+    );
+    if (authResponse) {
+      return authResponse;
+    }
+  }
+
   if (!url.pathname.startsWith("/api/")) {
     if (env.ASSETS) {
       const assetResponse = await env.ASSETS.fetch(request);
@@ -91,16 +115,33 @@ export async function handleGatewayRequest(
   const origins = originsMap[host] ?? [];
   const teamDomain = (env.ACCESS_TEAM_DOMAIN ?? "").trim().replace(/\/+$/, "");
   const assertion = extractAccessAssertion(request);
+  const magicLinkEnabled = isMagicLinkEnabledForHost(env, host);
 
+  const nowSec = deps.nowSec ? deps.nowSec() : Math.floor(Date.now() / 1000);
   let auth: AccessVerificationResult = { valid: false, reason: "unauthenticated" };
-  if (assertion && expectedAud && teamDomain) {
+  let gatewayMode = magicLinkEnabled ? "dialtone-magic-link" : "cloudflare-access";
+
+  const sessionAuth = await verifySessionCookie(request, env, host, nowSec);
+  if (sessionAuth.valid) {
+    auth = sessionAuth;
+    gatewayMode = "dialtone-magic-link";
+  } else if (assertion && expectedAud && teamDomain) {
     auth = await verifyJwt(assertion, expectedAud, teamDomain, fetchImpl);
-  } else if (assertion && (!expectedAud || !teamDomain)) {
+    if (auth.valid) {
+      gatewayMode = "cloudflare-access";
+    }
+  } else if (!magicLinkEnabled && assertion && (!expectedAud || !teamDomain)) {
     auth = { valid: false, reason: "host_not_enrolled" };
   }
 
-  const loginUrl = (env.ACCESS_LOGIN_URL ?? "").trim() || null;
-  const logoutUrl = (env.ACCESS_LOGOUT_URL ?? "/cdn-cgi/access/logout").trim();
+  const loginUrl =
+    (env.ACCESS_LOGIN_URL ?? "").trim() ||
+    (magicLinkEnabled ? "/login" : null);
+  const logoutUrl =
+    (env.ACCESS_LOGOUT_URL ?? "").trim() ||
+    (gatewayMode === "dialtone-magic-link"
+      ? "/auth/logout"
+      : "/cdn-cgi/access/logout");
 
   if (url.pathname === "/api/session") {
     if (auth.valid && origins.length > 0) {
@@ -112,7 +153,7 @@ export async function handleGatewayRequest(
           hostname: host,
           subject: auth.subject ?? "verified-user",
           origin_count: origins.length,
-          gateway: "cloudflare-access",
+          gateway: gatewayMode,
           login_url: loginUrl,
           logout_url: logoutUrl,
         },
@@ -125,7 +166,7 @@ export async function handleGatewayRequest(
         mode: "simulated",
         network: null,
         hostname: host,
-        gateway: "cloudflare-access",
+        gateway: gatewayMode,
         login_url: loginUrl,
         logout_url: logoutUrl,
         capabilities: [
@@ -153,7 +194,7 @@ export async function handleGatewayRequest(
   if (!auth.valid) {
     return jsonResponse(
       {
-        error: "Cloudflare Access sign-in required",
+        error: magicLinkEnabled ? "Sign-in required" : "Cloudflare Access sign-in required",
         reason: auth.reason ?? "unauthenticated",
       },
       401,

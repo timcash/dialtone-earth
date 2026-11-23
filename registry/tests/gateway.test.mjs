@@ -236,6 +236,244 @@ test("resolveAllowedUpstreamPath maps Dialtone v0.5.5 read routes and rejects ar
   assert.equal(resolveAllowedUpstreamPath("/api/mesh/restart", ""), null);
 });
 
+function createMemoryKv() {
+  const store = new Map();
+  return {
+    store,
+    async get(key) {
+      return store.has(key) ? store.get(key) : null;
+    },
+    async put(key, value) {
+      store.set(key, value);
+    },
+    async delete(key) {
+      store.delete(key);
+    },
+  };
+}
+
+test("GET /login renders pure grayscale dialtone.earth form without Cloudflare/oakleon branding", async () => {
+  const env = {
+    SESSION_SIGNING_KEY: "0123456789abcdef0123456789abcdef",
+    MAGIC_LINK_ALLOWLIST: JSON.stringify({
+      "metal.dialtone.earth": ["owner@example.test"],
+    }),
+  };
+  const resp = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/login"),
+    env,
+  );
+  assert.equal(resp.status, 200);
+  assert.equal(resp.headers.get("Cache-Control"), "private, no-store");
+  assert.equal(resp.headers.get("X-Frame-Options"), "DENY");
+  assert.equal(resp.headers.get("X-Content-Type-Options"), "nosniff");
+  assert.ok(resp.headers.get("Content-Security-Policy")?.includes("script-src 'self'"));
+
+  const html = await resp.text();
+  assert.ok(html.includes("dialtone.earth"));
+  assert.ok(html.includes('type="email"'));
+  assert.ok(html.includes("Send sign-in link"));
+  assert.ok(!/oakleon|cloudflareaccess/i.test(html));
+  assert.ok(!/<script\b/i.test(html), "login page must not embed inline scripts");
+});
+
+test("magic-link end-to-end: request, scanner-safe GET verify, single-use POST verify, live session, and logout", async () => {
+  const kv = createMemoryKv();
+  const sentEmails = [];
+  let originFetches = 0;
+  let now = 1_800_000_000;
+
+  const env = {
+    DIALTONE_AUTH_TOKENS: kv,
+    SESSION_SIGNING_KEY: "0123456789abcdef0123456789abcdef",
+    MAGIC_LINK_ALLOWLIST: JSON.stringify({
+      "metal.dialtone.earth": ["owner@example.test"],
+    }),
+    MESH_ORIGINS_MAP: JSON.stringify({
+      "metal.dialtone.earth": ["https://origin-metal.example.test"],
+    }),
+    MESH_ORIGIN_TOKEN: "secret-mesh-token",
+  };
+
+  const deps = {
+    nowSec: () => now,
+    sendEmail: async (payload) => {
+      sentEmails.push(payload);
+    },
+    fetchImpl: async (url) => {
+      originFetches += 1;
+      return new Response(JSON.stringify({ ok: true, url: String(url) }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  };
+
+  // Signed-out /api/session advertises /login and /auth/logout
+  const signedOutSession = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/session"),
+    env,
+    deps,
+  );
+  const signedOutBody = await signedOutSession.json();
+  assert.equal(signedOutBody.authenticated, false);
+  assert.equal(signedOutBody.login_url, "/login");
+  assert.equal(signedOutBody.logout_url, "/auth/logout");
+
+  // Non-allowlisted email returns identical redirect and sends 0 emails
+  const deniedReq = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/auth/request-link", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "email=stranger%40example.test",
+    }),
+    env,
+    deps,
+  );
+  assert.equal(deniedReq.status, 303);
+  assert.equal(deniedReq.headers.get("Location"), "/login?sent=1");
+  assert.equal(sentEmails.length, 0);
+
+  // Allowlisted email sends 1 email with clickable /auth/verify?token=... link
+  const allowedReq = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/auth/request-link", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "email=OWNER%40example.test",
+    }),
+    env,
+    deps,
+  );
+  assert.equal(allowedReq.status, 303);
+  assert.equal(allowedReq.headers.get("Location"), "/login?sent=1");
+  assert.equal(sentEmails.length, 1);
+  assert.equal(sentEmails[0].to, "owner@example.test");
+
+  const linkMatch = sentEmails[0].text.match(
+    /https:\/\/metal\.dialtone\.earth\/auth\/verify\?token=([^\s]+)/,
+  );
+  assert.ok(linkMatch, "email must include clickable magic link");
+  const token = decodeURIComponent(linkMatch[1]);
+
+  // Scanner-safe GET /auth/verify must NOT consume KV nonce
+  const getVerify1 = await handleGatewayRequest(
+    new Request(`https://metal.dialtone.earth/auth/verify?token=${encodeURIComponent(token)}`),
+    env,
+    deps,
+  );
+  assert.equal(getVerify1.status, 200);
+  const verifyHtml = await getVerify1.text();
+  assert.ok(verifyHtml.includes("owner@example.test"));
+  assert.ok(verifyHtml.includes('action="/api/auth/verify"'));
+
+  // Wrong hostname must reject the token without consuming it
+  const wrongHostVerify = await handleGatewayRequest(
+    new Request("https://other.dialtone.earth/api/auth/verify", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body: `token=${encodeURIComponent(token)}`,
+    }),
+    env,
+    deps,
+  );
+  assert.equal(wrongHostVerify.status, 401);
+
+  // Valid POST /api/auth/verify sets HttpOnly Secure SameSite=Lax session cookie
+  const postVerify = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/auth/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: `token=${encodeURIComponent(token)}`,
+    }),
+    env,
+    deps,
+  );
+  assert.equal(postVerify.status, 303);
+  assert.equal(postVerify.headers.get("Location"), "/");
+  const setCookie = postVerify.headers.get("Set-Cookie") ?? "";
+  assert.ok(setCookie.startsWith("dialtone_session="));
+  assert.ok(setCookie.includes("HttpOnly"));
+  assert.ok(setCookie.includes("Secure"));
+  assert.ok(setCookie.includes("SameSite=Lax"));
+  const cookiePair = setCookie.split(";")[0];
+
+  // Replaying the same magic link token MUST fail closed (single-use)
+  const replay = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/auth/verify", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body: `token=${encodeURIComponent(token)}`,
+    }),
+    env,
+    deps,
+  );
+  assert.equal(replay.status, 401);
+
+  // Authenticated session cookie grants live /api/session and /api/mesh/state
+  const liveSession = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/session", {
+      headers: { Cookie: cookiePair },
+    }),
+    env,
+    deps,
+  );
+  const liveSessionBody = await liveSession.json();
+  assert.equal(liveSessionBody.authenticated, true);
+  assert.equal(liveSessionBody.mode, "live");
+  assert.equal(liveSessionBody.network, "metal");
+  assert.equal(liveSessionBody.subject, "owner@example.test");
+  assert.equal(liveSessionBody.gateway, "dialtone-magic-link");
+
+  const liveMesh = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/mesh/state", {
+      headers: { Cookie: cookiePair },
+    }),
+    env,
+    deps,
+  );
+  assert.equal(liveMesh.status, 200);
+  assert.equal(originFetches, 1);
+
+  // Revoking email from allowlist invalidates existing session immediately
+  const revokedMesh = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/mesh/state", {
+      headers: { Cookie: cookiePair },
+    }),
+    { ...env, MAGIC_LINK_ALLOWLIST: JSON.stringify({ "metal.dialtone.earth": [] }) },
+    deps,
+  );
+  assert.equal(revokedMesh.status, 401);
+  assert.equal(originFetches, 1);
+
+  // Expired session cookie is rejected
+  now += 90_000;
+  const expiredMesh = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/mesh/state", {
+      headers: { Cookie: cookiePair },
+    }),
+    env,
+    deps,
+  );
+  assert.equal(expiredMesh.status, 401);
+  assert.equal(originFetches, 1);
+
+  // Logout clears dialtone_session cookie
+  const logout = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/auth/logout"),
+    env,
+    deps,
+  );
+  assert.equal(logout.status, 303);
+  assert.equal(logout.headers.get("Location"), "/");
+  assert.ok((logout.headers.get("Set-Cookie") ?? "").includes("Max-Age=0"));
+});
+
 async function signJwt(privateKey, header, payload) {
   const enc = (obj) =>
     Buffer.from(JSON.stringify(obj))
