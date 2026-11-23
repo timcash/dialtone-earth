@@ -70,7 +70,7 @@ type AppState = {
   layout: SplitLayout;
   paneQueryIds: string[];
   activePaneIndex: number;
-  composerOpen: boolean;
+  configOpen: boolean;
   networkSlug: string;
   hostName: string;
   testId: string;
@@ -113,7 +113,7 @@ const state: AppState = {
   layout: "1",
   paneQueryIds: [initialQueries[0].id],
   activePaneIndex: 0,
-  composerOpen: false,
+  configOpen: false,
   networkSlug: SIMULATED_NETWORKS[0].slug,
   hostName: SIMULATED_NETWORKS[0].hosts[0].name,
   testId:
@@ -191,9 +191,14 @@ async function boot(): Promise<void> {
   });
 
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && state.tableFullscreen) {
-      state.tableFullscreen = false;
-      renderAll();
+    if (event.key === "Escape") {
+      if (state.configOpen) {
+        state.configOpen = false;
+        renderAll();
+      } else if (state.tableFullscreen) {
+        state.tableFullscreen = false;
+        renderAll();
+      }
     }
   });
 
@@ -318,7 +323,7 @@ function startBestEffortQueryScheduler(): void {
       anyTouched = true;
     }
 
-    if (anyTouched && !state.composerOpen) {
+    if (anyTouched && !state.configOpen) {
       renderAll();
     }
   }, QUERY_SCHEDULER_TICK_MS);
@@ -659,7 +664,7 @@ async function runAdaptiveMeshTick(): Promise<void> {
     state.unchangedStreak += 1;
   }
   scheduleNextAdaptivePoll();
-  if (!state.composerOpen) {
+  if (!state.configOpen) {
     renderAll();
   }
 }
@@ -791,6 +796,7 @@ function mountShell(): void {
       <div class="globe-stage"></div>
       <div class="scene-shade" aria-hidden="true"></div>
       <aside class="tour-captions" id="tour-captions" aria-live="polite" data-testid="tour-captions"></aside>
+      <section class="config-page" id="config-page" aria-label="Table and query configuration" data-testid="config-page" hidden></section>
       <section class="bottom-table-dock" id="bottom-table-dock" aria-label="Live mesh query workspace"></section>
     </main>
   `;
@@ -827,12 +833,14 @@ function renderAll(): void {
   const shell = app.querySelector<HTMLElement>(".hud-shell");
   if (shell) {
     shell.classList.toggle("is-table-fullscreen", state.tableFullscreen);
+    shell.classList.toggle("is-config-open", state.configOpen);
     shell.classList.toggle(
       "is-table-minimized",
       !state.tableFullscreen && state.tableMinimized,
     );
   }
   renderTourCaptions();
+  renderConfigPage();
   renderBottomWorkspace();
   bindInteractions();
 }
@@ -841,7 +849,7 @@ function renderTourCaptions(): void {
   const ccEl = app.querySelector<HTMLElement>("#tour-captions");
   if (!ccEl) return;
 
-  if (state.tableFullscreen) {
+  if (state.tableFullscreen || state.configOpen) {
     ccEl.innerHTML = "";
     ccEl.hidden = true;
     return;
@@ -882,6 +890,161 @@ function renderTourCaptions(): void {
     </div>
     <div class="cc-line cc-headline">${escapeHtml(headline)}</div>
     <div class="cc-line cc-body">${escapeHtml(caption)}</div>
+  `;
+}
+
+function renderConfigPage(): void {
+  const cfgEl = app.querySelector<HTMLElement>("#config-page");
+  if (!cfgEl) return;
+  if (!state.configOpen) {
+    cfgEl.innerHTML = "";
+    cfgEl.hidden = true;
+    return;
+  }
+
+  const layoutCards = SPLIT_LAYOUTS.map((item) => {
+    const active = state.layout === item.id ? "is-active" : "";
+    const cells = Array.from({ length: item.panes }, () => `<i></i>`).join("");
+    return `<button type="button" class="cfg-layout-card ${active}" data-layout-btn="${item.id}" data-testid="layout-${item.id.replace(/[^a-z0-9]/gi, "_")}" title="${escapeHtml(item.title)}">
+      <span class="cfg-wireframe" data-layout="${item.id}">${cells}</span>
+      <span class="cfg-layout-label">${escapeHtml(item.label)}</span>
+    </button>`;
+  }).join("");
+
+  const paneSlots = state.paneQueryIds
+    .map((qId, idx) => {
+      const q = getQueryById(qId);
+      const selected = idx === state.activePaneIndex ? "is-active" : "";
+      const src = q.source === "cloudflare" ? "CF GATEWAY" : "DIALTONE CH";
+      return `<button type="button" class="cfg-pane-slot ${selected}" data-cfg-pane="${idx}" data-testid="cfg-pane-${idx}">
+        <span class="cfg-slot-top">PANE #${idx + 1} · ${src} · ${escapeHtml(q.rate.toUpperCase())}</span>
+        <strong class="cfg-slot-name">${escapeHtml(q.label)}</strong>
+        <span class="cfg-slot-sub">${escapeHtml(q.kind)} · ${escapeHtml(q.networkSlug)}</span>
+      </button>`;
+    })
+    .join("");
+
+  const rateList: RateTier[] = ["base", "slow", "med", "fast"];
+  const rateLabels: Record<RateTier, string> = {
+    base: "base 30s",
+    slow: "slow 10s",
+    med: "med 4s",
+    fast: "fast 1.5s",
+  };
+
+  const queryRows = state.queries
+    .map((q) => {
+      const assignedToActive =
+        state.paneQueryIds[state.activePaneIndex] === q.id;
+      const inAnyPane = state.paneQueryIds.includes(q.id);
+      const sourceBtns = (["channel", "cloudflare"] as QuerySource[])
+        .map(
+          (src) =>
+            `<button type="button" class="tbl-chip ${q.source === src ? "is-active" : ""}" data-cfg-source="${escapeHtml(q.id)}:${src}">${src === "cloudflare" ? "cf" : "ch"}</button>`,
+        )
+        .join("");
+      const netBtns = state.networks
+        .map(
+          (n) =>
+            `<button type="button" class="tbl-chip ${q.networkSlug === n.slug ? "is-active" : ""}" data-cfg-net="${escapeHtml(q.id)}:${escapeHtml(n.slug)}">${escapeHtml(n.slug.replace(/^sim-/, ""))}</button>`,
+        )
+        .join("");
+      const rateBtns = rateList
+        .map(
+          (r) =>
+            `<button type="button" class="tbl-chip ${q.rate === r ? "is-active" : ""}" data-cfg-rate="${escapeHtml(q.id)}:${r}" data-testid="rate-${escapeHtml(q.id)}-${r}">${rateLabels[r]}</button>`,
+        )
+        .join("");
+      const rmBtn =
+        state.queries.length > 1
+          ? `<button type="button" class="tbl-chip" data-remove-query="${escapeHtml(q.id)}" title="Remove query">×</button>`
+          : "";
+      return `<tr>
+        <td>
+          <button type="button" class="tbl-chip ${assignedToActive ? "is-active" : inAnyPane ? "is-shown" : ""}" data-cfg-assign="${escapeHtml(q.id)}" data-testid="cfg-assign-${escapeHtml(q.id)}">${assignedToActive ? `● #${state.activePaneIndex + 1}` : `set #${state.activePaneIndex + 1}`}</button>
+          <span class="c-strong cfg-q-name">${escapeHtml(q.label)}</span>
+        </td>
+        <td><span class="cfg-btn-row">${sourceBtns}</span></td>
+        <td><span class="cfg-btn-row">${netBtns}</span></td>
+        <td><span class="cfg-btn-row">${rateBtns}</span></td>
+        <td>${rmBtn}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const addKinds: TableQuery[] = [
+    "networks",
+    "hosts",
+    "host",
+    "plugins",
+    "users",
+    "recovery",
+    "tests",
+    "log",
+  ];
+  const addButtons = addKinds
+    .map(
+      (kind) =>
+        `<button type="button" class="tbl-chip" data-cfg-add="${kind}" data-testid="cfg-add-${kind}">+ ${kind}</button>`,
+    )
+    .join("");
+
+  const modeMin = !state.tableFullscreen && state.tableMinimized ? "is-active" : "";
+  const modeDock = !state.tableFullscreen && !state.tableMinimized ? "is-active" : "";
+  const modeFull = state.tableFullscreen ? "is-active" : "";
+
+  cfgEl.hidden = false;
+  cfgEl.innerHTML = `
+    <div class="cfg-frame">
+      <header class="cfg-header">
+        <div class="earth-bar-left">
+          <span class="tbl-brand">TABLE &amp; QUERY CONFIG</span>
+          <span class="tbl-cadence">SINGLE-BUTTON VISUAL SETUP · BEST-EFFORT DATA RATES</span>
+        </div>
+        <div class="earth-bar-right">
+          <button type="button" class="tbl-chip ${modeMin}" data-cfg-mode="min" data-testid="cfg-mode-min">minimized</button>
+          <button type="button" class="tbl-chip ${modeDock}" data-cfg-mode="dock" data-testid="cfg-mode-dock">docked</button>
+          <button type="button" class="tbl-chip ${modeFull}" data-cfg-mode="full" data-testid="cfg-mode-full">fullscreen</button>
+          <button type="button" class="tbl-chip" data-cfg-reset="1">reset defaults</button>
+          <button type="button" class="tbl-chip is-active" data-action="close-config" data-testid="config-done">done</button>
+        </div>
+      </header>
+
+      <div class="cfg-body">
+        <section class="cfg-section">
+          <div class="cfg-section-title">1. LAYOUT — PICK A SPLIT SHAPE</div>
+          <div class="cfg-layout-row">${layoutCards}</div>
+        </section>
+
+        <section class="cfg-section">
+          <div class="cfg-section-title">2. PANE MAP — CLICK A PANE (#${state.activePaneIndex + 1} SELECTED), THEN ASSIGN A QUERY BELOW</div>
+          <div class="cfg-pane-map" data-layout="${state.layout}" data-testid="cfg-pane-map">${paneSlots}</div>
+        </section>
+
+        <section class="cfg-section">
+          <div class="cfg-section-head">
+            <span class="cfg-section-title">3. QUERY SET &amp; BEST-EFFORT RATES</span>
+            <span class="cfg-btn-row">${addButtons}</span>
+          </div>
+          <div class="cfg-table-wrap">
+            <table class="earth-table" data-testid="cfg-query-table">
+              <thead>
+                <tr>
+                  <th>QUERY (CLICK TO PUT IN #${state.activePaneIndex + 1})</th>
+                  <th>SOURCE</th>
+                  <th>NETWORK</th>
+                  <th>BEST-EFFORT RATE</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                ${queryRows}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </div>
   `;
 }
 
@@ -929,50 +1092,9 @@ function renderBottomWorkspace(): void {
         : isShown
           ? "is-shown"
           : "";
-      const rmBtn =
-        state.queries.length > 1 && q.id.startsWith("q-custom-")
-          ? `<span class="tbl-rm" data-remove-query="${escapeHtml(q.id)}" title="Remove query">×</span>`
-          : "";
-      return `<button type="button" class="tbl-tab ${cls}" data-pick-query="${escapeHtml(q.id)}" title="${escapeHtml(q.source)} · rate=${escapeHtml(q.rate)}">${escapeHtml(q.label)}${rmBtn}</button>`;
+      return `<button type="button" class="tbl-tab ${cls}" data-pick-query="${escapeHtml(q.id)}" title="${escapeHtml(q.source)} · rate=${escapeHtml(q.rate)}">${escapeHtml(q.label)}</button>`;
     })
     .join("");
-
-  const layoutButtons = SPLIT_LAYOUTS.map((item) => {
-    const active = state.layout === item.id ? "is-active" : "";
-    return `<button type="button" class="tbl-chip ${active}" data-layout-btn="${item.id}" data-testid="layout-${item.id.replace(/[^a-z0-9]/gi, "_")}" title="${escapeHtml(item.title)}">${escapeHtml(item.label)}</button>`;
-  }).join("");
-
-  const composerHtml = state.composerOpen
-    ? `<form class="query-composer" id="query-composer" data-testid="query-composer">
-        <span class="c-dim">NEW QUERY</span>
-        <select name="kind" aria-label="Query kind">
-          <option value="networks">networks</option>
-          <option value="hosts" selected>hosts</option>
-          <option value="host">host</option>
-          <option value="plugins">plugins</option>
-          <option value="users">users</option>
-          <option value="recovery">recovery</option>
-          <option value="tests">tests</option>
-          <option value="log">log</option>
-        </select>
-        <select name="network" aria-label="Network">
-          ${state.networks.map((n) => `<option value="${escapeHtml(n.slug)}" ${n.slug === state.networkSlug ? "selected" : ""}>${escapeHtml(n.slug)}</option>`).join("")}
-        </select>
-        <select name="source" aria-label="Source plane">
-          <option value="channel">dialtone channel</option>
-          <option value="cloudflare">cloudflare gateway</option>
-        </select>
-        <select name="rate" aria-label="Best-effort data rate">
-          <option value="base">base (30s)</option>
-          <option value="slow">slow (10s)</option>
-          <option value="med" selected>med (4s)</option>
-          <option value="fast">fast (1.5s)</option>
-        </select>
-        <input type="text" name="label" placeholder="label (optional)" maxlength="32" />
-        <button type="submit" class="tbl-chip is-active" data-testid="composer-add">add</button>
-        <button type="button" class="tbl-chip" data-action="close-composer">cancel</button>
-      </form>`
-    : "";
 
   const liveBannerBar = state.liveError
     ? `<div class="tbl-banner-bar is-warn">${escapeHtml(state.liveError)}</div>`
@@ -994,17 +1116,15 @@ function renderBottomWorkspace(): void {
         </div>
         <div class="earth-bar-tabs" role="tablist" aria-label="Query set">
           ${queryChips}
-          <button type="button" class="tbl-chip ${state.composerOpen ? "is-active" : ""}" data-action="toggle-composer" data-testid="toggle-composer">+ query</button>
         </div>
         <div class="earth-bar-right">
-          <span class="tbl-split-group" aria-label="Split table layout">${layoutButtons}</span>
           <button type="button" class="tbl-chip ${!state.tableMinimized && !state.tableFullscreen ? "is-active" : ""}" data-action="toggle-minimize" data-testid="toggle-minimize" aria-pressed="${state.tableMinimized}">${state.tableMinimized ? "table" : "min"}</button>
           <button type="button" class="tbl-chip ${state.tableFullscreen ? "is-active" : ""}" data-action="toggle-fullscreen" data-testid="toggle-fullscreen" aria-pressed="${state.tableFullscreen}">${state.tableFullscreen ? "dock" : "full"}</button>
+          <button type="button" class="tbl-chip ${state.configOpen ? "is-active" : ""}" data-action="open-config" data-testid="open-config">config</button>
           ${authAction}
         </div>
       </div>
       ${liveBannerBar}
-      ${composerHtml}
       <div class="earth-split-grid" data-layout="${state.layout}" data-testid="split-grid">
         ${panesHtml}
       </div>
@@ -1019,41 +1139,17 @@ function renderQueryPane(query: SavedQuery, paneIndex: number): string {
   const { columns, rowsHtml } = buildSingleQueryTable(query, net, host, testRun);
   const focused = paneIndex === state.activePaneIndex ? "is-focused" : "";
   const sourceTag = query.source === "cloudflare" ? "CF GATEWAY" : "DIALTONE CH";
-
-  const queryOptions = state.queries
-    .map(
-      (q) =>
-        `<option value="${escapeHtml(q.id)}" ${q.id === query.id ? "selected" : ""}>${escapeHtml(q.label)}</option>`,
-    )
-    .join("");
-
-  const rateOptions: RateTier[] = ["base", "slow", "med", "fast"];
-  const rateSelect = rateOptions
-    .map((r) => {
-      const lbl =
-        r === "base"
-          ? "base 30s"
-          : r === "slow"
-            ? "slow 10s"
-            : r === "med"
-              ? "med 4s"
-              : "fast 1.5s";
-      return `<option value="${r}" ${r === query.rate ? "selected" : ""}>${lbl}</option>`;
-    })
-    .join("");
-
-  const statsText = `${query.estBytesPerSec} B/s · Δ${query.deltas} · ${query.notModified}×304${query.lastUpdatedAt ? ` · ${query.lastUpdatedAt}` : ""}`;
+  const statsText = `${query.rate} · ${query.estBytesPerSec} B/s · Δ${query.deltas} · ${query.notModified}×304${query.lastUpdatedAt ? ` · ${query.lastUpdatedAt}` : ""}`;
 
   return `
     <div class="earth-pane ${focused}" data-pane-index="${paneIndex}" data-testid="query-pane-${paneIndex}">
       <div class="earth-pane-head">
         <div class="pane-head-left">
           <span class="pane-num">#${paneIndex + 1}</span>
-          <select class="pane-select" data-pane-query="${paneIndex}" aria-label="Pane ${paneIndex + 1} query">${queryOptions}</select>
+          <strong class="pane-title">${escapeHtml(query.label)}</strong>
           <span class="pane-source ${query.source === "cloudflare" ? "is-cf" : "is-ch"}">${sourceTag}</span>
         </div>
         <div class="pane-head-right">
-          <select class="pane-select" data-pane-rate="${escapeHtml(query.id)}" aria-label="Best-effort data rate">${rateSelect}</select>
           <span class="pane-stats">${escapeHtml(statsText)}</span>
         </div>
       </div>
@@ -1309,23 +1405,9 @@ function buildSingleQueryTable(
 }
 
 function bindInteractions(): void {
-  // Query set chip clicks
+  // Query set chip clicks on bottom bar
   app.querySelectorAll<HTMLButtonElement>("[data-pick-query]").forEach((btn) => {
-    btn.addEventListener("click", (event) => {
-      const target = event.target as HTMLElement | null;
-      if (target?.dataset.removeQuery) {
-        event.stopPropagation();
-        const removeId = target.dataset.removeQuery;
-        state.queries = state.queries.filter((q) => q.id !== removeId);
-        state.paneQueryIds = normalizePaneAssignments(
-          state.paneQueryIds,
-          state.queries,
-          state.layout,
-        );
-        renderAll();
-        syncGlobeFocus();
-        return;
-      }
+    btn.addEventListener("click", () => {
       const id = btn.dataset.pickQuery;
       if (!id) return;
       exitTour();
@@ -1337,7 +1419,26 @@ function bindInteractions(): void {
     });
   });
 
-  // Split layout buttons (1, 1|1, 1/1, 1|2, 2x2)
+  // Open / close visual Config Page
+  app
+    .querySelector<HTMLButtonElement>('[data-action="open-config"]')
+    ?.addEventListener("click", () => {
+      state.configOpen = !state.configOpen;
+      renderAll();
+    });
+
+  app
+    .querySelector<HTMLButtonElement>('[data-action="close-config"]')
+    ?.addEventListener("click", () => {
+      state.configOpen = false;
+      for (const q of visiblePaneQueries()) {
+        q.nextDueAtMs = Date.now();
+      }
+      renderAll();
+      syncGlobeFocus();
+    });
+
+  // Config Page: single-button visual layout cards
   app.querySelectorAll<HTMLButtonElement>("[data-layout-btn]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const nextLayout = btn.dataset.layoutBtn as SplitLayout | undefined;
@@ -1353,15 +1454,132 @@ function bindInteractions(): void {
       if (state.activePaneIndex >= state.paneQueryIds.length) {
         state.activePaneIndex = 0;
       }
-      for (const q of visiblePaneQueries()) {
-        q.nextDueAtMs = Date.now();
-      }
       renderAll();
-      syncGlobeFocus();
     });
   });
 
-  // Focus pane on click
+  // Config Page: click a visual pane slot in the pane map
+  app.querySelectorAll<HTMLButtonElement>("[data-cfg-pane]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.activePaneIndex = Number(btn.dataset.cfgPane ?? 0);
+      renderAll();
+    });
+  });
+
+  // Config Page: assign query to active pane in 1 click
+  app.querySelectorAll<HTMLButtonElement>("[data-cfg-assign]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.cfgAssign;
+      if (!id) return;
+      assignQueryToActivePane(id);
+      renderAll();
+    });
+  });
+
+  // Config Page: 1-click source toggle (channel | cloudflare)
+  app.querySelectorAll<HTMLButtonElement>("[data-cfg-source]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const raw = btn.dataset.cfgSource || "";
+      const sep = raw.lastIndexOf(":");
+      if (sep < 0) return;
+      const q = getQueryById(raw.slice(0, sep));
+      q.source = raw.slice(sep + 1) as QuerySource;
+      renderAll();
+    });
+  });
+
+  // Config Page: 1-click network toggle
+  app.querySelectorAll<HTMLButtonElement>("[data-cfg-net]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const raw = btn.dataset.cfgNet || "";
+      const sep = raw.lastIndexOf(":");
+      if (sep < 0) return;
+      const q = getQueryById(raw.slice(0, sep));
+      q.networkSlug = raw.slice(sep + 1);
+      q.nextDueAtMs = Date.now();
+      renderAll();
+    });
+  });
+
+  // Config Page: 1-click best-effort rate toggle
+  app.querySelectorAll<HTMLButtonElement>("[data-cfg-rate]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const raw = btn.dataset.cfgRate || "";
+      const sep = raw.lastIndexOf(":");
+      if (sep < 0) return;
+      const q = getQueryById(raw.slice(0, sep));
+      q.rate = raw.slice(sep + 1) as RateTier;
+      q.unchangedStreak = 0;
+      q.nextDueAtMs = Date.now();
+      renderAll();
+    });
+  });
+
+  // Config Page: 1-click add preset query
+  app.querySelectorAll<HTMLButtonElement>("[data-cfg-add]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const kind = (btn.dataset.cfgAdd || "hosts") as TableQuery;
+      const created = createCustomQuery(state.queries, {
+        kind,
+        source: defaultSourceForKind(kind),
+        networkSlug: state.networkSlug,
+        rate: "med",
+      });
+      state.queries.push(created);
+      assignQueryToActivePane(created.id);
+      renderAll();
+    });
+  });
+
+  // Config Page: remove query
+  app.querySelectorAll<HTMLButtonElement>("[data-remove-query]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const removeId = btn.dataset.removeQuery;
+      if (!removeId || state.queries.length <= 1) return;
+      state.queries = state.queries.filter((q) => q.id !== removeId);
+      state.paneQueryIds = normalizePaneAssignments(
+        state.paneQueryIds,
+        state.queries,
+        state.layout,
+      );
+      renderAll();
+    });
+  });
+
+  // Config Page: 1-click display mode (min | dock | full)
+  app.querySelectorAll<HTMLButtonElement>("[data-cfg-mode]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mode = btn.dataset.cfgMode;
+      if (mode === "min") {
+        state.tableFullscreen = false;
+        state.tableMinimized = true;
+      } else if (mode === "dock") {
+        state.tableFullscreen = false;
+        state.tableMinimized = false;
+        exitTour();
+      } else if (mode === "full") {
+        state.tableMinimized = false;
+        state.tableFullscreen = true;
+        exitTour();
+      }
+      renderAll();
+    });
+  });
+
+  // Config Page: reset defaults
+  app
+    .querySelector<HTMLButtonElement>("[data-cfg-reset]")
+    ?.addEventListener("click", () => {
+      state.queries = createDefaultQuerySet(state.networks);
+      state.layout = "1";
+      state.paneQueryIds = [state.queries[0].id];
+      state.activePaneIndex = 0;
+      state.tableFullscreen = false;
+      state.tableMinimized = true;
+      renderAll();
+    });
+
+  // Focus live pane on click
   app.querySelectorAll<HTMLElement>("[data-pane-index]").forEach((pane) => {
     pane.addEventListener("mousedown", () => {
       const idx = Number(pane.dataset.paneIndex ?? 0);
@@ -1374,72 +1592,6 @@ function bindInteractions(): void {
       }
     });
   });
-
-  // Per-pane query selector
-  app.querySelectorAll<HTMLSelectElement>("[data-pane-query]").forEach((sel) => {
-    sel.addEventListener("change", () => {
-      const paneIdx = Number(sel.dataset.paneQuery ?? 0);
-      state.activePaneIndex = paneIdx;
-      exitTour();
-      assignQueryToActivePane(sel.value);
-      renderAll();
-      syncGlobeFocus();
-    });
-  });
-
-  // Per-query best-effort rate selector
-  app.querySelectorAll<HTMLSelectElement>("[data-pane-rate]").forEach((sel) => {
-    sel.addEventListener("change", () => {
-      const q = getQueryById(sel.dataset.paneRate);
-      const nextRate = sel.value as RateTier;
-      q.rate = nextRate;
-      q.unchangedStreak = 0;
-      q.nextDueAtMs = Date.now();
-      renderAll();
-    });
-  });
-
-  // New query composer
-  app
-    .querySelector<HTMLButtonElement>('[data-action="toggle-composer"]')
-    ?.addEventListener("click", () => {
-      state.composerOpen = !state.composerOpen;
-      renderAll();
-    });
-
-  app
-    .querySelector<HTMLButtonElement>('[data-action="close-composer"]')
-    ?.addEventListener("click", () => {
-      state.composerOpen = false;
-      renderAll();
-    });
-
-  app
-    .querySelector<HTMLFormElement>("#query-composer")
-    ?.addEventListener("submit", (event) => {
-      event.preventDefault();
-      const form = event.currentTarget as HTMLFormElement;
-      const fd = new FormData(form);
-      const kind = String(fd.get("kind") || "hosts") as TableQuery;
-      const networkSlug = String(fd.get("network") || state.networkSlug);
-      const source = String(fd.get("source") || "channel") as QuerySource;
-      const rate = String(fd.get("rate") || "med") as RateTier;
-      const label = String(fd.get("label") || "");
-      const created = createCustomQuery(state.queries, {
-        label,
-        kind,
-        source,
-        networkSlug,
-        rate,
-      });
-      state.queries.push(created);
-      state.composerOpen = false;
-      state.tableMinimized = false;
-      exitTour();
-      assignQueryToActivePane(created.id);
-      renderAll();
-      syncGlobeFocus();
-    });
 
   // Row drill-downs (sync globe + active pane)
   app
