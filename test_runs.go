@@ -120,6 +120,9 @@ func newTestEntry(name string) testEntry {
 }
 
 func testSection(name string) string {
+	if strings.HasPrefix(name, "TestBrowser") {
+		return "Synced Live Browser (CDP)"
+	}
 	switch name {
 	case "TestDialtoneEarthLiveMetalDaemonE2E",
 		"TestDialtoneEarthMetalLiveBrowserE2E",
@@ -145,6 +148,43 @@ func testSection(name string) string {
 	default:
 		return "CLI & Test Runner Contracts"
 	}
+}
+
+func buildInitialTestState(root string, selectedNames []string, filter string) testState {
+	if strings.TrimSpace(filter) == "" {
+		return newTestState(selectedNames)
+	}
+	allNames, err := listTestNames(root, "")
+	if err != nil || len(allNames) == 0 {
+		return newTestState(selectedNames)
+	}
+	selected := make(map[string]bool, len(selectedNames))
+	for _, n := range selectedNames {
+		selected[n] = true
+	}
+	previous := map[string]testEntry{}
+	if raw, err := os.ReadFile(filepath.Join(root, stateFile)); err == nil {
+		var prevState testState
+		if json.Unmarshal(raw, &prevState) == nil {
+			for _, entry := range prevState.Tests {
+				previous[entry.Name] = entry
+			}
+		}
+	}
+	state := newTestState(allNames)
+	for i := range state.Tests {
+		name := state.Tests[i].Name
+		if selected[name] {
+			continue
+		}
+		if prev, ok := previous[name]; ok {
+			state.Tests[i].Status = prev.Status
+			state.Tests[i].Elapsed = prev.Elapsed
+			state.Tests[i].Timestamp = prev.Timestamp
+			state.Tests[i].TestID = prev.TestID
+		}
+	}
+	return state
 }
 
 // discoverTestSources scans *_test.go files in root using go/parser so every
@@ -296,7 +336,7 @@ func writeTestState(root string, state *testState) error {
 
 // runGoTests runs the selected tests and turns the event stream into live
 // output, per-execution logs, and dashboard state.
-func runGoTests(root string, state *testState, pattern string, stdout io.Writer) error {
+func runGoTests(root string, state *testState, pattern string, extraEnv []string, stdout io.Writer) error {
 	started := time.Now()
 	args := []string{"test", "-json", "-count=1", "-timeout", goTestTimeout}
 	if pattern != "" {
@@ -304,7 +344,7 @@ func runGoTests(root string, state *testState, pattern string, stdout io.Writer)
 	}
 	command := exec.Command("go", append(args, ".")...)
 	command.Dir = root
-	command.Env = append(os.Environ(), testRunEnv+"=1")
+	command.Env = append(append(os.Environ(), testRunEnv+"=1"), extraEnv...)
 	var toolErrors bytes.Buffer
 	command.Stderr = &toolErrors
 	events, err := command.StdoutPipe()

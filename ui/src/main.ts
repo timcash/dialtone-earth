@@ -27,6 +27,14 @@ type TestRun = TestRow & {
   completed_at?: string;
 };
 
+type CdpStatus = {
+  connected: boolean;
+  port: number;
+  pid?: number | null;
+  app_url?: string;
+  page_count?: number;
+};
+
 const appElement = document.querySelector<HTMLElement>("#app");
 if (!appElement) {
   throw new Error("missing #app");
@@ -37,11 +45,16 @@ let tests: TestRow[] = [];
 let loaded = false;
 let errorMessage = "";
 let starting = false;
+let useBrowser = true;
+let keepSignedIn = true;
+let cdpStatus: CdpStatus = { connected: false, port: 9222 };
+let lastRunningTestName = "";
 
 function render(): void {
   const passed = tests.filter((test) => normalizeStatus(test.status) === "pass").length;
   const failed = tests.filter((test) => normalizeStatus(test.status) === "fail").length;
-  const running = tests.some((test) => normalizeStatus(test.status) === "running");
+  const runningTest = tests.find((test) => normalizeStatus(test.status) === "running");
+  const running = Boolean(runningTest);
   const sections = groupTestsBySection(tests);
 
   app.innerHTML = `
@@ -52,9 +65,33 @@ function render(): void {
           <div>
             <h1>Tests</h1>
           </div>
-          <button data-testid="start-tests" type="button" ${starting || running ? "disabled" : ""}>
-            ${starting ? "Starting…" : running ? "Running…" : "Start tests"}
-          </button>
+          <div class="header-actions">
+            <button data-testid="run-browser-suite" class="secondary-btn" type="button" ${starting || running ? "disabled" : ""}>
+              Run browser suite
+            </button>
+            <button data-testid="start-tests" type="button" ${starting || running ? "disabled" : ""}>
+              ${starting ? "Starting…" : running ? "Running…" : "Start tests"}
+            </button>
+          </div>
+        </section>
+        <section class="cdp-bar" aria-label="Persistent browser controls">
+          <span class="cdp-pill ${cdpStatus.connected ? "connected" : "offline"}" data-testid="cdp-status">
+            <span class="cdp-dot"></span>
+            CDP :${cdpStatus.port} ${cdpStatus.connected ? "connected" : "offline"}
+          </span>
+          <label class="cdp-toggle">
+            <input type="checkbox" data-testid="toggle-browser" ${useBrowser ? "checked" : ""} />
+            <span>Live Browser</span>
+          </label>
+          <label class="cdp-toggle">
+            <input type="checkbox" data-testid="toggle-keep-signed-in" ${keepSignedIn ? "checked" : ""} />
+            <span>Keep signed in</span>
+          </label>
+          ${
+            cdpStatus.connected
+              ? `<button data-testid="close-browser" class="ghost-btn" type="button">Close browser</button>`
+              : ""
+          }
         </section>
         <section class="summary" aria-label="Test summary">
           <span><strong>${tests.length}</strong> total</span>
@@ -67,7 +104,7 @@ function render(): void {
       <section class="test-sections" aria-label="Test sections">
         ${
           tests.length > 0
-            ? sections.map(renderSection).join("")
+            ? sections.map((section) => renderSection(section, starting || running)).join("")
             : `<section class="test-list"><p class="empty">${loaded ? "No tests listed yet. Press Start tests." : "Loading tests…"}</p></section>`
         }
       </section>
@@ -78,9 +115,46 @@ function render(): void {
   startButton?.addEventListener("click", () => {
     startAllTests().catch(showError);
   });
+
+  const browserSuiteBtn = app.querySelector<HTMLButtonElement>("[data-testid='run-browser-suite']");
+  browserSuiteBtn?.addEventListener("click", () => {
+    startFilteredTests("^TestBrowser", true).catch(showError);
+  });
+
+  const browserToggle = app.querySelector<HTMLInputElement>("[data-testid='toggle-browser']");
+  browserToggle?.addEventListener("change", () => {
+    useBrowser = Boolean(browserToggle.checked);
+  });
+
+  const keepSignedInToggle = app.querySelector<HTMLInputElement>("[data-testid='toggle-keep-signed-in']");
+  keepSignedInToggle?.addEventListener("change", () => {
+    keepSignedIn = Boolean(keepSignedInToggle.checked);
+  });
+
+  const closeBrowserBtn = app.querySelector<HTMLButtonElement>("[data-testid='close-browser']");
+  closeBrowserBtn?.addEventListener("click", () => {
+    closeBrowser().catch(showError);
+  });
+
+  app.querySelectorAll<HTMLButtonElement>("[data-run-single]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const name = btn.dataset.runSingle || "";
+      if (!name) return;
+      const forceBrowser = name.startsWith("TestBrowser") || useBrowser;
+      startFilteredTests(`^${name}$`, forceBrowser).catch(showError);
+    });
+  });
+
+  if (runningTest && runningTest.name !== lastRunningTestName) {
+    lastRunningTestName = runningTest.name;
+    const row = app.querySelector<HTMLElement>(`[data-test-name="${CSS.escape(runningTest.name)}"]`);
+    row?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } else if (!runningTest) {
+    lastRunningTestName = "";
+  }
 }
 
-function renderSection(section: { title: string; description: string; tests: TestRow[] }): string {
+function renderSection(section: { title: string; description: string; tests: TestRow[] }, busy: boolean): string {
   const secPassed = section.tests.filter((t) => normalizeStatus(t.status) === "pass").length;
   const secFailed = section.tests.filter((t) => normalizeStatus(t.status) === "fail").length;
   const secRunning = section.tests.some((t) => normalizeStatus(t.status) === "running");
@@ -102,13 +176,13 @@ function renderSection(section: { title: string; description: string; tests: Tes
         <span class="section-badge ${badgeClass}">${escapeHtml(badgeText)}</span>
       </div>
       <div class="test-list">
-        ${section.tests.map(renderTest).join("")}
+        ${section.tests.map((test) => renderTest(test, busy)).join("")}
       </div>
     </section>
   `;
 }
 
-function renderTest(test: TestRow): string {
+function renderTest(test: TestRow, busy: boolean): string {
   const status = normalizeStatus(test.status);
   const elapsed = elapsedSeconds(test).toFixed(2);
   const logHref = testLogHref(test["test-id"], import.meta.env.BASE_URL);
@@ -124,6 +198,9 @@ function renderTest(test: TestRow): string {
       <section class="result" aria-label="${escapeHtml(test.title)} result">
         <strong>${statusLabel(test.status)}</strong>
         <time>${elapsed}s</time>
+        <button class="run-one-btn" type="button" data-run-single="${escapeHtml(test.name)}" data-testid="run-test-${escapeHtml(test.name)}" ${busy ? "disabled" : ""} title="Run only ${escapeHtml(test.name)}">
+          Run
+        </button>
         ${logHref ? `<a data-testid="test-log-link" href="${escapeHtml(logHref)}" target="_blank" rel="noreferrer" aria-label="Log for ${escapeHtml(test.title)}">Log ↗</a>` : '<span class="no-log" title="Log available when this test starts">—</span>'}
       </section>
     </article>
@@ -146,17 +223,54 @@ async function refreshTests(): Promise<void> {
   if (changed) render();
 }
 
+async function refreshCdpStatus(): Promise<void> {
+  try {
+    const response = await fetch("/api/cdp/status", { cache: "no-store" });
+    if (!response.ok) return;
+    const next = (await response.json()) as CdpStatus;
+    if (
+      next.connected !== cdpStatus.connected ||
+      next.port !== cdpStatus.port ||
+      next.app_url !== cdpStatus.app_url
+    ) {
+      cdpStatus = next;
+      render();
+    }
+  } catch {
+    // ignore transient poll errors
+  }
+}
+
 async function startAllTests(): Promise<void> {
+  await startFilteredTests("", useBrowser);
+}
+
+async function startFilteredTests(filter: string, withBrowser: boolean): Promise<void> {
   starting = true;
   errorMessage = "";
   render();
-  const response = await fetch("/api/tests/run", { method: "POST" });
+  const params = new URLSearchParams();
+  if (withBrowser) params.set("browser", "1");
+  if (withBrowser && keepSignedIn) params.set("keepSignedIn", "1");
+  if (filter) params.set("filter", filter);
+  const query = params.toString();
+  const response = await fetch(`/api/tests/run${query ? `?${query}` : ""}`, { method: "POST" });
   const payload = (await response.json()) as { error?: string };
   starting = false;
   if (!response.ok) {
     throw new Error(payload.error || `Could not start tests: HTTP ${response.status}`);
   }
   await refreshTests();
+  void refreshCdpStatus();
+}
+
+async function closeBrowser(): Promise<void> {
+  const response = await fetch("/api/cdp/close", { method: "POST" });
+  const payload = (await response.json()) as { error?: string };
+  if (!response.ok) {
+    throw new Error(payload.error || `Could not close browser: HTTP ${response.status}`);
+  }
+  await refreshCdpStatus();
 }
 
 function showError(error: unknown): void {
@@ -255,9 +369,13 @@ if (location.pathname.replace(/\/$/, "").endsWith("/logs")) {
 } else {
   render();
   refreshTests().catch(showError);
+  void refreshCdpStatus();
   setInterval(() => {
     refreshTests().catch(showError);
   }, 500);
+  setInterval(() => {
+    void refreshCdpStatus();
+  }, 2000);
   setInterval(() => {
     tests.forEach((test) => {
       if (normalizeStatus(test.status) !== "running") return;

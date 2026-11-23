@@ -97,4 +97,13 @@ test("the dashboard serves generated state and per-execution logs", async (conte
   const page = await fetch(`${base}/logs/?test-id=${firstId}`);
   assert.equal(page.status, 200);
   assert.match(page.headers.get("content-type"), /text\/html/);
+
+  const cdpResp = await fetch(`${base}/api/cdp/status`);
+  assert.equal(cdpResp.status, 200);
+  const cdpPayload = await cdpResp.json();
+  assert.equal(typeof cdpPayload.connected, "boolean");
+  assert.equal(typeof cdpPayload.port, "number");
+
+  const badFilter = await fetch(`${base}/api/tests/run?filter=${encodeURIComponent("Test;rm -rf")}`, { method: "POST" });
+  assert.equal(badFilter.status, 400);
 });

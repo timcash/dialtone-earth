@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import type { ServerResponse } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,8 @@ const commandRoot = resolve(uiDir, "..");
 // reads it: the CLI is the single writer, so the two can never disagree.
 const statePath = resolve(process.env.DIALTONE_EARTH_STATE_PATH || resolve(commandRoot, "logs", "state.json"));
 const logsDir = dirname(statePath);
+const cdpPort = Number(process.env.DIALTONE_CDP_PORT || 9222);
+const SAFE_FILTER_RE = /^[\^$A-Za-z0-9_.|*-]+$/;
 let activeRun: ChildProcess | null = null;
 
 type TestRecord = {
@@ -26,12 +28,20 @@ type TestRecord = {
   "test-id": string;
 };
 
+type RunOptions = {
+  browser: boolean;
+  keepSignedIn: boolean;
+  filter: string;
+  dashboardUrl: string;
+};
+
 function testApiPlugin(): Plugin {
   return {
     name: "dialtone-earth-test-api",
     configureServer(server) {
       server.middlewares.use((request, response, next) => {
-        const pathname = new URL(request.url || "/", "http://local").pathname;
+        const parsedUrl = new URL(request.url || "/", "http://local");
+        const pathname = parsedUrl.pathname;
         if (pathname === "/api/tests" && request.method === "GET") {
           readTests()
             .then((tests) => sendJson(response, { tests }))
@@ -39,7 +49,30 @@ function testApiPlugin(): Plugin {
           return;
         }
         if (pathname === "/api/tests/run" && request.method === "POST") {
-          startTests(response);
+          const filter = (parsedUrl.searchParams.get("filter") || "").trim();
+          if (filter !== "" && !SAFE_FILTER_RE.test(filter)) {
+            sendJson(response, { error: "Invalid test filter pattern" }, 400);
+            return;
+          }
+          const browser = parsedUrl.searchParams.get("browser") === "1";
+          const keepSignedIn = parsedUrl.searchParams.get("keepSignedIn") === "1";
+          const hostHeader = typeof request.headers.host === "string" ? request.headers.host : "127.0.0.1:5174";
+          startTests(response, {
+            browser,
+            keepSignedIn,
+            filter,
+            dashboardUrl: `http://${hostHeader}/`,
+          });
+          return;
+        }
+        if (pathname === "/api/cdp/status" && request.method === "GET") {
+          readCdpStatus()
+            .then((status) => sendJson(response, status))
+            .catch((error: unknown) => sendError(response, error));
+          return;
+        }
+        if (pathname === "/api/cdp/close" && request.method === "POST") {
+          closeCdpBrowser(request, response);
           return;
         }
         if (pathname.startsWith("/api/test-runs/") && request.method === "GET") {
@@ -73,12 +106,20 @@ function testApiPlugin(): Plugin {
   };
 }
 
-function startTests(response: ServerResponse): void {
+function startTests(response: ServerResponse, opts: RunOptions): void {
   if (activeRun?.exitCode === null) {
     sendJson(response, { error: "tests are already running" }, 409);
     return;
   }
-  activeRun = spawn("go", ["run", ".", "test"], {
+  const extraArgs: string[] = [];
+  if (opts.browser) {
+    extraArgs.push("--browser", "--cdp-port", String(cdpPort), "--dashboard-url", opts.dashboardUrl);
+    if (opts.keepSignedIn) extraArgs.push("--keep-signed-in");
+  }
+  if (opts.filter) {
+    extraArgs.push("--filter", opts.filter);
+  }
+  activeRun = spawn("go", ["run", ".", "test"].concat(extraArgs), {
     cwd: commandRoot,
     env: process.env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -91,7 +132,65 @@ function startTests(response: ServerResponse): void {
   activeRun.once("exit", () => {
     activeRun = null;
   });
-  sendJson(response, { started: true, pid: activeRun.pid ?? null }, 202);
+  sendJson(response, { started: true, pid: activeRun.pid ?? null, browser: opts.browser, filter: opts.filter || null }, 202);
+}
+
+async function readCdpStatus(): Promise<Record<string, unknown>> {
+  let meta: Record<string, unknown> | null = null;
+  try {
+    const raw = await readFile(resolve(logsDir, "cdp.json"), "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (isRecord(parsed)) meta = parsed;
+  } catch {
+    // no cdp.json yet
+  }
+  try {
+    const versionResp = await fetch(`http://127.0.0.1:${cdpPort}/json/version`, {
+      signal: AbortSignal.timeout(900),
+    });
+    if (!versionResp.ok) {
+      return { connected: false, port: cdpPort, pid: null, app_url: text(meta?.app_url) };
+    }
+    const version: unknown = await versionResp.json();
+    const listResp = await fetch(`http://127.0.0.1:${cdpPort}/json/list`, {
+      signal: AbortSignal.timeout(900),
+    });
+    const list: unknown = listResp.ok ? await listResp.json() : [];
+    const pages = Array.isArray(list) ? list.filter((t) => isRecord(t) && t.type === "page") : [];
+    const appPage = pages.find((t) => text(t.url).includes("dialtone.earth")) || pages[0];
+    return {
+      connected: true,
+      port: cdpPort,
+      pid: typeof meta?.pid === "number" ? meta.pid : null,
+      browser: isRecord(version) ? text(version.Browser) : "",
+      app_url: isRecord(appPage) ? text(appPage.url) : text(meta?.app_url),
+      page_count: pages.length,
+    };
+  } catch {
+    return { connected: false, port: cdpPort, pid: null, app_url: text(meta?.app_url) };
+  }
+}
+
+function closeCdpBrowser(_request: IncomingMessage, response: ServerResponse): void {
+  const closer = spawn("go", ["run", ".", "test"].concat(["--close-browser", "--cdp-port", String(cdpPort)]), {
+    cwd: commandRoot,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let errOut = "";
+  closer.stderr?.on("data", (chunk: Buffer) => {
+    errOut += chunk.toString("utf8");
+  });
+  closer.once("exit", (code) => {
+    if (code === 0) {
+      sendJson(response, { closed: true, port: cdpPort });
+    } else {
+      sendJson(response, { error: errOut.trim() || "Could not close persistent CDP browser" }, 500);
+    }
+  });
+  closer.once("error", (error) => {
+    sendError(response, error);
+  });
 }
 
 async function readTests(): Promise<TestRecord[]> {

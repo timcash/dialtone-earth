@@ -32,6 +32,8 @@ go run . auth status --json           # provider-neutral auth state without netw
 go run . test                         # run and record all Go & registry tests
 go run . test --list                  # list discovered tests without running them
 go run . test --filter TestDialtoneEarth
+go run . test --browser               # start/reconnect persistent CDP Chrome synced with dashboard
+go run . test --close-browser         # close the persistent CDP Chrome browser
 go run . dev --port 5174              # start loopback test dashboard (http://127.0.0.1:5174/)
 go run . deploy                       # build local bundle in deploy/local
 go run . deploy --live                # build registry/ and publish live to https://dialtone.earth/

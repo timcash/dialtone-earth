@@ -18,6 +18,50 @@ import (
 	"testing"
 )
 
+func runBrowserStep(t *testing.T, step string) {
+	t.Helper()
+	if os.Getenv("DIALTONE_LIVE_CLOUDFLARE_E2E") != "1" {
+		t.Skip("run `dialtone-earth test --browser` (or set DIALTONE_LIVE_CLOUDFLARE_E2E=1) to execute synced Chrome CDP tests")
+	}
+	runToolInDir(t, "registry", "node", "scripts/qa-live-browser.mjs", "--step", step)
+}
+
+func TestBrowser01SignedOutContainment(t *testing.T) {
+	runBrowserStep(t, "01-signed-out")
+}
+
+func TestBrowser02MagicLinkLogin(t *testing.T) {
+	runBrowserStep(t, "02-login")
+}
+
+func TestBrowser03GlobeOverlaysAndLANPaths(t *testing.T) {
+	runBrowserStep(t, "03-globe-and-paths")
+}
+
+func TestBrowser04LiveDialtoneShellAndRedaction(t *testing.T) {
+	runBrowserStep(t, "04-shell-redaction")
+}
+
+func TestBrowser05HostAndUsersPresence(t *testing.T) {
+	runBrowserStep(t, "05-host-and-users")
+}
+
+func TestBrowser06LiveTestsAndLogProxy(t *testing.T) {
+	runBrowserStep(t, "06-tests-and-logs")
+}
+
+func TestBrowser07Tiling2x2AndCFKV(t *testing.T) {
+	runBrowserStep(t, "07-tiling-2x2-kv")
+}
+
+func TestBrowser08CameraStudioTSAndReload(t *testing.T) {
+	runBrowserStep(t, "08-camera-ts-reload")
+}
+
+func TestBrowser09SignOutContainment(t *testing.T) {
+	runBrowserStep(t, "09-sign-out")
+}
+
 func TestDialtoneEarthLiveMetalDaemonE2E(t *testing.T) {
 	runToolInDir(t, "registry", "node", "--test", "--test-name-pattern=^metal-live-daemon-8788", "tests/metal-ui-e2e.test.mjs")
 }
@@ -25,6 +69,9 @@ func TestDialtoneEarthLiveMetalDaemonE2E(t *testing.T) {
 func TestDialtoneEarthMetalLiveBrowserE2E(t *testing.T) {
 	if os.Getenv("DIALTONE_LIVE_CLOUDFLARE_E2E") != "1" {
 		t.Skip("set DIALTONE_LIVE_CLOUDFLARE_E2E=1 (and optional QA_HEADED=1) to run live Chrome CDP login + metal UI E2E")
+	}
+	if os.Getenv("DIALTONE_CDP_REUSE") == "1" {
+		t.Skip("covered step-by-step by TestBrowser01..09 in --browser mode")
 	}
 	runToolInDir(t, "registry", "node", "scripts/qa-live-browser.mjs")
 }

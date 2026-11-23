@@ -35,6 +35,10 @@ export function elapsedSeconds(row, now = Date.now()) {
 
 export const SECTION_META = [
   {
+    title: "Synced Live Browser (CDP)",
+    description: "Persistent reconnectable Chrome CDP session driving live https://metal.dialtone.earth/ side-by-side with this dashboard",
+  },
+  {
     title: "Live metal Data & UI",
     description: "Real metal channel payloads, 3D H3 globe & bundled ping arcs, tiling WM & query rates, fullscreen TypeScript Camera Studio, Cloudflare KV persistence, and tour captions",
   },
@@ -58,6 +62,9 @@ export function classifyTestSection(row) {
     return row.section.trim();
   }
   const name = typeof row?.name === "string" ? row.name : "";
+  if (/^TestBrowser/.test(name)) {
+    return "Synced Live Browser (CDP)";
+  }
   if (
     /LiveMetal|MetalCloudflareLive|MetalLiveBrowser|GlobeH3|TilingWindowManager|CameraStudio|CloudflareKVConfig|SimulatedTour/.test(name)
   ) {

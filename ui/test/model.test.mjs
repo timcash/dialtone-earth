@@ -80,3 +80,15 @@ test("parseStructuredLogLine extracts timestamp, log level, and file:line source
   assert.equal(passLine.level, "PASS");
   assert.equal(passLine.source, "cli_test.go:25");
 });
+
+test("synced browser tests classify into Synced Live Browser (CDP) section first", () => {
+  const rows = [
+    { name: "TestDialtoneEarthLiveMetalUIParity", section: "Live metal Data & UI" },
+    { name: "TestBrowser01SignedOutContainment" },
+    { name: "TestBrowser02MagicLinkLogin" },
+  ];
+  assert.equal(classifyTestSection(rows[1]), "Synced Live Browser (CDP)");
+  const groups = groupTestsBySection(rows);
+  assert.equal(groups[0].title, "Synced Live Browser (CDP)");
+  assert.equal(groups[0].tests.length, 2);
+});

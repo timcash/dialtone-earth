@@ -35,6 +35,9 @@ Flags:
   auth status [--json]     Report configured and verified auth state
   test --filter <regexp>   Run only the Go tests matching this pattern
   test --list              Print the selected test names without running them
+  test --browser           Start/reconnect persistent CDP Chrome synced with dashboard
+  test --keep-signed-in    Leave Chrome signed into LIVE metal after browser tests
+  test --close-browser     Close the persistent CDP Chrome browser and exit
   deploy --live            Build registry/ and deploy live to Cloudflare Workers
   live <status|set|reset|init-token>  Control public dialtone.earth live (<2s)
   dev --port <port>        Serve the dashboard on another port
@@ -177,6 +180,11 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	flags.SetOutput(stderr)
 	filter := flags.String("filter", "", "Run only the Go tests matching this regular expression")
 	list := flags.Bool("list", false, "Print the selected test names without running them")
+	browser := flags.Bool("browser", false, "Start or reconnect persistent CDP Chrome synced with the test dashboard")
+	keepSignedIn := flags.Bool("keep-signed-in", false, "Keep the persistent CDP Chrome browser signed into LIVE metal after tests finish")
+	closeBrowser := flags.Bool("close-browser", false, "Close the persistent CDP Chrome browser and exit")
+	cdpPort := flags.Int("cdp-port", 9222, "Chrome DevTools Protocol loopback port for --browser")
+	dashboardURL := flags.String("dashboard-url", "http://127.0.0.1:5174/", "Test dashboard URL opened beside the live app in --browser mode")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -189,6 +197,10 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	root, err := projectRoot()
 	if err != nil {
 		return err
+	}
+	cdpScript := filepath.Join(root, "registry", "scripts", "cdp-session.mjs")
+	if *closeBrowser {
+		return runExternal(root, stdout, stderr, "node", cdpScript, "close", "--port", strconv.Itoa(*cdpPort))
 	}
 	names, err := listTestNames(root, *filter)
 	if err != nil {
@@ -203,12 +215,51 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 		}
 		return nil
 	}
-	state := newTestState(names)
+	var extraEnv []string
+	if *browser {
+		if err := ensurePersistentBrowserSession(root, cdpScript, *cdpPort, *dashboardURL, stdout, stderr); err != nil {
+			return err
+		}
+		extraEnv = append(extraEnv,
+			"DIALTONE_LIVE_CLOUDFLARE_E2E=1",
+			"DIALTONE_CDP_REUSE=1",
+			"DIALTONE_CDP_PORT="+strconv.Itoa(*cdpPort),
+			"DIALTONE_DASHBOARD_URL="+*dashboardURL,
+			"QA_HEADED=1",
+		)
+		if *keepSignedIn {
+			extraEnv = append(extraEnv, "QA_KEEP_SIGNED_IN=1")
+		}
+	}
+	state := buildInitialTestState(root, names, *filter)
 	populateTestSources(root, &state)
 	if err := writeTestState(root, &state); err != nil {
 		return err
 	}
-	return runGoTests(root, &state, *filter, stdout)
+	return runGoTests(root, &state, *filter, extraEnv, stdout)
+}
+
+func ensurePersistentBrowserSession(root, cdpScript string, port int, dashboardURL string, stdout, stderr io.Writer) error {
+	command := exec.Command("node", cdpScript, "ensure", "--port", strconv.Itoa(port), "--dashboard", dashboardURL)
+	command.Dir = root
+	command.Stderr = stderr
+	out, err := command.Output()
+	if err != nil {
+		return fmt.Errorf("ensure persistent CDP browser on port %d: %w", port, err)
+	}
+	var meta struct {
+		Port   int    `json:"port"`
+		Reused bool   `json:"reused"`
+		AppURL string `json:"app_url"`
+	}
+	if json.Unmarshal(out, &meta) == nil && meta.Port > 0 {
+		verb := "launched persistent"
+		if meta.Reused {
+			verb = "reconnected to"
+		}
+		fmt.Fprintf(stdout, "browser: %s Chrome CDP on 127.0.0.1:%d (%s)\n", verb, meta.Port, meta.AppURL)
+	}
+	return nil
 }
 
 func runClean(stdout io.Writer) error {
