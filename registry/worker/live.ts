@@ -24,6 +24,7 @@ export interface LiveSiteState {
   view: LiveView | null;
   network: string | null;
   tour_playing: boolean | null;
+  fullscreen: boolean | null;
 }
 
 export interface LiveControlEnv {
@@ -67,6 +68,7 @@ export function defaultLiveSiteState(revision = 0): LiveSiteState {
     view: null,
     network: null,
     tour_playing: null,
+    fullscreen: null,
   };
 }
 
@@ -125,6 +127,8 @@ function sanitizeStoredState(raw: string | null): LiveSiteState {
       network: cleanNetworkSlug(parsed.network),
       tour_playing:
         typeof parsed.tour_playing === "boolean" ? parsed.tour_playing : null,
+      fullscreen:
+        typeof parsed.fullscreen === "boolean" ? parsed.fullscreen : null,
     };
   } catch {
     return defaultLiveSiteState(0);
@@ -320,6 +324,17 @@ export async function handleLiveRoute(
       securityHeaders,
     );
   }
+  if (
+    "fullscreen" in body &&
+    body.fullscreen !== null &&
+    typeof body.fullscreen !== "boolean"
+  ) {
+    return liveJsonResponse(
+      { error: "Invalid fullscreen; expected boolean or null" },
+      400,
+      securityHeaders,
+    );
+  }
 
   const base =
     request.method === "PUT"
@@ -347,6 +362,11 @@ export async function handleLiveRoute(
         ? body.tour_playing
         : null
       : base.tour_playing,
+    fullscreen: has("fullscreen")
+      ? typeof body.fullscreen === "boolean"
+        ? body.fullscreen
+        : null
+      : base.fullscreen,
   };
 
   await env.DIALTONE_AUTH_TOKENS.put(LIVE_STATE_KV_KEY, JSON.stringify(next));

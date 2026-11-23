@@ -54,6 +54,37 @@ a {
   position: fixed;
   inset: 0;
   z-index: 1;
+  transition: opacity 0.2s ease;
+}
+
+.hud-shell.is-table-fullscreen .globe-stage {
+  opacity: 0.22;
+  pointer-events: none;
+}
+
+.hud-shell.is-table-fullscreen .tour-captions {
+  display: none;
+}
+
+.hud-shell.is-table-fullscreen .bottom-table-dock {
+  inset: 0;
+}
+
+.hud-shell.is-table-fullscreen .earth-table-frame {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: rgba(14, 14, 14, 0.72);
+  border-top: none;
+}
+
+:root[data-theme="light"] .hud-shell.is-table-fullscreen .earth-table-frame {
+  background: rgba(244, 244, 244, 0.78);
+}
+
+.hud-shell.is-table-fullscreen .earth-table-scroll {
+  flex: 1;
+  max-height: none;
 }
 
 .globe-stage canvas {

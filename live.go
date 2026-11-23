@@ -44,6 +44,7 @@ Flags for "live set":
   --view <view>       Switch view live: overview, network, host, users, tests, log
   --network <slug>    Focus 3D globe on network: sim-atlas, sim-foundry, sim-orbit
   --tour <mode>       Guided tour playback: play, pause, or "" to clear
+  --fullscreen <mode> Fullscreen table over faded globe: on, off, or "" to clear
   --url <url>         Target site base URL (default: https://dialtone.earth)
   --token-file <path> Path to LIVE_CONTROL_TOKEN file (or set DIALTONE_LIVE_TOKEN)
   --json              Emit raw JSON response
@@ -62,6 +63,7 @@ type liveSiteState struct {
 	View        *string `json:"view"`
 	Network     *string `json:"network"`
 	TourPlaying *bool   `json:"tour_playing"`
+	Fullscreen  *bool   `json:"fullscreen"`
 }
 
 func defaultLiveTokenPath() (string, error) {
@@ -165,6 +167,7 @@ func runLiveSet(args []string, stdout, stderr io.Writer) error {
 	view := fs.String("view", "", "View: overview, network, host, users, tests, log")
 	network := fs.String("network", "", "Network slug (e.g. sim-atlas, sim-foundry, sim-orbit)")
 	tour := fs.String("tour", "", "Guided tour playback: play, pause, or empty")
+	fullscreen := fs.String("fullscreen", "", "Fullscreen table over faded globe: on, off, or empty")
 	baseURL := fs.String("url", defaultLiveSiteURL, "Target site base URL")
 	tokenFile := fs.String("token-file", "", "Path to LIVE_CONTROL_TOKEN file")
 	jsonOut := fs.Bool("json", false, "Emit raw JSON")
@@ -215,6 +218,18 @@ func runLiveSet(args []string, stdout, stderr io.Writer) error {
 			payload["tour_playing"] = false
 		default:
 			return fmt.Errorf("invalid --tour value %q (use play, pause, or empty)", *tour)
+		}
+	}
+	if visited["fullscreen"] {
+		switch strings.ToLower(strings.TrimSpace(*fullscreen)) {
+		case "":
+			payload["fullscreen"] = nil
+		case "on", "true", "full", "1":
+			payload["fullscreen"] = true
+		case "off", "false", "dock", "0":
+			payload["fullscreen"] = false
+		default:
+			return fmt.Errorf("invalid --fullscreen value %q (use on, off, or empty)", *fullscreen)
 		}
 	}
 
@@ -472,5 +487,12 @@ func printLiveStateSummary(w io.Writer, endpoint string, st liveSiteState) {
 			mode = "play"
 		}
 		fmt.Fprintf(w, "%-9s %s\n", "tour:", mode)
+	}
+	if st.Fullscreen != nil {
+		mode := "dock"
+		if *st.Fullscreen {
+			mode = "full"
+		}
+		fmt.Fprintf(w, "%-9s %s\n", "table:", mode)
 	}
 }

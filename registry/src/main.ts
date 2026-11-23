@@ -44,6 +44,7 @@ type LiveSiteState = {
   view: TourView | null;
   network: string | null;
   tour_playing: boolean | null;
+  fullscreen: boolean | null;
 };
 
 type AppState = {
@@ -58,6 +59,7 @@ type AppState = {
   testId: string;
   tourPlaying: boolean;
   tourCaptionsVisible: boolean;
+  tableFullscreen: boolean;
   tourStepIndex: number;
   liveError: string | null;
   loadedLogCache: Record<string, SimTestRun>;
@@ -104,6 +106,7 @@ const state: AppState = {
     SIMULATED_NETWORKS[0].tests[0].testId,
   tourPlaying: true,
   tourCaptionsVisible: true,
+  tableFullscreen: false,
   tourStepIndex: 0,
   liveError: null,
   loadedLogCache: {},
@@ -158,6 +161,13 @@ async function boot(): Promise<void> {
     } else {
       state.unchangedStreak = 0;
       void runAdaptiveMeshTick();
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.tableFullscreen) {
+      state.tableFullscreen = false;
+      renderAll();
     }
   });
 
@@ -387,6 +397,8 @@ async function syncPublicLiveControl(initial = false): Promise<boolean> {
       network: typeof payload.network === "string" ? payload.network : null,
       tour_playing:
         typeof payload.tour_playing === "boolean" ? payload.tour_playing : null,
+      fullscreen:
+        typeof payload.fullscreen === "boolean" ? payload.fullscreen : null,
     };
 
     const changed =
@@ -427,6 +439,11 @@ function applyLiveSiteState(live: LiveSiteState, initial: boolean): void {
       if (state.tourPlaying) startTourTimer();
       else clearTourTimer();
     }
+  }
+  if (typeof live.fullscreen === "boolean") {
+    state.tableFullscreen = live.fullscreen;
+  } else {
+    state.tableFullscreen = false;
   }
   if (!initial) {
     renderAll();
@@ -634,6 +651,10 @@ function activeTestRun(net: MeshNetwork): SimTestRun | null {
 }
 
 function renderAll(): void {
+  const shell = app.querySelector<HTMLElement>(".hud-shell");
+  if (shell) {
+    shell.classList.toggle("is-table-fullscreen", state.tableFullscreen);
+  }
   renderTourCaptions();
   renderBottomTable();
   bindInteractions();
@@ -750,6 +771,7 @@ function renderBottomTable(): void {
         </div>
         <div class="earth-bar-right">
           <span class="tbl-cadence" data-testid="mesh-cadence" title="Adaptive gossip sync interval with ETag/304 backoff">${escapeHtml(cadenceText)}</span>
+          <button type="button" class="tbl-chip ${state.tableFullscreen ? "is-active" : ""}" data-action="toggle-fullscreen" data-testid="toggle-fullscreen" aria-pressed="${state.tableFullscreen}">${state.tableFullscreen ? "dock" : "full"}</button>
           <button type="button" class="tbl-chip" data-action="prev-step" title="Previous tour step">◀</button>
           <button type="button" class="tbl-chip ${state.tourPlaying ? "is-active" : ""}" data-action="toggle-tour" aria-pressed="${state.tourPlaying}">${state.tourPlaying ? "⏸ tour" : "▶ tour"}</button>
           <button type="button" class="tbl-chip" data-action="next-step" title="Next tour step">▶</button>
@@ -1108,6 +1130,16 @@ function bindInteractions(): void {
     ?.addEventListener("click", () => {
       const nextIdx = (state.tourStepIndex + 1) % state.tourSteps.length;
       applyTourStep(nextIdx, false);
+    });
+
+  app
+    .querySelector<HTMLButtonElement>('[data-action="toggle-fullscreen"]')
+    ?.addEventListener("click", () => {
+      state.tableFullscreen = !state.tableFullscreen;
+      if (state.tableFullscreen) {
+        exitTour();
+      }
+      renderAll();
     });
 
   app
