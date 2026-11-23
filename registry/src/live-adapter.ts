@@ -1,16 +1,21 @@
 import type {
   MeshHost,
   MeshNetwork,
+  MeshUserLocation,
+  MeshUserPresence,
+  ShellAuditEntry,
   SimBlobStoreStats,
   SimPluginDeployment,
   SimRecoveryEvent,
   SimShellSession,
   SimTestRun,
 } from "./simulation";
+import { redactSecrets, redactText } from "../worker/redact.ts";
 
 export interface LiveMeshPayloads {
   hostname: string;
   networkName?: string;
+  currentUser?: string;
   mesh: Record<string, unknown>;
   plugins?: Record<string, unknown> | null;
   sessions?: Record<string, unknown> | null;
@@ -18,6 +23,7 @@ export interface LiveMeshPayloads {
   probe?: Record<string, unknown> | null;
   fullState?: Record<string, unknown> | null;
   tests?: Record<string, unknown> | null;
+  users?: Record<string, unknown> | null;
 }
 
 /**
@@ -43,6 +49,13 @@ export function adaptLiveMeshToNetwork(input: LiveMeshPayloads): MeshNetwork {
   const blobStore = adaptBlobStore(mesh.blob_stats, plugins.length);
   const recoveryEvents = adaptRecoveryEvents(input.fullState, input.probe, selfNode);
   const tests = adaptTests(input.tests);
+  const shellAuditLog = adaptShellAuditLog(
+    input.users,
+    topSessions,
+    selfNode || channel,
+    input.currentUser || "authorized-user",
+  );
+  const users = adaptUsers(input.users, input.currentUser, shellAuditLog);
 
   const rawNodes = Array.isArray(mesh.nodes) ? mesh.nodes : [];
   const hosts: MeshHost[] = rawNodes.map((raw) => {
@@ -157,6 +170,8 @@ export function adaptLiveMeshToNetwork(input: LiveMeshPayloads): MeshNetwork {
     blobStore,
     recoveryEvents,
     tests,
+    users,
+    shellAuditLog,
   };
 }
 
@@ -228,8 +243,129 @@ function adaptSessions(
       cwd: asString(s.cwd) || "~",
       status: asString(s.status) === "idle" ? "idle" : "active",
       interrupts: asNumber(s.interrupt_count) ?? 0,
-      lastCommand: asString(s.last_command) || "(interactive shell)",
-      lastOutput: asString(s.last_output) || "(connected over dialtone/shell/1)",
+      lastCommand: redactText(asString(s.last_command) || "(interactive shell)"),
+      lastOutput: redactText(
+        asString(s.last_output) || "(connected over dialtone/shell/1)",
+      ),
+    };
+  });
+}
+
+function adaptUsers(
+  raw: Record<string, unknown> | null | undefined,
+  currentUser: string | undefined,
+  auditLog: ShellAuditEntry[],
+): MeshUserPresence[] {
+  const list = Array.isArray(asRecord(raw).users)
+    ? (asRecord(raw).users as unknown[])
+    : [];
+  const adapted: MeshUserPresence[] = list
+    .map((entry): MeshUserPresence | null => {
+      const u = asRecord(entry);
+      const email = asString(u.email);
+      if (!email) return null;
+      const rawLocs = Array.isArray(u.locations) ? u.locations : [];
+      const locations: MeshUserLocation[] = rawLocs.map((locRaw, idx) => {
+        const l = asRecord(locRaw);
+        return {
+          sessionId: asString(l.sessionId) || `sess-${idx}`,
+          location: asString(l.location) || "Edge session",
+          city: asString(l.city) || null,
+          region: asString(l.region) || null,
+          country: asString(l.country) || null,
+          colo: asString(l.colo) || null,
+          viewingView: asString(l.viewingView) || "overview",
+          viewingNode: asString(l.viewingNode) || null,
+          lastSeenAt: asString(l.lastSeenAt) || new Date().toISOString(),
+        };
+      });
+      const shellNodes = Array.isArray(u.shellNodes)
+        ? (u.shellNodes as unknown[]).map(asString).filter(Boolean)
+        : [];
+      return {
+        email,
+        role: asString(u.role) || "authorized-member",
+        status: asString(u.status) === "idle" ? "idle" : "active",
+        locations,
+        shellNodes,
+        lastCommandAt: asString(u.lastCommandAt) || null,
+      };
+    })
+    .filter((u): u is MeshUserPresence => u !== null);
+
+  if (adapted.length > 0) return adapted;
+  if (!currentUser) return [];
+  const shellNodes = Array.from(new Set(auditLog.map((e) => e.node).filter(Boolean)));
+  return [
+    {
+      email: currentUser,
+      role: "authorized-member",
+      status: "active",
+      locations: [
+        {
+          sessionId: "current",
+          location: "Current browser session",
+          city: null,
+          region: null,
+          country: null,
+          colo: null,
+          viewingView: "overview",
+          viewingNode: null,
+          lastSeenAt: new Date().toISOString(),
+        },
+      ],
+      shellNodes,
+      lastCommandAt: auditLog[0]?.timestamp ?? null,
+    },
+  ];
+}
+
+function adaptShellAuditLog(
+  raw: Record<string, unknown> | null | undefined,
+  fallbackSessions: SimShellSession[],
+  defaultNode: string,
+  defaultUser: string,
+): ShellAuditEntry[] {
+  const list = Array.isArray(asRecord(raw).shell_audit_log)
+    ? (asRecord(raw).shell_audit_log as unknown[])
+    : [];
+  if (list.length > 0) {
+    return list.map((entry, idx) => {
+      const e = asRecord(entry);
+      const cmd = redactSecrets(asString(e.command) || "(interactive shell)");
+      const out = redactSecrets(asString(e.output) || "");
+      const serverRedactions = asNumber(e.redactedCount) ?? 0;
+      return {
+        id: asString(e.id) || `audit-${idx}`,
+        timestamp: asString(e.timestamp) || new Date().toISOString(),
+        user: asString(e.user) || defaultUser,
+        node: asString(e.node) || defaultNode,
+        sessionName: asString(e.sessionName) || "dialtone/shell/1",
+        shell: asString(e.shell) === "powershell" ? "powershell" : "bash",
+        cwd: asString(e.cwd) || "~",
+        command: cmd.text,
+        output: out.text,
+        redactedCount: Math.max(
+          serverRedactions,
+          cmd.redactedCount + out.redactedCount,
+        ),
+      };
+    });
+  }
+  return fallbackSessions.map((s, idx) => {
+    const cmd = redactSecrets(s.lastCommand);
+    const out = redactSecrets(s.lastOutput);
+    return {
+      id: `session-fallback-${idx}-${s.name}`,
+      timestamp: new Date().toISOString(),
+      user: defaultUser,
+      node: defaultNode,
+      sessionName: s.name,
+      shell: s.shell,
+      cwd: s.cwd,
+      command: cmd.text,
+      output: out.text,
+      redactedCount: cmd.redactedCount + out.redactedCount,
     };
   });
 }
