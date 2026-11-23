@@ -1698,13 +1698,27 @@ function buildSingleQueryTable(
 
   if (query.kind === "host" && host) {
     const cpuPct = (host.stats.cpu_percent ?? 0).toFixed(1);
+    const cores = host.stats.cpu_cores ?? 0;
     const load1m = (host.stats.load_avg_1m ?? 0).toFixed(2);
-    const memUsed = ((host.stats.mem_used_bytes ?? 0) / 1e9).toFixed(1);
-    const memTotal = ((host.stats.mem_total_bytes ?? 0) / 1e9).toFixed(0);
-    const diskUsed = ((host.stats.disk_used_bytes ?? 0) / 1e9).toFixed(0);
-    const diskTotal = ((host.stats.disk_total_bytes ?? 0) / 1e9).toFixed(0);
-    const gpuUsed = ((host.stats.gpu_mem_used_bytes ?? 0) / 1e9).toFixed(1);
-    const gpuTotal = ((host.stats.gpu_mem_total_bytes ?? 0) / 1e9).toFixed(0);
+    const memTotalBytes = host.stats.mem_total_bytes ?? 0;
+    const ramSummary =
+      memTotalBytes > 0
+        ? `RAM ${((host.stats.mem_used_bytes ?? 0) / 1e9).toFixed(1)}/${(memTotalBytes / 1e9).toFixed(0)} GB`
+        : `RAM ${(host.stats.mem_percent ?? 0).toFixed(0)}%`;
+    const diskTotalBytes = host.stats.disk_total_bytes ?? 0;
+    const diskSummary =
+      diskTotalBytes > 0
+        ? `DISK ${((host.stats.disk_used_bytes ?? 0) / 1e9).toFixed(0)}/${(diskTotalBytes / 1e9).toFixed(0)} GB`
+        : `DISK ${(host.stats.disk_percent ?? 0).toFixed(0)}%`;
+    const gpuTotalBytes = host.stats.gpu_mem_total_bytes ?? 0;
+    const gpuSummary =
+      gpuTotalBytes > 0
+        ? ` · GPU ${host.gpuName ?? "VRAM"} (${((host.stats.gpu_mem_used_bytes ?? 0) / 1e9).toFixed(1)}/${(gpuTotalBytes / 1e9).toFixed(0)} GB)`
+        : "";
+    const cpuSummary =
+      cores > 0
+        ? `CPU ${cpuPct}% (${cores}c, load ${load1m})`
+        : `CPU ${cpuPct}% (load ${load1m})`;
     const blobMb = (host.blobStore.totalBytes / 1e6).toFixed(1);
     const rows: Array<[string, string, string]> = [
       [
@@ -1714,8 +1728,8 @@ function buildSingleQueryTable(
       ],
       [
         "compute",
-        `CPU ${cpuPct}% (${host.stats.cpu_cores ?? 0}c, load ${load1m})`,
-        `RAM ${memUsed}/${memTotal} GB · DISK ${diskUsed}/${diskTotal} GB${host.gpuName ? ` · GPU ${host.gpuName} (${gpuUsed}/${gpuTotal} GB)` : ""}`,
+        cpuSummary,
+        `${ramSummary} · ${diskSummary}${gpuSummary}`,
       ],
       [
         "blobs",

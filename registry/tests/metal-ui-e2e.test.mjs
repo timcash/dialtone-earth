@@ -297,9 +297,14 @@ test("metal-globe-h3-arcs: builds H3 telemetry cells and bundled atmospheric pin
     rttMs: h.rtt_ms ?? 25,
   }));
 
-  const h3Cells = buildSimulatedH3DataCells(points, 3);
-  assert.ok(h3Cells.length >= 5, `expected >= 5 H3 cells for 5 metal nodes, got ${h3Cells.length}`);
-  assert.ok(h3Cells.every((c) => typeof c.cell === "string" && c.cell.length > 0 && c.intensity > 0));
+  const liveOnlyCells = buildSimulatedH3DataCells(points, 3, false);
+  const withDemoCells = buildSimulatedH3DataCells(points, 3, true);
+  assert.ok(liveOnlyCells.length >= 5, `expected >= 5 H3 cells for 5 metal nodes, got ${liveOnlyCells.length}`);
+  assert.ok(
+    liveOnlyCells.length < withDemoCells.length,
+    `live-only H3 cells (${liveOnlyCells.length}) must exclude simulated demo clusters (${withDemoCells.length})`,
+  );
+  assert.ok(liveOnlyCells.every((c) => typeof c.cell === "string" && c.cell.length > 0 && c.intensity > 0));
 
   const arcs = buildBundledPingArcs(points, 2.8, { segments: 24 });
   assert.ok(arcs.length >= 4, `expected >= 4 bundled ping arcs across metal nodes, got ${arcs.length}`);
