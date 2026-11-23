@@ -167,11 +167,13 @@ test("real Web Crypto RS256 Access JWT verification accepts valid token and reje
     ["sign", "verify"],
   );
   const publicJwk = await crypto.subtle.exportKey("jwk", keyPair.publicKey);
-  const jwksFetch = async () =>
-    new Response(
+  const jwksFetch = async (_url, init) => {
+    assert.equal(init?.redirect, "manual", "workerd only supports manual/follow redirect modes");
+    return new Response(
       JSON.stringify({ keys: [{ ...publicJwk, kid: "test-kid-1" }] }),
       { status: 200, headers: { "Content-Type": "application/json" } },
     );
+  };
 
   const now = Math.floor(Date.now() / 1000);
   const goodJwt = await signJwt(

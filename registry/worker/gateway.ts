@@ -237,8 +237,12 @@ async function proxyToEnrolledOrigins(
       const upstream = await fetchImpl(targetUrl.toString(), {
         method: "GET",
         headers,
-        redirect: "error",
+        redirect: "manual",
       });
+      if (upstream.status >= 300 && upstream.status < 400) {
+        lastStatus = 502;
+        continue;
+      }
       if (upstream.status >= 500) {
         lastStatus = upstream.status;
         continue;
@@ -329,7 +333,7 @@ export async function verifyCloudflareAccessJwt(
   try {
     const certsResp = await fetchImpl(`${teamDomain}/cdn-cgi/access/certs`, {
       method: "GET",
-      redirect: "error",
+      redirect: "manual",
     });
     if (!certsResp.ok) {
       return { valid: false, reason: "jwks_unavailable" };
