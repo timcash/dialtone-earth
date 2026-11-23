@@ -5,6 +5,7 @@ import {
   buildCameraContext,
   CAMERA_PRESETS,
   evaluateCameraPolicy,
+  highlightTypeScript,
 } from "../src/camera-policy.ts";
 import { buildBundledPingArcs } from "../src/edge-bundling.ts";
 import { buildSimulatedH3DataCells } from "../src/h3-geodata.ts";
@@ -343,4 +344,14 @@ test("CSP-safe TypeScript camera policy evaluates highest CPU, lowest MEM, highe
 
   const blocked = evaluateCameraPolicy(`return ctx.constructor`, ctx);
   assert.equal(blocked.ok, false);
+
+  // Verify syntax highlighter classifies comments, keywords, types, helpers, strings, numbers
+  const html = highlightTypeScript(CAMERA_PRESETS[3].code);
+  assert.ok(html.includes('class="tok-com"'));
+  assert.ok(html.includes('class="tok-kw"'));
+  assert.ok(html.includes('class="tok-ty"'));
+  assert.ok(html.includes('class="tok-fn"'));
+  assert.ok(html.includes('class="tok-num"'));
+  assert.ok(html.includes('class="tok-str"'));
+  assert.ok(CAMERA_PRESETS.length >= 8);
 });

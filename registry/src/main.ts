@@ -4,6 +4,7 @@ import {
   buildCameraContext,
   CAMERA_PRESETS,
   evaluateCameraPolicy,
+  highlightTypeScript,
   type PolicyEvalResult,
 } from "./camera-policy";
 import { adaptLiveMeshToNetwork } from "./live-adapter";
@@ -98,9 +99,11 @@ type AppState = {
   activePaneIndex: number;
   maximizedPaneIndex: number | null;
   configOpen: boolean;
+  cameraOpen: boolean;
   cameraPolicyCode: string;
   cameraDraftCode: string;
   cameraResult: PolicyEvalResult;
+  cameraDraftResult: PolicyEvalResult;
   configSyncLabel: string;
   networkSlug: string;
   hostName: string;
@@ -145,9 +148,11 @@ const state: AppState = {
   activePaneIndex: 0,
   maximizedPaneIndex: null,
   configOpen: false,
+  cameraOpen: false,
   cameraPolicyCode: CAMERA_PRESETS[0].code,
   cameraDraftCode: CAMERA_PRESETS[0].code,
   cameraResult: { ok: true, target: null },
+  cameraDraftResult: { ok: true, target: null },
   configSyncLabel: "LOCAL",
   networkSlug: SIMULATED_NETWORKS[0].slug,
   hostName: SIMULATED_NETWORKS[0].hosts[0].name,
@@ -241,7 +246,10 @@ async function boot(): Promise<void> {
 
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
-      if (state.configOpen) {
+      if (state.cameraOpen) {
+        state.cameraOpen = false;
+        renderAll();
+      } else if (state.configOpen) {
         state.configOpen = false;
         renderAll();
       } else if (state.maximizedPaneIndex !== null) {
@@ -402,7 +410,7 @@ function persistUserConfig(): void {
     })
       .then((res) => {
         state.configSyncLabel = res.ok ? "CF SAVED" : "CF SAVE ERR";
-        if (!state.configOpen) renderAll();
+        if (!state.configOpen && !state.cameraOpen) renderAll();
       })
       .catch(() => {
         state.configSyncLabel = "CF OFFLINE";
@@ -558,7 +566,7 @@ function startBestEffortQueryScheduler(): void {
       anyTouched = true;
     }
 
-    if (anyTouched && !state.configOpen) {
+    if (anyTouched && !state.configOpen && !state.cameraOpen) {
       syncGlobeFocus();
       renderAll();
     }
@@ -889,7 +897,7 @@ async function runAdaptiveMeshTick(): Promise<void> {
   if (changed) state.unchangedStreak = 0;
   else state.unchangedStreak += 1;
   scheduleNextAdaptivePoll();
-  if (!state.configOpen) renderAll();
+  if (!state.configOpen && !state.cameraOpen) renderAll();
 }
 
 async function reportLivePresence(): Promise<void> {
@@ -1004,7 +1012,8 @@ function mountShell(): void {
     <main class="hud-shell app-wm-shell">
       <div class="globe-parking" id="globe-parking" hidden></div>
       <section class="app-window-grid earth-split-grid" id="app-window-grid" data-testid="split-grid"></section>
-      <section class="config-page" id="config-page" aria-label="Window, query, and camera configuration" data-testid="config-page" hidden></section>
+      <section class="config-page" id="config-page" aria-label="Window and query configuration" data-testid="config-page" hidden></section>
+      <section class="config-page camera-page" id="camera-page" aria-label="Camera TypeScript studio" data-testid="camera-page" hidden></section>
       <footer class="app-bottom-bar" id="bottom-table-dock" aria-label="Workspace bar"></footer>
     </main>
   `;
@@ -1051,7 +1060,7 @@ function renderAll(): void {
 
   const shell = app.querySelector<HTMLElement>(".hud-shell");
   if (shell) {
-    shell.classList.toggle("is-config-open", state.configOpen);
+    shell.classList.toggle("is-config-open", state.configOpen || state.cameraOpen);
   }
 
   // Park live WebGL globe before rebuilding window DOM so canvas is NEVER destroyed
@@ -1062,6 +1071,7 @@ function renderAll(): void {
 
   renderWindowGrid();
   renderConfigPage();
+  renderCameraPage();
   renderBottomBar();
   bindInteractions();
 }
@@ -1139,6 +1149,7 @@ function renderGlobePane(paneIndex: number): string {
         </div>
         <div class="pane-head-right">
           <span class="pane-stats" data-testid="globe-cam-stats">CAM: ${escapeHtml(camSummary)}</span>
+          <button type="button" class="tbl-chip" data-action="open-camera" title="Open fullscreen TypeScript camera editor">code</button>
           <button type="button" class="tbl-chip ${isMax ? "is-active" : ""}" data-max-pane="${paneIndex}">${isMax ? "split" : "full"}</button>
         </div>
       </div>
@@ -1182,6 +1193,145 @@ function renderQueryPane(query: SavedQuery, paneIndex: number): string {
             ${rowsHtml}
           </tbody>
         </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderFullscreenTourCaptionsHtml(testId: string): string {
+  const tourStep = state.tourSteps[state.tourStepIndex] ?? state.tourSteps[0];
+  if (!state.tourCaptionsVisible || !tourStep) return "";
+  const liveCtrl = !state.session.authenticated ? state.liveSite : null;
+  return `<div class="cfg-tour-cc" data-testid="${testId}" aria-live="polite">
+    <div class="cfg-cc-top">
+      <span class="cc-kicker">CC · TOUR ${state.tourStepIndex + 1}/${state.tourSteps.length} · ${escapeHtml(tourStep.label)}</span>
+      <strong class="cfg-cc-headline">${escapeHtml(liveCtrl?.headline || tourStep.headline)}</strong>
+      <span class="cc-controls">
+        <button type="button" class="tbl-chip" data-action="prev-step" title="Previous tour step">◀</button>
+        <button type="button" class="tbl-chip ${state.tourPlaying ? "is-active" : ""}" data-action="toggle-tour" aria-pressed="${state.tourPlaying}">${state.tourPlaying ? "⏸ tour" : "▶ tour"}</button>
+        <button type="button" class="tbl-chip" data-action="next-step" title="Next tour step">▶</button>
+      </span>
+    </div>
+    <div class="cfg-cc-body">${escapeHtml(liveCtrl?.subline || tourStep.caption)}</div>
+  </div>`;
+}
+
+function buildLineNumbers(code: string): string {
+  const count = Math.max(1, code.split("\n").length);
+  return Array.from({ length: count }, (_, idx) => String(idx + 1)).join("\n");
+}
+
+function formatCameraStatus(result: PolicyEvalResult): { cls: string; text: string } {
+  if (!result.ok) {
+    return {
+      cls: "cfg-cam-err",
+      text: `ERROR: ${result.error ?? "Invalid TypeScript policy"}`,
+    };
+  }
+  if (result.target) {
+    return {
+      cls: "cfg-cam-ok",
+      text: `TARGET: ${result.target.node ?? "custom"} (${result.target.lat.toFixed(2)}°, ${result.target.lng.toFixed(2)}°)${result.target.reason ? ` · ${result.target.reason}` : ""}`,
+    };
+  }
+  return { cls: "c-dim", text: "TARGET: null (free orbit)" };
+}
+
+function renderCameraPage(): void {
+  const camEl = app.querySelector<HTMLElement>("#camera-page");
+  if (!camEl) return;
+  if (!state.cameraOpen) {
+    camEl.innerHTML = "";
+    camEl.hidden = true;
+    return;
+  }
+
+  const ctx = buildCameraContext(
+    state.networks,
+    state.networkSlug,
+    performance.now() / 1000,
+  );
+  state.cameraDraftResult = evaluateCameraPolicy(state.cameraDraftCode, ctx);
+  const status = formatCameraStatus(state.cameraDraftResult);
+  const isDirty = state.cameraDraftCode.trim() !== state.cameraPolicyCode.trim();
+
+  const exampleCards = CAMERA_PRESETS.map((p) => {
+    const isSelected = state.cameraDraftCode.trim() === p.code.trim();
+    const isApplied = state.cameraPolicyCode.trim() === p.code.trim();
+    return `<button type="button" class="cam-example-card ${isSelected ? "is-active" : ""}" data-cam-preset="${escapeHtml(p.id)}" data-testid="cam-preset-${escapeHtml(p.id)}">
+      <span class="cam-ex-top">
+        <strong>${escapeHtml(p.label)}</strong>
+        ${isApplied ? `<span class="cam-ex-live">ACTIVE</span>` : ""}
+      </span>
+      <span class="cam-ex-desc">${escapeHtml(p.description)}</span>
+    </button>`;
+  }).join("");
+
+  const liveNodeRows = ctx.nodes
+    .map((n) => {
+      const isTarget =
+        state.cameraDraftResult.ok &&
+        state.cameraDraftResult.target?.node === n.name;
+      return `<tr class="${isTarget ? "is-selected" : ""}">
+        <td class="c-strong">${isTarget ? "● " : ""}${escapeHtml(n.name)}</td>
+        <td>${n.cpu}%</td>
+        <td>${n.mem}%</td>
+        <td>${n.rttP95}ms</td>
+        <td>${n.gpu > 0 ? `${n.gpu}%` : "—"}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const captionsHtml = renderFullscreenTourCaptionsHtml("camera-tour-captions");
+
+  camEl.hidden = false;
+  camEl.innerHTML = `
+    <div class="cfg-frame cam-studio-frame">
+      ${captionsHtml}
+      <header class="cfg-header">
+        <div class="earth-bar-left">
+          <span class="tbl-brand">CAMERA // TYPESCRIPT GEOLOCATION STUDIO</span>
+          <span class="${status.cls}" id="camera-status-pill" data-testid="cam-status">${escapeHtml(status.text)}</span>
+        </div>
+        <div class="earth-bar-right">
+          <button type="button" class="tbl-chip" data-action="open-config">window config</button>
+          <button type="button" class="tbl-chip is-active" data-action="apply-camera-ts" data-testid="apply-camera-ts">${isDirty ? "apply* (Ctrl+Enter)" : "apply (Ctrl+Enter)"}</button>
+          <button type="button" class="tbl-chip" data-action="close-camera" data-testid="camera-done">done</button>
+        </div>
+      </header>
+
+      <div class="cam-studio-grid">
+        <aside class="cam-sidebar">
+          <div class="cfg-section">
+            <div class="cfg-section-title">PREFILLED EXAMPLES (1-CLICK LOAD &amp; APPLY)</div>
+            <div class="cam-example-list">${exampleCards}</div>
+          </div>
+          <div class="cfg-section">
+            <div class="cfg-section-title">LIVE ctx.nodes SNAPSHOT</div>
+            <div class="cfg-table-wrap">
+              <table class="earth-table cam-ref-table">
+                <thead>
+                  <tr><th>NODE</th><th>CPU</th><th>MEM</th><th>p95</th><th>GPU</th></tr>
+                </thead>
+                <tbody>${liveNodeRows}</tbody>
+              </table>
+            </div>
+          </div>
+        </aside>
+
+        <section class="cam-editor-pane">
+          <div class="cam-sig-bar">
+            <span>ctx.nodes: { name, network, lat, lng, online, cpu, mem, disk, gpu, load1m, rttMs, rttP95, cores, blobs }</span>
+            <span>helpers: maxBy, minBy, p95, avg, centroid, Math</span>
+          </div>
+          <div class="code-ide" data-testid="code-ide">
+            <pre class="code-gutter" id="camera-ts-gutter" aria-hidden="true">${buildLineNumbers(state.cameraDraftCode)}</pre>
+            <div class="code-surface">
+              <pre class="code-pre" id="camera-ts-pre" aria-hidden="true"><code id="camera-ts-highlight" data-testid="camera-ts-highlight">${highlightTypeScript(state.cameraDraftCode)}</code></pre>
+              <textarea class="code-textarea" id="camera-ts-editor" data-testid="camera-ts-editor" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off">${escapeHtml(state.cameraDraftCode)}</textarea>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   `;
@@ -1315,38 +1465,11 @@ function renderConfigPage(): void {
     )
     .join("");
 
-  const presetButtons = CAMERA_PRESETS.map((p) => {
-    const isCurrent = state.cameraPolicyCode.trim() === p.code.trim();
-    return `<button type="button" class="tbl-chip ${isCurrent ? "is-active" : ""}" data-cam-preset="${escapeHtml(p.id)}" data-testid="cam-preset-${escapeHtml(p.id)}">${escapeHtml(p.label)}</button>`;
-  }).join("");
-
-  const camStatusHtml = !state.cameraResult.ok
-    ? `<span class="cfg-cam-err" data-testid="cam-status">ERROR: ${escapeHtml(state.cameraResult.error ?? "Invalid TypeScript policy")}</span>`
-    : state.cameraResult.target
-      ? `<span class="cfg-cam-ok" data-testid="cam-status">TARGET: ${escapeHtml(state.cameraResult.target.node ?? "custom")} (${state.cameraResult.target.lat.toFixed(2)}°, ${state.cameraResult.target.lng.toFixed(2)}°)${state.cameraResult.target.reason ? ` · ${escapeHtml(state.cameraResult.target.reason)}` : ""}</span>`
-      : `<span class="c-dim" data-testid="cam-status">TARGET: null (free orbit)</span>`;
-
   const saveLabel = state.session.authenticated
     ? `CLOUDFLARE KV · ${state.configSyncLabel}`
     : `BROWSER STORAGE · ${state.configSyncLabel} (SIGN IN TO SYNC VIA CLOUDFLARE)`;
 
-  const tourStep = state.tourSteps[state.tourStepIndex] ?? state.tourSteps[0];
-  const liveCtrl = !state.session.authenticated ? state.liveSite : null;
-  const cfgCaptionsHtml =
-    state.tourCaptionsVisible && tourStep
-      ? `<div class="cfg-tour-cc" data-testid="config-tour-captions" aria-live="polite">
-          <div class="cfg-cc-top">
-            <span class="cc-kicker">CC · TOUR ${state.tourStepIndex + 1}/${state.tourSteps.length} · ${escapeHtml(tourStep.label)}</span>
-            <strong class="cfg-cc-headline">${escapeHtml(liveCtrl?.headline || tourStep.headline)}</strong>
-            <span class="cc-controls">
-              <button type="button" class="tbl-chip" data-action="prev-step" title="Previous tour step">◀</button>
-              <button type="button" class="tbl-chip ${state.tourPlaying ? "is-active" : ""}" data-action="toggle-tour" aria-pressed="${state.tourPlaying}">${state.tourPlaying ? "⏸ tour" : "▶ tour"}</button>
-              <button type="button" class="tbl-chip" data-action="next-step" title="Next tour step">▶</button>
-            </span>
-          </div>
-          <div class="cfg-cc-body">${escapeHtml(liveCtrl?.subline || tourStep.caption)}</div>
-        </div>`
-      : "";
+  const cfgCaptionsHtml = renderFullscreenTourCaptionsHtml("config-tour-captions");
 
   cfgEl.hidden = false;
   cfgEl.innerHTML = `
@@ -1354,10 +1477,11 @@ function renderConfigPage(): void {
       ${cfgCaptionsHtml}
       <header class="cfg-header">
         <div class="earth-bar-left">
-          <span class="tbl-brand">CONFIG // APP WINDOWS, QUERIES &amp; CAMERA</span>
+          <span class="tbl-brand">CONFIG // APP WINDOWS &amp; QUERIES</span>
           <span class="tbl-cadence" data-testid="config-sync-status">${escapeHtml(saveLabel)}</span>
         </div>
         <div class="earth-bar-right">
+          <button type="button" class="tbl-chip" data-action="open-camera" data-testid="cfg-open-camera">camera studio</button>
           <button type="button" class="tbl-chip" data-cfg-reset="1" data-testid="cfg-reset">reset defaults</button>
           <button type="button" class="tbl-chip is-active" data-action="close-config" data-testid="config-done">done</button>
         </div>
@@ -1394,21 +1518,6 @@ function renderConfigPage(): void {
                 ${queryRows}
               </tbody>
             </table>
-          </div>
-        </section>
-
-        <section class="cfg-section">
-          <div class="cfg-section-head">
-            <span class="cfg-section-title">4. CAMERA — TYPESCRIPT GEOLOCATION SELECTOR</span>
-            <span class="cfg-btn-row">${presetButtons}</span>
-          </div>
-          <div class="cfg-cam-meta">
-            <span class="c-dim">ctx.nodes: { name, network, lat, lng, online, cpu, mem, disk, gpu, load1m, rttMs, rttP95, cores, blobs } · helpers: maxBy, minBy, p95, avg, centroid, Math</span>
-          </div>
-          <textarea class="cfg-ts-editor" id="camera-ts-editor" data-testid="camera-ts-editor" spellcheck="false" rows="8">${escapeHtml(state.cameraDraftCode)}</textarea>
-          <div class="cfg-section-head">
-            ${camStatusHtml}
-            <button type="button" class="tbl-chip is-active" data-action="apply-camera-ts" data-testid="apply-camera-ts">apply typescript policy (Ctrl+Enter)</button>
           </div>
         </section>
       </div>
@@ -1500,6 +1609,7 @@ function renderBottomBar(): void {
         </div>
         <div class="earth-bar-right">
           <button type="button" class="tbl-chip ${isMax ? "is-active" : ""}" data-action="toggle-fullscreen" data-testid="toggle-fullscreen" aria-pressed="${isMax}">${isMax ? "split" : "full"}</button>
+          <button type="button" class="tbl-chip ${state.cameraOpen ? "is-active" : ""}" data-action="open-camera" data-testid="open-camera">camera</button>
           <button type="button" class="tbl-chip ${state.configOpen ? "is-active" : ""}" data-action="open-config" data-testid="open-config">config</button>
           ${authAction}
         </div>
@@ -1784,12 +1894,15 @@ function bindInteractions(): void {
       renderAll();
     });
 
-  // Open / close visual Config Page
+  // Open / close visual Config Page & Fullscreen Camera Studio
   app
-    .querySelector<HTMLButtonElement>('[data-action="open-config"]')
-    ?.addEventListener("click", () => {
-      state.configOpen = !state.configOpen;
-      renderAll();
+    .querySelectorAll<HTMLButtonElement>('[data-action="open-config"]')
+    .forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.cameraOpen = false;
+        state.configOpen = !state.configOpen;
+        renderAll();
+      });
     });
 
   app
@@ -1799,6 +1912,27 @@ function bindInteractions(): void {
       for (const q of visibleQueryObjects()) {
         q.nextDueAtMs = Date.now();
       }
+      renderAll();
+      syncGlobeFocus();
+    });
+
+  app
+    .querySelectorAll<HTMLButtonElement>('[data-action="open-camera"]')
+    .forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.configOpen = false;
+        state.cameraOpen = !state.cameraOpen;
+        if (state.cameraOpen) {
+          state.cameraDraftCode = state.cameraPolicyCode;
+        }
+        renderAll();
+      });
+    });
+
+  app
+    .querySelector<HTMLButtonElement>('[data-action="close-camera"]')
+    ?.addEventListener("click", () => {
+      state.cameraOpen = false;
       renderAll();
       syncGlobeFocus();
     });
@@ -1928,13 +2062,55 @@ function bindInteractions(): void {
     });
   });
 
-  // Config Page: TypeScript camera editor typing + Ctrl+Enter apply
+  // Camera Studio: syntax-highlighted TypeScript editor (live highlight + scroll sync + Tab + Ctrl+Enter)
   const tsEditor = app.querySelector<HTMLTextAreaElement>("#camera-ts-editor");
+  const tsHighlight = app.querySelector<HTMLElement>("#camera-ts-highlight");
+  const tsPre = app.querySelector<HTMLElement>("#camera-ts-pre");
+  const tsGutter = app.querySelector<HTMLElement>("#camera-ts-gutter");
+  const statusPill = app.querySelector<HTMLElement>("#camera-status-pill");
   if (tsEditor) {
-    tsEditor.addEventListener("input", () => {
-      state.cameraDraftCode = tsEditor.value;
+    const syncEditorLayers = () => {
+      const code = tsEditor.value;
+      state.cameraDraftCode = code;
+      if (tsHighlight) {
+        tsHighlight.innerHTML = highlightTypeScript(code);
+      }
+      if (tsGutter) {
+        tsGutter.textContent = buildLineNumbers(code);
+      }
+      const ctx = buildCameraContext(
+        state.networks,
+        state.networkSlug,
+        performance.now() / 1000,
+      );
+      state.cameraDraftResult = evaluateCameraPolicy(code, ctx);
+      if (statusPill) {
+        const fmt = formatCameraStatus(state.cameraDraftResult);
+        statusPill.className = fmt.cls;
+        statusPill.textContent = fmt.text;
+      }
+    };
+    tsEditor.addEventListener("input", syncEditorLayers);
+    tsEditor.addEventListener("scroll", () => {
+      if (tsPre) {
+        tsPre.scrollTop = tsEditor.scrollTop;
+        tsPre.scrollLeft = tsEditor.scrollLeft;
+      }
+      if (tsGutter) {
+        tsGutter.scrollTop = tsEditor.scrollTop;
+      }
     });
     tsEditor.addEventListener("keydown", (event) => {
+      if (event.key === "Tab") {
+        event.preventDefault();
+        const start = tsEditor.selectionStart;
+        const end = tsEditor.selectionEnd;
+        tsEditor.value =
+          tsEditor.value.slice(0, start) + "  " + tsEditor.value.slice(end);
+        tsEditor.selectionStart = tsEditor.selectionEnd = start + 2;
+        syncEditorLayers();
+        return;
+      }
       if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
         event.preventDefault();
         state.cameraDraftCode = tsEditor.value;

@@ -35,6 +35,7 @@ export interface CameraContext {
 export interface CameraPreset {
   id: string;
   label: string;
+  description: string;
   code: string;
 }
 
@@ -42,6 +43,7 @@ export const CAMERA_PRESETS: CameraPreset[] = [
   {
     id: "highest-cpu",
     label: "highest CPU",
+    description: "Lock onto the online node with peak CPU %",
     code: `// Focus the online node with the highest CPU utilization
 export function selectTarget(ctx: CameraContext): CameraTarget | null {
   const hot = maxBy(ctx.nodes.filter(n => n.online), n => n.cpu);
@@ -53,6 +55,7 @@ export function selectTarget(ctx: CameraContext): CameraTarget | null {
   {
     id: "lowest-mem",
     label: "lowest MEM",
+    description: "Find the online node with the most memory headroom",
     code: `// Focus the online node with the lowest memory utilization
 export function selectTarget(ctx: CameraContext): CameraTarget | null {
   const cool = minBy(ctx.nodes.filter(n => n.online), n => n.mem);
@@ -64,6 +67,7 @@ export function selectTarget(ctx: CameraContext): CameraTarget | null {
   {
     id: "highest-p95",
     label: "highest p95 latency",
+    description: "Track the worst p95 mesh RTT across all online peers",
     code: `// Focus the node experiencing the highest p95 mesh latency
 export function selectTarget(ctx: CameraContext): CameraTarget | null {
   const slow = maxBy(ctx.nodes.filter(n => n.online), n => n.rttP95);
@@ -75,6 +79,7 @@ export function selectTarget(ctx: CameraContext): CameraTarget | null {
   {
     id: "composite-stress",
     label: "composite (CPU + MEM + p95)",
+    description: "Weighted 45% CPU + 35% MEM + 20% capped p95 latency",
     code: `// Composite score: 45% CPU + 35% MEM + 20% capped p95 latency
 export function selectTarget(ctx: CameraContext): CameraTarget | null {
   const score = (n: CameraNodeMetric) =>
@@ -86,8 +91,57 @@ export function selectTarget(ctx: CameraContext): CameraTarget | null {
 }`,
   },
   {
+    id: "p95-outlier",
+    label: "p95 outlier vs fleet avg",
+    description: "Hunt nodes spiking above fleet average p95 latency",
+    code: `// Highlight the node furthest above fleet average p95 latency
+export function selectTarget(ctx: CameraContext): CameraTarget | null {
+  const online = ctx.nodes.filter(n => n.online);
+  const fleetAvg = avg(online.map(n => n.rttP95));
+  const outlier = maxBy(online, n => n.rttP95 - fleetAvg);
+  return outlier
+    ? {
+        lat: outlier.lat,
+        lng: outlier.lng,
+        node: outlier.name,
+        network: outlier.network,
+        reason: "+" + Math.round(outlier.rttP95 - fleetAvg) + "ms over avg"
+      }
+    : null;
+}`,
+  },
+  {
+    id: "gpu-hotspot",
+    label: "GPU hotspot",
+    description: "Focus highest GPU utilization (falls back to CPU)",
+    code: `// Track the busiest GPU worker, falling back to peak CPU
+export function selectTarget(ctx: CameraContext): CameraTarget | null {
+  const gpuNodes = ctx.nodes.filter(n => n.online && n.gpu > 0);
+  const pick = gpuNodes.length > 0
+    ? maxBy(gpuNodes, n => n.gpu)
+    : maxBy(ctx.nodes.filter(n => n.online), n => n.cpu);
+  return pick
+    ? { lat: pick.lat, lng: pick.lng, node: pick.name, network: pick.network, reason: pick.gpu > 0 ? "GPU " + pick.gpu + "%" : "CPU " + pick.cpu + "%" }
+    : null;
+}`,
+  },
+  {
+    id: "load-per-core",
+    label: "load per core",
+    description: "Rank saturation via 1m load average divided by CPU cores",
+    code: `// Focus the node with highest 1m load-average per CPU core
+export function selectTarget(ctx: CameraContext): CameraTarget | null {
+  const ratio = (n: CameraNodeMetric) => n.cores > 0 ? n.load1m / n.cores : 0;
+  const busy = maxBy(ctx.nodes.filter(n => n.online), ratio);
+  return busy
+    ? { lat: busy.lat, lng: busy.lng, node: busy.name, network: busy.network, reason: "load/core " + Math.round(ratio(busy) * 100) + "%" }
+    : null;
+}`,
+  },
+  {
     id: "network-centroid",
     label: "active network centroid",
+    description: "Spherical midpoint of the currently active network",
     code: `// Aim at the geographic centroid of the currently focused network
 export function selectTarget(ctx: CameraContext): CameraTarget | null {
   const peers = ctx.nodes.filter(n => n.network === ctx.activeNetwork);
@@ -970,4 +1024,125 @@ export function evaluateCameraPolicy(
       error: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+const TS_KEYWORDS = new Set([
+  "export",
+  "function",
+  "const",
+  "let",
+  "return",
+  "if",
+  "else",
+  "null",
+  "undefined",
+  "true",
+  "false",
+  "as",
+  "type",
+  "interface",
+]);
+
+const TS_TYPES = new Set([
+  "CameraContext",
+  "CameraTarget",
+  "CameraNodeMetric",
+  "number",
+  "string",
+  "boolean",
+]);
+
+const TS_HELPERS = new Set([
+  "maxBy",
+  "minBy",
+  "p95",
+  "avg",
+  "centroid",
+  "Math",
+  "Number",
+]);
+
+function escapeHtmlCode(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/**
+ * Pure, CSP-safe TypeScript syntax highlighter producing minimal semantic
+ * `<span>` classes (`tok-com`, `tok-str`, `tok-kw`, `tok-ty`, `tok-fn`, `tok-num`).
+ */
+export function highlightTypeScript(code: string): string {
+  let out = "";
+  let i = 0;
+  while (i < code.length) {
+    const ch = code[i];
+    const next = code[i + 1] ?? "";
+
+    // Line comment
+    if (ch === "/" && next === "/") {
+      const start = i;
+      while (i < code.length && code[i] !== "\n") i += 1;
+      out += `<span class="tok-com">${escapeHtmlCode(code.slice(start, i))}</span>`;
+      continue;
+    }
+
+    // Block comment
+    if (ch === "/" && next === "*") {
+      const start = i;
+      i += 2;
+      while (i < code.length && !(code[i] === "*" && code[i + 1] === "/")) i += 1;
+      i = Math.min(code.length, i + 2);
+      out += `<span class="tok-com">${escapeHtmlCode(code.slice(start, i))}</span>`;
+      continue;
+    }
+
+    // String literal
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const quote = ch;
+      const start = i;
+      i += 1;
+      while (i < code.length) {
+        if (code[i] === "\\" && i + 1 < code.length) {
+          i += 2;
+          continue;
+        }
+        const c = code[i];
+        i += 1;
+        if (c === quote) break;
+      }
+      out += `<span class="tok-str">${escapeHtmlCode(code.slice(start, i))}</span>`;
+      continue;
+    }
+
+    // Number literal
+    if (/[0-9]/.test(ch) && (i === 0 || !/[A-Za-z0-9_$]/.test(code[i - 1]))) {
+      const start = i;
+      while (i < code.length && /[0-9.]/.test(code[i])) i += 1;
+      out += `<span class="tok-num">${escapeHtmlCode(code.slice(start, i))}</span>`;
+      continue;
+    }
+
+    // Identifier / keyword / type / helper
+    if (/[A-Za-z_$]/.test(ch)) {
+      const start = i;
+      while (i < code.length && /[A-Za-z0-9_$]/.test(code[i])) i += 1;
+      const word = code.slice(start, i);
+      if (TS_KEYWORDS.has(word)) {
+        out += `<span class="tok-kw">${escapeHtmlCode(word)}</span>`;
+      } else if (TS_TYPES.has(word)) {
+        out += `<span class="tok-ty">${escapeHtmlCode(word)}</span>`;
+      } else if (TS_HELPERS.has(word)) {
+        out += `<span class="tok-fn">${escapeHtmlCode(word)}</span>`;
+      } else {
+        out += escapeHtmlCode(word);
+      }
+      continue;
+    }
+
+    out += escapeHtmlCode(ch);
+    i += 1;
+  }
+  return out.endsWith("\n") ? out + " " : out;
 }
