@@ -286,7 +286,7 @@ async function performMagicLinkLogin(cdp) {
   await cdp.captureFrame("02-live-metal-hydrated");
 }
 
-async function ensureSignedIn(cdp) {
+async function ensureSignedIn(cdp, allowLogin = false) {
   await dismissOverlays(cdp);
   if (await isSignedInLive(cdp)) {
     return true;
@@ -300,6 +300,11 @@ async function ensureSignedIn(cdp) {
   );
   if (await isSignedInLive(cdp)) {
     return true;
+  }
+  if (!allowLogin) {
+    throw new Error(
+      "Persistent Chrome is signed out — run TestBrowser02MagicLinkLogin (or sign in once in Chrome) before running this step",
+    );
   }
   await performMagicLinkLogin(cdp);
   return false;
