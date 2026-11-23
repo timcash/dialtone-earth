@@ -34,6 +34,8 @@ export interface MagicLinkEnv {
   SESSION_SIGNING_KEY?: string;
   /** JSON map of exact hostname -> array of authorized lowercase emails */
   MAGIC_LINK_ALLOWLIST?: string;
+  /** Optional JSON map of login email -> verified destination email for delivery */
+  MAGIC_LINK_DELIVERY_MAP?: string;
   /** Optional sender address, e.g. "login@dialtone.earth" */
   MAGIC_LINK_FROM?: string;
 }
@@ -100,6 +102,30 @@ export function parseAllowlistMap(
         .filter((item) => EMAIL_RE.test(item));
       if (emails.length > 0) {
         out[normalizedHost] = Array.from(new Set(emails));
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export function parseDeliveryMap(
+  raw: string | undefined,
+): Record<string, string> {
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      const fromKey = k.trim().toLowerCase();
+      if (typeof v !== "string") continue;
+      const toAddr = v.trim().toLowerCase();
+      if (EMAIL_RE.test(fromKey) && EMAIL_RE.test(toAddr)) {
+        out[fromKey] = toAddr;
       }
     }
     return out;
@@ -379,19 +405,24 @@ async function handleRequestMagicLink(
       const verifyUrl = `${url.origin}/auth/verify?token=${encodeURIComponent(token)}`;
       const fromEmail =
         (env.MAGIC_LINK_FROM ?? "").trim() || "login@dialtone.earth";
+      const deliveryMap = parseDeliveryMap(env.MAGIC_LINK_DELIVERY_MAP);
+      const deliveryTo = deliveryMap[email] ?? email;
+      const isAliased = deliveryTo !== email;
       const message: SendEmailPayload = {
         from: { email: fromEmail, name: "dialtone.earth" },
-        to: email,
-        subject: `Sign in to ${host}`,
+        to: deliveryTo,
+        subject: isAliased
+          ? `Sign in to ${host} (${email})`
+          : `Sign in to ${host}`,
         text: [
-          `Sign in to dialtone.earth (${host})`,
+          `Sign in to dialtone.earth (${host}) as ${email}`,
           "",
           "Open this single-use link to sign in (valid for 10 minutes):",
           verifyUrl,
           "",
           "If you did not request this sign-in link, you can safely ignore this email.",
         ].join("\n"),
-        html: renderMagicLinkEmailHtml(host, verifyUrl),
+        html: renderMagicLinkEmailHtml(host, email, verifyUrl),
       };
 
       try {
@@ -817,8 +848,13 @@ function renderAuthShell(title: string, bodyHtml: string): string {
 </html>`;
 }
 
-function renderMagicLinkEmailHtml(host: string, verifyUrl: string): string {
+function renderMagicLinkEmailHtml(
+  host: string,
+  email: string,
+  verifyUrl: string,
+): string {
   const safeHost = escapeHtml(host);
+  const safeEmail = escapeHtml(email);
   const safeUrl = escapeHtml(verifyUrl);
   return `<!doctype html>
 <html lang="en">
@@ -827,7 +863,7 @@ function renderMagicLinkEmailHtml(host: string, verifyUrl: string): string {
       <tr>
         <td style="padding:28px 24px;">
           <div style="font-size:16px;font-weight:600;letter-spacing:0.04em;color:#ececec;margin-bottom:4px;">dialtone.earth</div>
-          <div style="font-size:12px;color:#8c8c8c;margin-bottom:24px;">${safeHost}</div>
+          <div style="font-size:12px;color:#8c8c8c;margin-bottom:18px;">${safeHost} · ${safeEmail}</div>
           <a href="${safeUrl}" style="display:inline-block;padding:12px 20px;background:#e6e6e6;color:#0d0d0d;text-decoration:none;border-radius:6px;font-size:14px;font-weight:600;">Sign in to ${safeHost}</a>
           <p style="margin:20px 0 8px;font-size:12px;line-height:1.5;color:#8c8c8c;">This single-use link expires in 10 minutes. If you did not request it, you can ignore this email.</p>
           <p style="margin:0;font-size:11px;line-height:1.4;color:#666666;word-break:break-all;">${safeUrl}</p>
