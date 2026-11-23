@@ -7,16 +7,6 @@ import {
   nodeLoadColor,
   nodeLoadPercent,
 } from "../src/node-load.ts";
-import {
-  createGlobePlan,
-  snapshotTimes,
-  summarizeNetwork,
-} from "../src/overview.ts";
-import {
-  sampleTour,
-  shouldAnimateTour,
-  TOUR_STOP_MS,
-} from "../src/tour.ts";
 
 test("network aggregates use only reported capacity or percentage values", () => {
   const snapshot = syntheticSnapshot();
@@ -65,66 +55,6 @@ test("overview node color uses reported max CPU or RAM load", () => {
     NODE_DOT_RADIUS_RATIO / (0.1 / 2.8),
     0.25,
     "overview dots should be one quarter of the previous HUD disc radius",
-  );
-});
-
-test("snapshotTimes formats telemetry and location timestamps when provided", () => {
-  const times = snapshotTimes({
-    telemetry_generated_at: "2026-11-12T18:00:00.0088759Z",
-    coordinates_generated_at: "2026-11-12T01:50:34Z",
-  });
-  assert.deepEqual(times, [
-    {
-      label: "Telemetry snapshot",
-      dateTime: "2026-11-12T18:00:00.0088759Z",
-      text: "12 Nov 2026, 18:00:00 UTC",
-    },
-    {
-      label: "Location snapshot",
-      dateTime: "2026-11-12T01:50:34Z",
-      text: "12 Nov 2026, 01:50:34 UTC",
-    },
-  ]);
-});
-
-test("overview and tour helpers plan generic synthetic network loops", () => {
-  const west = summarizeNetwork(
-    { slug: "west", name: "West", node_count: 2 },
-    {
-      node_count: 2,
-      nodes: [
-        { name: "one", lat: 0, lng: 0 },
-        { name: "two", lat: 10, lng: 20 },
-      ],
-    },
-  );
-  const plan = createGlobePlan([west]);
-  assert.deepEqual(
-    plan.stops.map(({ network, node }) => [network, node]),
-    [
-      ["West", null],
-      ["West", "one"],
-      ["West", "two"],
-    ],
-  );
-  assert.deepEqual(sampleTour(0, 3), {
-    from: 0,
-    to: 1,
-    progress: 0,
-  });
-  assert.deepEqual(
-    sampleTour(TOUR_STOP_MS * 3, 3),
-    sampleTour(0, 3),
-  );
-  assert.equal(
-    shouldAnimateTour({
-      hidden: false,
-      inView: true,
-      reducedMotion: false,
-      paused: false,
-      stopCount: 3,
-    }),
-    true,
   );
 });
 

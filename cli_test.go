@@ -19,7 +19,7 @@ import (
 )
 
 func TestDialtoneEarthOfflineGuardedAuth(t *testing.T) {
-	runToolInDir(t, "src", "go", "test", "-count=1", "./internal/guardauth", "./plugins/logs/src_v1/go")
+	runTool(t, "go", "test", "-count=1", "./internal/guardauth")
 }
 
 func TestDialtoneEarthRegistryNetworks(t *testing.T) {
@@ -36,6 +36,10 @@ func TestDialtoneEarthSimulatedTour(t *testing.T) {
 
 func TestDialtoneEarthCloudflareGateway(t *testing.T) {
 	runToolInDir(t, "registry", "node", "--test", "tests/gateway.test.mjs")
+}
+
+func TestDialtoneEarthOriginBridge(t *testing.T) {
+	runToolInDir(t, "registry", "node", "--test", "tests/origin-bridge.test.mjs")
 }
 
 func TestLintAllSources(t *testing.T) {

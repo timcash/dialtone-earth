@@ -1,9 +1,0 @@
-[submodule "src/plugins/swarm/src_v3/libudx"]
-	path = src/plugins/swarm/src_v3/libudx
-	url = https://github.com/holepunchto/libudx.git
-[submodule "src/plugins/mod-demo"]
-	path = src/plugins/mod-demo
-	url = https://github.com/timcash/mod-demo.git
-[submodule "src/plugins/mapping-demo"]
-	path = src/plugins/mapping-demo
-	url = https://github.com/timcash/dialtone-mapping-demo.git

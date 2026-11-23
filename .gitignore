@@ -1,128 +1,35 @@
-# OS files
+# OS & editors
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/
 
-# Go binaries
+# Go binaries & test outputs
 bin/
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
-
-# Test binaries
 *.test
-
-# Output files
 *.out
 
-# Environment variables
+# Environment & local secrets
 .env
 .env.local
 
-# Project specific
-.vscode/
-.idea/
-.chrome_data/
-.chrome_data_v2/
+# Generated local deploy bundles & run state
+deploy/
+logs/
 
-# DuckDB
-*.duckdb
-*.duckdb.wal
-!src/plugins/dag/src_v3/test/test.duckdb
-
-# Node.js
+# Node.js / Vite / Cloudflare Wrangler
 node_modules/
 **/node_modules/
 dist/
+**/dist/
 **/.vite/
+**/.wrangler/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .npm/
-
-# Pixi
-.pixi/
-**/.pixi/
-
-# Python
-__pycache__/
-**/__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-**/ .venv/
-venv/
-**/venv/
-.env/
-**/ .env/
-.pytest_cache/
-
-# Go
-vendor/
-**/vendor/
-
-# Rust
-target/
-**/target/
-
-# Dialtone specific
-.dialtone/
-smoke_debug.txt
-smoke_debug_2.txt
-tmp/template-ui-build-debug/
-
-# Plugin specific
-src/plugins/**/node_modules/
-src/plugins/**/swarm-metadata.duckdb
-src/plugins/**/metadata.json
-
-# Screenshots & Logs
-
-*.log
-src/plugins/swarm/app/node_modules
-src/plugins/swarm/test/node_modules
-
-# Generated test reports and test artifacts
-**/TEST.md
-**/TEST_RAW.md
-**/ERROR.md
-**/ERRORS.md
-**/test/screenshots/
-**/screenshots/auto_*.png
-**/screenshots/manual_debug*.png
-**/screenshots/test*.png
-**/screenshots/timeout_*.png
-**/screenshots/*smoke*.png
-**/smoke_step_*.png
-**/diagnostic_screenshots/*.png
-
-#ai
-.claude
-src/plugins/template/src_v3/error.log
-nul
-dag_viz
-src/plugins/logs/src_v1/test/example_plugin_bin
-src/main
-src/server
-
-# Local swarm v3 build artifacts / vendored deps
-tmp/
-src/plugins/swarm/src_v3/libudx/
-src/plugins/swarm/src_v3/dialtone_swarm_v3_x86_64
-src/plugins/swarm/src_v3/dialtone_swarm_v3_arm64
-env/mesh.json
-env/dialtone.json
-env/id_ed25519_mesh*
-env/ssh_config
-env/known_hosts
-test_env/
-test_onboarding_clean/
-/.dialtone_env
-.zig-cache/
-zig-out/
-
-# Template CLI & test dashboard generated artifacts
-deploy/
-logs/
-ui/dist/
-ui/node_modules/

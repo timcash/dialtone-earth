@@ -122,8 +122,7 @@ func runLint(stdout, stderr io.Writer) error {
 		name  string
 		args  []string
 	}{
-		{"Go vet (root CLI)", root, "go", []string{"vet", "."}},
-		{"Go vet (offline auth & logs)", filepath.Join(root, "src"), "go", []string{"vet", "./internal/guardauth", "./plugins/logs/src_v1/go"}},
+		{"Go vet (CLI & internal)", root, "go", []string{"vet", "./..."}},
 		{"TypeScript check", root, "npm", []string{"--prefix", "ui", "run", "lint"}},
 	}
 	for _, step := range steps {

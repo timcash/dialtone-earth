@@ -1,9 +1,0 @@
-{
-  "host": "legion",
-  "role": "robot-dev",
-  "pid": 21060,
-  "debug_port": 19464,
-  "nats_port": 19465,
-  "current_url": "http://127.0.0.1:3000/",
-  "managed_target": "managed"
-}

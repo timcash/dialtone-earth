@@ -1,9 +1,0 @@
-{
-  "pid": 14738,
-  "debug_port": 43551,
-  "websocket_url": "ws://127.0.0.1:43551/devtools/browser/c9878b49-e895-4fc4-9f51-85c098e4e51d",
-  "websocket_path": "/devtools/browser/c9878b49-e895-4fc4-9f51-85c098e4e51d",
-  "debug_url": "http://127.0.0.1:43551/devtools/browser/c9878b49-e895-4fc4-9f51-85c098e4e51d",
-  "is_new": false,
-  "generated_at_rfc3339": "2026-02-27T10:40:34-08:00"
-}
