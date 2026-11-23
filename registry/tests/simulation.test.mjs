@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { adaptLiveMeshToNetwork } from "../src/live-adapter.ts";
+import { buildBundledPingArcs } from "../src/edge-bundling.ts";
+import { buildSimulatedH3DataCells } from "../src/h3-geodata.ts";
 import {
   computeAdaptivePollMs,
   formatCadenceLabel,
@@ -201,4 +203,28 @@ test("adaptive gossip-mesh cadence backs off to minimal base rate and pauses whe
 
   assert.equal(formatCadenceLabel(30_000, 8, 5), "GOSSIP BASE 30s · 5×304");
   assert.equal(formatCadenceLabel(null, 0, 0), "MESH PAUSED");
+});
+
+test("edge bundling lifts ping curves into atmosphere and bundles parallel corridors + H3 cells", () => {
+  const nodes = [
+    { id: "us-w1", networkIndex: 0, lat: 37.77, lng: -122.42, rttMs: 12 },
+    { id: "us-w2", networkIndex: 0, lat: 34.05, lng: -118.24, rttMs: 14 },
+    { id: "eu-1", networkIndex: 0, lat: 51.51, lng: -0.13, rttMs: 88 },
+    { id: "eu-2", networkIndex: 0, lat: 50.11, lng: 8.68, rttMs: 92 },
+  ];
+  const R = 50;
+  const arcs = buildBundledPingArcs(nodes, R, { segments: 24, beta: 0.74, forceIterations: 2 });
+  assert.equal(arcs.length, 6);
+  for (const arc of arcs) {
+    assert.equal(arc.points.length, 25);
+    assert.equal(arc.progress[0], 0);
+    assert.ok(Math.abs(arc.progress[arc.progress.length - 1] - 1) < 1e-6);
+    const mid = arc.points[12];
+    const midRadius = Math.hypot(mid[0], mid[1], mid[2]);
+    assert.ok(midRadius > R * 1.04, `expected atmospheric arch above globe, got r=${midRadius}`);
+  }
+
+  const cells = buildSimulatedH3DataCells(nodes, 3);
+  assert.ok(cells.length >= 20, `expected simulated H3 geospatial clusters, got ${cells.length}`);
+  assert.ok(cells.every((c) => c.intensity > 0 && c.intensity <= 1));
 });

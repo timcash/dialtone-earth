@@ -57,6 +57,14 @@ a {
   transition: opacity 0.2s ease;
 }
 
+.hud-shell.is-table-minimized .earth-table-scroll {
+  display: none;
+}
+
+.hud-shell.is-table-minimized .earth-table-bar {
+  border-bottom: none;
+}
+
 .hud-shell.is-table-fullscreen .globe-stage {
   opacity: 0.22;
   pointer-events: none;

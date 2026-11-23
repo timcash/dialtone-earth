@@ -180,13 +180,13 @@ export const SIMULATED_OVERVIEW_NETWORKS: OverviewNetwork[] =
 export const SIMULATED_TOUR_STEPS: TourStep[] = [
   {
     id: "system-overview",
-    label: "SYSTEM OVERVIEW",
+    label: "GLOBAL H3 MESH",
     view: "overview",
     networkSlug: null,
     hostName: null,
-    headline: "System-Wide Simulated Mesh & Resource Telemetry",
+    headline: "Simulated H3 Geospatial Mesh & Bundled Atmospheric Pings",
     caption:
-      "Signed-out visitors explore a full simulated Dialtone v0.5.5 mesh across 3 networks (8 synthetic hosts) with aggregate CPU, RAM, Disk, GPU VRAM, iroh-blobs store, plugin rollouts, and Cloudflare Access gateway status.",
+      "Resolution-3 H3 telemetry clusters and peer-to-peer latency pings curve into the atmosphere and bundle along shared corridors so dense meshes stay legible. Expand the minimized table below to inspect live queries.",
   },
   {
     id: "select-network",

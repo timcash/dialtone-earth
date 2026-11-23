@@ -1,6 +1,15 @@
 import { latLngToCell } from "h3-js";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import {
+  buildBundledPingArcs,
+  type GeoNodePoint,
+} from "./edge-bundling";
+import {
+  buildSimulatedH3DataCells,
+  GeospatialH3Overlay,
+  SIMULATED_GEOSPATIAL_CLUSTERS,
+} from "./h3-geodata";
 import { HexLayer } from "./hex-layer";
 import {
   createHudAtmosphereMaterial,
@@ -46,8 +55,12 @@ type MarkerVisual = {
 
 type ArcVisual = {
   networkIndex: number;
-  material: THREE.LineBasicMaterial | THREE.LineDashedMaterial;
+  material: THREE.ShaderMaterial;
   baseOpacity: number;
+};
+
+export type OverviewGlobeOptions = {
+  includeSimulatedGeodata?: boolean;
 };
 
 export type OverviewGlobeController = {
@@ -59,6 +72,7 @@ export async function mountOverviewGlobe(
   container: HTMLElement,
   networks: OverviewNetwork[],
   onFocus: (networkSlug: string) => void,
+  options: OverviewGlobeOptions = {},
 ): Promise<OverviewGlobeController> {
   const landCells = await loadLandCells();
   const globe = new OverviewGlobe(
@@ -66,6 +80,7 @@ export async function mountOverviewGlobe(
     networks,
     landCells,
     onFocus,
+    options.includeSimulatedGeodata ?? true,
   );
   return {
     dispose: () => globe.dispose(),
@@ -108,6 +123,7 @@ class OverviewGlobe {
   private readonly controls: OrbitControls;
   private readonly globe = new THREE.Group();
   private readonly hexLayer: HexLayer;
+  private readonly geoOverlay: GeospatialH3Overlay;
   private readonly markers: MarkerVisual[] = [];
   private readonly arcs: ArcVisual[] = [];
   private readonly stops: TourStop[] = [];
@@ -134,6 +150,7 @@ class OverviewGlobe {
     private readonly networks: OverviewNetwork[],
     landCells: string[],
     private readonly onFocus: (networkSlug: string) => void,
+    includeSimulatedGeodata: boolean,
   ) {
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -159,9 +176,39 @@ class OverviewGlobe {
     this.addEarth();
     this.hexLayer = new HexLayer(landCells, EARTH_RADIUS);
     this.globe.add(this.hexLayer.group);
+
+    const allGeoPoints: GeoNodePoint[] = [];
     networks.forEach((network, networkIndex) => {
-      this.addNetwork(network, networkIndex);
+      network.snapshot.nodes.forEach((node, nodeIndex) => {
+        this.addNode(node, networkIndex, nodeIndex);
+        allGeoPoints.push({
+          id: `${network.slug}:${node.name}`,
+          networkIndex,
+          lat: node.lat,
+          lng: node.lng,
+          rttMs: node.rtt_ms ?? null,
+        });
+      });
     });
+
+    if (includeSimulatedGeodata) {
+      SIMULATED_GEOSPATIAL_CLUSTERS.forEach((cluster) => {
+        this.addRelayMicroNode(cluster.lat, cluster.lng);
+        allGeoPoints.push({
+          id: cluster.id,
+          networkIndex: cluster.networkIndex % Math.max(1, networks.length),
+          lat: cluster.lat,
+          lng: cluster.lng,
+          rttMs: null,
+        });
+      });
+    }
+
+    const h3Cells = buildSimulatedH3DataCells(allGeoPoints, 3);
+    this.geoOverlay = new GeospatialH3Overlay(h3Cells, EARTH_RADIUS);
+    this.globe.add(this.geoOverlay.group);
+
+    this.addBundledPingArcs(allGeoPoints);
     this.buildTour();
 
     if (this.stops.length > 0) {
@@ -216,6 +263,7 @@ class OverviewGlobe {
     this.controls.removeEventListener("end", this.handleControlEnd);
     this.controls.dispose();
     this.hexLayer.dispose();
+    this.geoOverlay.dispose();
     this.scene.traverse((object) => {
       if (
         !(
@@ -282,56 +330,65 @@ class OverviewGlobe {
     this.globe.add(atmosphere);
   }
 
-  private addNetwork(
-    network: OverviewNetwork,
-    networkIndex: number,
-  ): void {
-    const style = networkStyle(networkIndex);
-    network.snapshot.nodes.forEach((node, nodeIndex) => {
-      this.addNode(node, networkIndex, nodeIndex);
+  private addRelayMicroNode(lat: number, lng: number): void {
+    const direction = latLngToVector(lat, lng, 1);
+    const position = direction
+      .clone()
+      .multiplyScalar(EARTH_RADIUS * 1.011);
+    const mesh = new THREE.Mesh(
+      new THREE.CircleGeometry(NODE_DOT_RADIUS * 0.52, 12),
+      new THREE.MeshBasicMaterial({
+        color: 0x66f2ff,
+        transparent: true,
+        opacity: 0.72,
+        side: THREE.DoubleSide,
+      }),
+    );
+    mesh.position.copy(position);
+    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), direction);
+    mesh.renderOrder = 4;
+    this.globe.add(mesh);
+  }
+
+  private addBundledPingArcs(geoPoints: GeoNodePoint[]): void {
+    const bundled = buildBundledPingArcs(geoPoints, EARTH_RADIUS, {
+      segments: 44,
+      beta: 0.74,
+      forceIterations: 2,
+      maxPairsPerNetwork: 34,
     });
 
-    const nodes = network.snapshot.nodes;
-    const pairs: Array<[NetworkNode, NetworkNode]> = [];
-    if (nodes.length <= 12) {
-      for (let left = 0; left < nodes.length; left += 1) {
-        for (let right = left + 1; right < nodes.length; right += 1) {
-          pairs.push([nodes[left], nodes[right]]);
-        }
+    bundled.forEach((edge) => {
+      const positions = new Float32Array(edge.points.length * 3);
+      const progress = new Float32Array(edge.progress.length);
+      for (let i = 0; i < edge.points.length; i += 1) {
+        positions[i * 3] = edge.points[i][0];
+        positions[i * 3 + 1] = edge.points[i][1];
+        positions[i * 3 + 2] = edge.points[i][2];
+        progress[i] = edge.progress[i];
       }
-    } else {
-      for (let index = 1; index < nodes.length; index += 1) {
-        pairs.push([nodes[0], nodes[index]]);
-      }
-    }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      geometry.setAttribute("aProgress", new THREE.BufferAttribute(progress, 1));
 
-    pairs.forEach(([from, to]) => {
-      const geometry = new THREE.BufferGeometry().setFromPoints(
-        greatCirclePoints(from, to),
+      const colorHex =
+        edge.rttMs < 35
+          ? 0x4ef5b8
+          : edge.rttMs < 85
+            ? 0x56d4ff
+            : 0xffc966;
+
+      const material = createBundledPingArcMaterial(
+        colorHex,
+        edge.phase,
+        edge.speed,
       );
-      const material =
-        style.dashSize === null
-          ? new THREE.LineBasicMaterial({
-              color: style.arcColor,
-              transparent: true,
-              opacity: style.opacity,
-            })
-          : new THREE.LineDashedMaterial({
-              color: style.arcColor,
-              transparent: true,
-              opacity: style.opacity,
-              dashSize: style.dashSize,
-              gapSize: style.gapSize,
-            });
       const line = new THREE.Line(geometry, material);
-      if (material instanceof THREE.LineDashedMaterial) {
-        line.computeLineDistances();
-      }
-      line.renderOrder = 3;
+      line.renderOrder = 4;
       this.arcs.push({
-        networkIndex,
+        networkIndex: edge.networkIndex,
         material,
-        baseOpacity: style.opacity,
+        baseOpacity: 0.9,
       });
       this.globe.add(line);
     });
@@ -450,10 +507,8 @@ class OverviewGlobe {
       );
     });
     this.arcs.forEach((arc) => {
-      arc.material.opacity =
-        arc.networkIndex === stop.networkIndex
-          ? 0.28
-          : Math.max(0.07, arc.baseOpacity * 0.45);
+      arc.material.uniforms.uFocusGain.value =
+        arc.networkIndex === stop.networkIndex ? 1.0 : 0.42;
     });
   }
 
@@ -560,7 +615,14 @@ class OverviewGlobe {
     if (this.stops.length === 0 && !this.reducedMotion && !this.interrupted) {
       this.globe.rotation.y += 0.0007;
     }
-    this.cloudMaterial.uniforms.uTime.value = now / 1000;
+    const timeSec = now / 1000;
+    this.cloudMaterial.uniforms.uTime.value = timeSec;
+    this.geoOverlay.updatePulse(timeSec);
+    if (!this.reducedMotion) {
+      for (let i = 0; i < this.arcs.length; i += 1) {
+        this.arcs[i].material.uniforms.uTime.value = timeSec;
+      }
+    }
     const pulse = 1.3 + Math.sin(now * 0.006) * 0.04;
     this.markers.forEach((marker) => {
       marker.mesh.scale.setScalar(marker.active ? pulse : 1);
@@ -579,78 +641,63 @@ class OverviewGlobe {
   };
 }
 
-function networkStyle(index: number): {
-  arcColor: number;
-  opacity: number;
-  dashSize: number | null;
-  gapSize: number;
-} {
-  const styles = [
-    {
-      arcColor: 0x474747,
-      opacity: 0.18,
-      dashSize: null,
-      gapSize: 0,
+function createBundledPingArcMaterial(
+  colorHex: number,
+  phase: number,
+  speed: number,
+): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    uniforms: {
+      uTime: { value: 0 },
+      uPhase: { value: phase },
+      uSpeed: { value: speed },
+      uColor: { value: new THREE.Color(colorHex) },
+      uFocusGain: { value: 1.0 },
     },
-    {
-      arcColor: 0x9c9c9c,
-      opacity: 0.2,
-      dashSize: 2.2,
-      gapSize: 1.1,
-    },
-    {
-      arcColor: 0x474747,
-      opacity: 0.22,
-      dashSize: 0.9,
-      gapSize: 0.8,
-    },
-    {
-      arcColor: 0x9c9c9c,
-      opacity: 0.16,
-      dashSize: 3.4,
-      gapSize: 1.6,
-    },
-  ];
-  return styles[index % styles.length];
-}
+    vertexShader: /* glsl */ `
+      attribute float aProgress;
+      varying float vProgress;
+      void main() {
+        vProgress = aProgress;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform float uTime;
+      uniform float uPhase;
+      uniform float uSpeed;
+      uniform vec3 uColor;
+      uniform float uFocusGain;
+      varying float vProgress;
 
-function greatCirclePoints(
-  from: NetworkNode,
-  to: NetworkNode,
-): THREE.Vector3[] {
-  const start = latLngToVector(from.lat, from.lng, 1);
-  const end = latLngToVector(to.lat, to.lng, 1);
-  const angle = Math.acos(
-    THREE.MathUtils.clamp(start.dot(end), -1, 1),
-  );
-  const sinAngle = Math.sin(angle);
-  const points: THREE.Vector3[] = [];
-  const segments = 48;
+      void main() {
+        // Soft atmospheric fade at both ground endpoints
+        float envelope = sin(clamp(vProgress, 0.0, 1.0) * 3.14159265);
+        envelope = pow(max(envelope, 0.0), 0.7);
 
-  for (let index = 0; index <= segments; index += 1) {
-    const progress = index / segments;
-    let direction: THREE.Vector3;
-    if (Math.abs(sinAngle) < 0.0001) {
-      direction = start.clone().lerp(end, progress).normalize();
-    } else {
-      const left = Math.sin((1 - progress) * angle) / sinAngle;
-      const right = Math.sin(progress * angle) / sinAngle;
-      direction = start
-        .clone()
-        .multiplyScalar(left)
-        .add(end.clone().multiplyScalar(right))
-        .normalize();
-    }
-    const baseRadius = EARTH_RADIUS * 1.012;
-    const lift =
-      Math.sin(Math.PI * progress) *
-      (EARTH_RADIUS / 2.8) *
-      Math.min(0.45, 0.09 + angle * 0.24);
-    points.push(
-      direction.multiplyScalar(baseRadius + lift),
-    );
-  }
-  return points;
+        // Forward ping comet with smooth fading tail
+        float headFwd = fract(uTime * uSpeed + uPhase);
+        float distFwd = mod(headFwd - vProgress + 1.0, 1.0);
+        float pingFwd = exp(-distFwd * 8.0);
+
+        // Subtle return pong echo
+        float headBack = fract(uTime * uSpeed * 0.85 + uPhase + 0.5);
+        float distBack = mod(vProgress - headBack + 1.0, 1.0);
+        float pingBack = 0.55 * exp(-distBack * 10.5);
+
+        float strand = 0.16 * envelope;
+        float pulse = (pingFwd + pingBack) * envelope;
+        float alpha = clamp((strand + pulse * 0.92) * uFocusGain, 0.0, 0.95);
+
+        // Brighten ping head subtly toward white for crisp atmospheric sparkle
+        vec3 col = mix(uColor, vec3(1.0), clamp(pingFwd * 0.65, 0.0, 0.7));
+        gl_FragColor = vec4(col, alpha);
+      }
+    `,
+  });
 }
 
 function latLngToVector(

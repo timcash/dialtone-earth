@@ -59,6 +59,7 @@ type AppState = {
   testId: string;
   tourPlaying: boolean;
   tourCaptionsVisible: boolean;
+  tableMinimized: boolean;
   tableFullscreen: boolean;
   tourStepIndex: number;
   liveError: string | null;
@@ -106,6 +107,7 @@ const state: AppState = {
     SIMULATED_NETWORKS[0].tests[0].testId,
   tourPlaying: true,
   tourCaptionsVisible: true,
+  tableMinimized: true,
   tableFullscreen: false,
   tourStepIndex: 0,
   liveError: null,
@@ -134,6 +136,7 @@ async function boot(): Promise<void> {
   if (state.session.authenticated && state.session.mode === "live") {
     state.tourPlaying = false;
     state.tourCaptionsVisible = false;
+    state.tableMinimized = false;
     await syncActiveLiveQuery(true);
   } else {
     await syncPublicLiveControl(true);
@@ -149,6 +152,7 @@ async function boot(): Promise<void> {
       stage,
       state.networks.map((net) => ({ slug: net.slug, snapshot: net.snapshot })),
       () => {},
+      { includeSimulatedGeodata: !state.session.authenticated },
     );
     syncGlobeFocus();
   }
@@ -442,6 +446,9 @@ function applyLiveSiteState(live: LiveSiteState, initial: boolean): void {
   }
   if (typeof live.fullscreen === "boolean") {
     state.tableFullscreen = live.fullscreen;
+    if (live.fullscreen) {
+      state.tableMinimized = false;
+    }
   } else {
     state.tableFullscreen = false;
   }
@@ -654,6 +661,10 @@ function renderAll(): void {
   const shell = app.querySelector<HTMLElement>(".hud-shell");
   if (shell) {
     shell.classList.toggle("is-table-fullscreen", state.tableFullscreen);
+    shell.classList.toggle(
+      "is-table-minimized",
+      !state.tableFullscreen && state.tableMinimized,
+    );
   }
   renderTourCaptions();
   renderBottomTable();
@@ -771,6 +782,7 @@ function renderBottomTable(): void {
         </div>
         <div class="earth-bar-right">
           <span class="tbl-cadence" data-testid="mesh-cadence" title="Adaptive gossip sync interval with ETag/304 backoff">${escapeHtml(cadenceText)}</span>
+          <button type="button" class="tbl-chip ${!state.tableMinimized && !state.tableFullscreen ? "is-active" : ""}" data-action="toggle-minimize" data-testid="toggle-minimize" aria-pressed="${state.tableMinimized}">${state.tableMinimized ? "table" : "min"}</button>
           <button type="button" class="tbl-chip ${state.tableFullscreen ? "is-active" : ""}" data-action="toggle-fullscreen" data-testid="toggle-fullscreen" aria-pressed="${state.tableFullscreen}">${state.tableFullscreen ? "dock" : "full"}</button>
           <button type="button" class="tbl-chip" data-action="prev-step" title="Previous tour step">◀</button>
           <button type="button" class="tbl-chip ${state.tourPlaying ? "is-active" : ""}" data-action="toggle-tour" aria-pressed="${state.tourPlaying}">${state.tourPlaying ? "⏸ tour" : "▶ tour"}</button>
@@ -1048,6 +1060,7 @@ function bindInteractions(): void {
       if (!q) return;
       exitTour();
       state.query = q;
+      state.tableMinimized = false;
       renderAll();
       syncGlobeFocus();
       triggerImmediateQuerySync();
@@ -1133,10 +1146,23 @@ function bindInteractions(): void {
     });
 
   app
+    .querySelector<HTMLButtonElement>('[data-action="toggle-minimize"]')
+    ?.addEventListener("click", () => {
+      if (state.tableFullscreen) {
+        state.tableFullscreen = false;
+        state.tableMinimized = true;
+      } else {
+        state.tableMinimized = !state.tableMinimized;
+      }
+      renderAll();
+    });
+
+  app
     .querySelector<HTMLButtonElement>('[data-action="toggle-fullscreen"]')
     ?.addEventListener("click", () => {
       state.tableFullscreen = !state.tableFullscreen;
       if (state.tableFullscreen) {
+        state.tableMinimized = false;
         exitTour();
       }
       renderAll();
