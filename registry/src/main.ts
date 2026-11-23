@@ -1330,9 +1330,28 @@ function renderConfigPage(): void {
     ? `CLOUDFLARE KV · ${state.configSyncLabel}`
     : `BROWSER STORAGE · ${state.configSyncLabel} (SIGN IN TO SYNC VIA CLOUDFLARE)`;
 
+  const tourStep = state.tourSteps[state.tourStepIndex] ?? state.tourSteps[0];
+  const liveCtrl = !state.session.authenticated ? state.liveSite : null;
+  const cfgCaptionsHtml =
+    state.tourCaptionsVisible && tourStep
+      ? `<div class="cfg-tour-cc" data-testid="config-tour-captions" aria-live="polite">
+          <div class="cfg-cc-top">
+            <span class="cc-kicker">CC · TOUR ${state.tourStepIndex + 1}/${state.tourSteps.length} · ${escapeHtml(tourStep.label)}</span>
+            <strong class="cfg-cc-headline">${escapeHtml(liveCtrl?.headline || tourStep.headline)}</strong>
+            <span class="cc-controls">
+              <button type="button" class="tbl-chip" data-action="prev-step" title="Previous tour step">◀</button>
+              <button type="button" class="tbl-chip ${state.tourPlaying ? "is-active" : ""}" data-action="toggle-tour" aria-pressed="${state.tourPlaying}">${state.tourPlaying ? "⏸ tour" : "▶ tour"}</button>
+              <button type="button" class="tbl-chip" data-action="next-step" title="Next tour step">▶</button>
+            </span>
+          </div>
+          <div class="cfg-cc-body">${escapeHtml(liveCtrl?.subline || tourStep.caption)}</div>
+        </div>`
+      : "";
+
   cfgEl.hidden = false;
   cfgEl.innerHTML = `
     <div class="cfg-frame">
+      ${cfgCaptionsHtml}
       <header class="cfg-header">
         <div class="earth-bar-left">
           <span class="tbl-brand">CONFIG // APP WINDOWS, QUERIES &amp; CAMERA</span>
@@ -2027,31 +2046,37 @@ function bindInteractions(): void {
     });
   });
 
-  // Top-left tour controls inside globe panel
+  // Tour controls (inside globe panel and config closed-caption bar)
   app
-    .querySelector<HTMLButtonElement>('[data-action="prev-step"]')
-    ?.addEventListener("click", () => {
-      const nextIdx =
-        (state.tourStepIndex - 1 + state.tourSteps.length) %
-        state.tourSteps.length;
-      applyTourStep(nextIdx, false);
+    .querySelectorAll<HTMLButtonElement>('[data-action="prev-step"]')
+    .forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const nextIdx =
+          (state.tourStepIndex - 1 + state.tourSteps.length) %
+          state.tourSteps.length;
+        applyTourStep(nextIdx, false);
+      });
     });
 
   app
-    .querySelector<HTMLButtonElement>('[data-action="next-step"]')
-    ?.addEventListener("click", () => {
-      const nextIdx = (state.tourStepIndex + 1) % state.tourSteps.length;
-      applyTourStep(nextIdx, false);
+    .querySelectorAll<HTMLButtonElement>('[data-action="next-step"]')
+    .forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const nextIdx = (state.tourStepIndex + 1) % state.tourSteps.length;
+        applyTourStep(nextIdx, false);
+      });
     });
 
   app
-    .querySelector<HTMLButtonElement>('[data-action="toggle-tour"]')
-    ?.addEventListener("click", () => {
-      state.tourPlaying = !state.tourPlaying;
-      state.tourCaptionsVisible = state.tourPlaying;
-      if (state.tourPlaying) startTourTimer();
-      else clearTourTimer();
-      renderAll();
+    .querySelectorAll<HTMLButtonElement>('[data-action="toggle-tour"]')
+    .forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.tourPlaying = !state.tourPlaying;
+        state.tourCaptionsVisible = state.tourPlaying;
+        if (state.tourPlaying) startTourTimer();
+        else clearTourTimer();
+        renderAll();
+      });
     });
 }
 
