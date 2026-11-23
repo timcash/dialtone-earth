@@ -7,6 +7,10 @@ import {
   highlightTypeScript,
   type PolicyEvalResult,
 } from "./camera-policy";
+import {
+  buildQueryDrivenGlobeLayers,
+  type GlobeQueryLayers,
+} from "./h3-geodata";
 import { adaptLiveMeshToNetwork } from "./live-adapter";
 import {
   computeAdaptivePollMs,
@@ -218,8 +222,7 @@ async function boot(): Promise<void> {
     const { mountOverviewGlobe } = await import("./overview-globe");
     globeController = await mountOverviewGlobe(
       globeStageEl,
-      state.networks.map((net) => ({ slug: net.slug, snapshot: net.snapshot })),
-      { includeSimulatedGeodata: !state.session.authenticated },
+      currentGlobeLayers(),
     );
     syncGlobeFocus();
     renderAll();
@@ -458,6 +461,15 @@ function visibleQueryObjects(): SavedQuery[] {
 
 function isContentVisible(contentId: string): boolean {
   return visiblePaneContents().includes(contentId);
+}
+
+function currentGlobeLayers(): GlobeQueryLayers {
+  return buildQueryDrivenGlobeLayers(
+    state.networks,
+    visibleQueryObjects(),
+    state.hostName,
+    !state.session.authenticated,
+  );
 }
 
 function ensureQueryForKind(kind: TableQuery, networkSlug?: string): SavedQuery {
@@ -1080,6 +1092,7 @@ function renderAll(): void {
   renderCameraPage();
   renderBottomBar();
   bindInteractions();
+  globeController?.syncQueryLayers(currentGlobeLayers());
 }
 
 function renderWindowGrid(): void {
@@ -1120,6 +1133,7 @@ function renderWindowGrid(): void {
 function renderGlobePane(paneIndex: number): string {
   const focused = paneIndex === state.activePaneIndex ? "is-focused" : "";
   const isMax = state.maximizedPaneIndex === paneIndex;
+  const layers = currentGlobeLayers();
   const camSummary =
     state.cameraResult.ok && state.cameraResult.target
       ? `${state.cameraResult.target.node ?? `${state.cameraResult.target.lat.toFixed(1)}°,${state.cameraResult.target.lng.toFixed(1)}°`}${state.cameraResult.target.reason ? ` · ${state.cameraResult.target.reason}` : ""}`
@@ -1151,7 +1165,7 @@ function renderGlobePane(paneIndex: number): string {
         <div class="pane-head-left">
           <span class="pane-num">#${paneIndex + 1}</span>
           <strong class="pane-title">3D H3 GLOBE</strong>
-          <span class="pane-source is-ch">H3 + BUNDLED PINGS</span>
+          <span class="pane-source is-ch" data-testid="globe-layer-legend" title="${escapeHtml(layers.legendTooltip)}">${escapeHtml(layers.legend)}</span>
         </div>
         <div class="pane-head-right">
           <span class="pane-stats" data-testid="globe-cam-stats">CAM: ${escapeHtml(camSummary)}</span>
@@ -1376,7 +1390,7 @@ function renderConfigPage(): void {
         return `<button type="button" class="cfg-pane-slot ${selected}" data-cfg-pane="${idx}" data-testid="cfg-pane-${idx}">
           <span class="cfg-slot-top">PANE #${idx + 1} · VISUAL PANEL</span>
           <strong class="cfg-slot-name">3D H3 GLOBE</strong>
-          <span class="cfg-slot-sub">geospatial H3 + bundled atmospheric pings</span>
+          <span class="cfg-slot-sub">query-driven H3 tiles + measured RTT arcs</span>
         </button>`;
       }
       const q = getQueryById(contentId);
@@ -2322,6 +2336,7 @@ function applyCameraPolicyCode(code: string): void {
 }
 
 function syncGlobeFocus(): void {
+  globeController?.syncQueryLayers(currentGlobeLayers());
   const ctx = buildCameraContext(
     state.networks,
     state.networkSlug,

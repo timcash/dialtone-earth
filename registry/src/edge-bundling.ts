@@ -2,10 +2,13 @@ export type Vec3 = [number, number, number];
 
 export interface GeoNodePoint {
   id: string;
+  name?: string;
   networkIndex: number;
   lat: number;
   lng: number;
   rttMs?: number | null;
+  /** Optional real measured peer-to-peer RTT map (peer name -> ms) */
+  peerRttMs?: Record<string, number>;
 }
 
 export interface BundledPingEdge {
@@ -140,12 +143,18 @@ export function buildBundledPingArcs(
     beta?: number;
     forceIterations?: number;
     maxPairsPerNetwork?: number;
+    /** When true, only draw arcs where a real measured peerRttMs link exists between peers */
+    onlyMeasuredLinks?: boolean;
+    /** Optional host name filter: only draw arcs incident to this host */
+    focusHostName?: string | null;
   },
 ): BundledPingEdge[] {
   const segments = options?.segments ?? 40;
   const beta = options?.beta ?? 0.72;
   const forceIterations = options?.forceIterations ?? 2;
   const maxPairsPerNetwork = options?.maxPairsPerNetwork ?? 42;
+  const onlyMeasuredLinks = options?.onlyMeasuredLinks ?? false;
+  const focusHostName = options?.focusHostName ?? null;
 
   if (nodes.length < 2) return [];
 
@@ -179,19 +188,44 @@ export function buildBundledPingArcs(
     byNet.set(node.networkIndex, list);
   }
 
-  type RawPair = { a: GeoNodePoint; b: GeoNodePoint; networkIndex: number };
+  type RawPair = {
+    a: GeoNodePoint;
+    b: GeoNodePoint;
+    networkIndex: number;
+    measuredRttMs: number | null;
+  };
   const rawPairs: RawPair[] = [];
+
+  const lookupMeasuredRtt = (a: GeoNodePoint, b: GeoNodePoint): number | null => {
+    const aName = a.name || a.id.split(":").pop() || a.id;
+    const bName = b.name || b.id.split(":").pop() || b.id;
+    const ab = a.peerRttMs?.[bName];
+    const ba = b.peerRttMs?.[aName];
+    if (typeof ab === "number" && typeof ba === "number") return Math.round(((ab + ba) / 2) * 10) / 10;
+    if (typeof ab === "number") return ab;
+    if (typeof ba === "number") return ba;
+    return null;
+  };
 
   for (const [netIdx, netNodes] of byNet.entries()) {
     let added = 0;
     for (let i = 0; i < netNodes.length; i += 1) {
       for (let j = i + 1; j < netNodes.length; j += 1) {
         if (added >= maxPairsPerNetwork) break;
-        const uA = units.get(netNodes[i].id)!;
-        const uB = units.get(netNodes[j].id)!;
+        const na = netNodes[i];
+        const nb = netNodes[j];
+        if (focusHostName) {
+          const aName = na.name || na.id.split(":").pop() || na.id;
+          const bName = nb.name || nb.id.split(":").pop() || nb.id;
+          if (aName !== focusHostName && bName !== focusHostName) continue;
+        }
+        const uA = units.get(na.id)!;
+        const uB = units.get(nb.id)!;
         const angle = Math.acos(Math.max(-1, Math.min(1, dot(uA, uB))));
-        if (angle < 0.015) continue;
-        rawPairs.push({ a: netNodes[i], b: netNodes[j], networkIndex: netIdx });
+        if (angle < 0.004) continue;
+        const measured = lookupMeasuredRtt(na, nb);
+        if (onlyMeasuredLinks && measured === null) continue;
+        rawPairs.push({ a: na, b: nb, networkIndex: netIdx, measuredRttMs: measured });
         added += 1;
       }
     }
@@ -211,7 +245,7 @@ export function buildBundledPingArcs(
     mid: Vec3;
   };
 
-  const drafts: DraftEdge[] = rawPairs.map(({ a, b, networkIndex }) => {
+  const drafts: DraftEdge[] = rawPairs.map(({ a, b, networkIndex, measuredRttMs }) => {
     const uA = units.get(a.id)!;
     const uB = units.get(b.id)!;
     const angle = Math.acos(Math.max(-1, Math.min(1, dot(uA, uB))));
@@ -239,7 +273,7 @@ export function buildBundledPingArcs(
       b,
       networkIndex,
       angle,
-      rttMs: estimateRttMs(uA, uB, a.rttMs, b.rttMs),
+      rttMs: measuredRttMs ?? estimateRttMs(uA, uB, a.rttMs, b.rttMs),
       unitPts,
       dir: normalize(chord),
       mid: slerp(uA, uB, 0.5),

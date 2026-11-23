@@ -8,7 +8,10 @@ import {
   highlightTypeScript,
 } from "../src/camera-policy.ts";
 import { buildBundledPingArcs } from "../src/edge-bundling.ts";
-import { buildSimulatedH3DataCells } from "../src/h3-geodata.ts";
+import {
+  buildQueryDrivenGlobeLayers,
+  H3_LAYER_COLORS,
+} from "../src/h3-geodata.ts";
 import {
   computeAdaptivePollMs,
   formatCadenceLabel,
@@ -221,12 +224,12 @@ test("adaptive gossip-mesh cadence backs off to minimal base rate and pauses whe
   assert.equal(formatCadenceLabel(null, 0, 0), "MESH PAUSED");
 });
 
-test("edge bundling lifts ping curves into atmosphere and bundles parallel corridors + H3 cells", () => {
+test("edge bundling lifts ping curves into atmosphere and query-driven globe layers map strictly to open queries", () => {
   const nodes = [
-    { id: "us-w1", networkIndex: 0, lat: 37.77, lng: -122.42, rttMs: 12 },
-    { id: "us-w2", networkIndex: 0, lat: 34.05, lng: -118.24, rttMs: 14 },
-    { id: "eu-1", networkIndex: 0, lat: 51.51, lng: -0.13, rttMs: 88 },
-    { id: "eu-2", networkIndex: 0, lat: 50.11, lng: 8.68, rttMs: 92 },
+    { id: "us-w1", name: "us-w1", networkIndex: 0, lat: 37.77, lng: -122.42, rttMs: 12, peerRttMs: { "eu-1": 135 } },
+    { id: "us-w2", name: "us-w2", networkIndex: 0, lat: 34.05, lng: -118.24, rttMs: 14 },
+    { id: "eu-1", name: "eu-1", networkIndex: 0, lat: 51.51, lng: -0.13, rttMs: 88, peerRttMs: { "us-w1": 136 } },
+    { id: "eu-2", name: "eu-2", networkIndex: 0, lat: 50.11, lng: 8.68, rttMs: 92 },
   ];
   const R = 50;
   const arcs = buildBundledPingArcs(nodes, R, { segments: 24, beta: 0.74, forceIterations: 2 });
@@ -240,9 +243,32 @@ test("edge bundling lifts ping curves into atmosphere and bundles parallel corri
     assert.ok(midRadius > R * 1.04, `expected atmospheric arch above globe, got r=${midRadius}`);
   }
 
-  const cells = buildSimulatedH3DataCells(nodes, 3);
-  assert.ok(cells.length >= 20, `expected simulated H3 geospatial clusters, got ${cells.length}`);
-  assert.ok(cells.every((c) => c.intensity > 0 && c.intensity <= 1));
+  // onlyMeasuredLinks filters strictly to pairs with real measured peerRttMs
+  const measuredOnly = buildBundledPingArcs(nodes, R, { segments: 12, onlyMeasuredLinks: true });
+  assert.equal(measuredOnly.length, 1);
+  assert.equal(measuredOnly[0].rttMs, 135.5);
+
+  // Zero visible queries -> base node markers only (0 H3 cells, 0 arcs)
+  const queries = createDefaultQuerySet(SIMULATED_NETWORKS, 1000);
+  const emptyLayers = buildQueryDrivenGlobeLayers(SIMULATED_NETWORKS, [], "", true);
+  assert.equal(emptyLayers.h3Cells.length, 0);
+  assert.equal(emptyLayers.arcNodes.length, 0);
+  assert.equal(emptyLayers.legend, "BASE NODES ONLY");
+
+  // Open hosts query -> exact single res-3 tile per host (no 1-ring halo)
+  const hostsQ = queries.find((q) => q.kind === "hosts");
+  const hostsLayers = buildQueryDrivenGlobeLayers(SIMULATED_NETWORKS, [hostsQ], "", true);
+  const targetNet = SIMULATED_NETWORKS.find((n) => n.slug === hostsQ.networkSlug);
+  assert.ok(hostsLayers.h3Cells.length > 0 && hostsLayers.h3Cells.length <= targetNet.hosts.length);
+  assert.ok(hostsLayers.h3Cells.every((c) => c.layer === "load" && c.intensity > 0 && c.intensity <= 1));
+
+  // Open plugins query only -> cyan H3 tiles, 0 RTT arcs
+  const pluginsQ = queries.find((q) => q.kind === "plugins");
+  const pluginsLayers = buildQueryDrivenGlobeLayers(SIMULATED_NETWORKS, [pluginsQ], "", true);
+  assert.ok(pluginsLayers.h3Cells.length > 0);
+  assert.ok(pluginsLayers.h3Cells.every((c) => c.layer === "plugins" && c.colorHex === H3_LAYER_COLORS.plugins));
+  assert.equal(pluginsLayers.arcNodes.length, 0);
+  assert.ok(pluginsLayers.legend.includes("NO RTT QUERY"));
 });
 
 test("query workspace supports custom queries, best-effort rate tiers, and 1 / 1|1 / 1/1 / 1|2 / 2x2 splits", () => {

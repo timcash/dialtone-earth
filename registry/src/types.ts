@@ -44,6 +44,7 @@ export type NetworkNode = {
   heard: number;
   online: boolean;
   rtt_ms?: number | null;
+  peer_rtt_ms?: Record<string, number>;
   rtt_ms_from_grok_bot_metal?: number | null;
   stats: NodeStats;
   resources?: NodeResources;

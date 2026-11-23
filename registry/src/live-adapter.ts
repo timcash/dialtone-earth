@@ -73,9 +73,13 @@ export function adaptLiveMeshToNetwork(input: LiveMeshPayloads): MeshNetwork {
         : isSelf || (updatedAt !== null && nowSec - updatedAt < 120);
 
     const peerRttMap = asRecord(n.peer_rtt_ms);
-    const rttValues = Object.values(peerRttMap).filter(
-      (v): v is number => typeof v === "number" && Number.isFinite(v),
-    );
+    const cleanPeerRtt: Record<string, number> = {};
+    for (const [peerName, val] of Object.entries(peerRttMap)) {
+      if (typeof val === "number" && Number.isFinite(val) && val >= 0) {
+        cleanPeerRtt[peerName] = Math.round(val * 10) / 10;
+      }
+    }
+    const rttValues = Object.values(cleanPeerRtt);
     const rttMs =
       isSelf
         ? 0
@@ -112,6 +116,7 @@ export function adaptLiveMeshToNetwork(input: LiveMeshPayloads): MeshNetwork {
       heard: asNumber(n.heard) ?? 0,
       online,
       rtt_ms: rttMs,
+      peer_rtt_ms: cleanPeerRtt,
       gpuName: null,
       gpuLoadPercent: null,
       probeSummary,

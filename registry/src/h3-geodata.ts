@@ -1,99 +1,402 @@
-import { cellToBoundary, gridDisk, latLngToCell } from "h3-js";
+import { cellToBoundary, latLngToCell } from "h3-js";
 import * as THREE from "three";
-import type { GeoNodePoint } from "./edge-bundling";
+import {
+  latLngToUnitVec3,
+  type GeoNodePoint,
+} from "./edge-bundling.ts";
+import { nodeLoadColor, nodeLoadPercent } from "./node-load.ts";
+import type { SavedQuery } from "./query-workspace.ts";
+import type { MeshHost, MeshNetwork } from "./simulation.ts";
+import type { NetworkNode } from "./types.ts";
 
 const DEG_TO_RAD = Math.PI / 180;
 
-export interface SimulatedH3Region {
-  id: string;
-  label: string;
-  lat: number;
-  lng: number;
-  networkIndex: number;
-  intensity: number;
-  ringSize: number;
-}
+export const H3_LAYER_COLORS = {
+  plugins: 0x46d8ff,
+  users: 0xb88aff,
+  probesPass: 0x36d66b,
+  probesFail: 0xff5a5f,
+} as const;
 
-/**
- * Simulated geospatial H3 telemetry corridors & relay clusters on top of the
- * globe so the logged-out tour demonstrates regional H3 activity + dense
- * bundled latency lines across continents.
- */
-export const SIMULATED_GEOSPATIAL_CLUSTERS: SimulatedH3Region[] = [
-  // North America West & Central
-  { id: "geo-sfo", label: "US-West", lat: 37.77, lng: -122.42, networkIndex: 0, intensity: 0.92, ringSize: 2 },
-  { id: "geo-sea", label: "US-NW", lat: 47.61, lng: -122.33, networkIndex: 0, intensity: 0.68, ringSize: 1 },
-  { id: "geo-den", label: "US-Mountain", lat: 39.74, lng: -104.99, networkIndex: 1, intensity: 0.74, ringSize: 1 },
-  { id: "geo-aus", label: "US-South", lat: 30.27, lng: -97.74, networkIndex: 0, intensity: 0.81, ringSize: 2 },
-  // North America East
-  { id: "geo-nyc", label: "US-East", lat: 40.71, lng: -74.01, networkIndex: 1, intensity: 0.95, ringSize: 2 },
-  { id: "geo-iad", label: "US-VA", lat: 38.9, lng: -77.04, networkIndex: 0, intensity: 0.85, ringSize: 1 },
-  // Europe
-  { id: "geo-lon", label: "EU-West", lat: 51.51, lng: -0.13, networkIndex: 0, intensity: 0.88, ringSize: 2 },
-  { id: "geo-fra", label: "EU-Central", lat: 50.11, lng: 8.68, networkIndex: 1, intensity: 0.94, ringSize: 2 },
-  { id: "geo-sto", label: "EU-North", lat: 59.33, lng: 18.07, networkIndex: 2, intensity: 0.72, ringSize: 1 },
-  { id: "geo-mad", label: "EU-South", lat: 40.42, lng: -3.7, networkIndex: 1, intensity: 0.65, ringSize: 1 },
-  // Asia-Pacific
-  { id: "geo-tyo", label: "AP-East", lat: 35.68, lng: 139.65, networkIndex: 2, intensity: 0.93, ringSize: 2 },
-  { id: "geo-sin", label: "AP-SE", lat: 1.35, lng: 103.82, networkIndex: 2, intensity: 0.86, ringSize: 2 },
-  { id: "geo-syd", label: "AP-South", lat: -33.87, lng: 151.21, networkIndex: 2, intensity: 0.7, ringSize: 1 },
-  // South America
-  { id: "geo-gru", label: "SA-East", lat: -23.55, lng: -46.63, networkIndex: 1, intensity: 0.76, ringSize: 1 },
-];
+export type H3LayerKind = "load" | "plugins" | "users" | "probes";
 
 export interface H3DataCell {
   cell: string;
   intensity: number;
+  colorHex: number;
+  layer: H3LayerKind;
   networkIndex: number;
+  hosts: string[];
+}
+
+export interface GlobeMarkerSpec {
+  networkSlug: string;
+  networkIndex: number;
+  nodeIndex: number;
+  node: NetworkNode;
+}
+
+export interface GlobeQueryLayers {
+  /** Deterministic fingerprint so WebGL geometry only rebuilds when data changes */
+  signature: string;
+  /** Base node markers from active networks */
+  markers: GlobeMarkerSpec[];
+  /** Exact res-3 H3 tiles driven strictly by open query tables (0 fake halos) */
+  h3Cells: H3DataCell[];
+  /** Nodes eligible for RTT ping arcs (only populated when a host/hosts/networks query is open) */
+  arcNodes: GeoNodePoint[];
+  /** In live mode, draw arcs strictly between peers with real measured peer_rtt_ms */
+  onlyMeasuredLinks: boolean;
+  /** When only a single-host query is open, focus arcs incident to that host */
+  focusHostName: string | null;
+  /** Ordered list of active H3 data layers from the visible query set */
+  activeLayers: H3LayerKind[];
+  /** Exact count of RTT arcs that will be rendered */
+  measuredArcCount: number;
+  /** Short honest header badge summarizing what is currently drawn */
+  legend: string;
+  /** Detailed hover explanation of every active layer and color */
+  legendTooltip: string;
+}
+
+function parseHexColor(cssHex: string): number {
+  const clean = cssHex.replace(/^#/, "");
+  const parsed = Number.parseInt(clean, 16);
+  return Number.isFinite(parsed) ? parsed : 0x9c9c9c;
+}
+
+function isHostProbeFailing(host: MeshHost): boolean {
+  const summary = (host.probeSummary || "").trim();
+  const ratio = summary.match(/^(\d+)\s*\/\s*(\d+)/);
+  if (ratio) {
+    const passed = Number(ratio[1]);
+    const total = Number(ratio[2]);
+    if (total > 0 && passed < total) return true;
+  }
+  return /\b(fail|failed|error|down|offline)\b/i.test(summary) || !host.online;
+}
+
+function layerPriority(layer: H3LayerKind, colorHex: number): number {
+  if (layer === "probes" && colorHex === H3_LAYER_COLORS.probesFail) return 4;
+  if (layer === "users") return 3;
+  if (layer === "plugins") return 2;
+  if (layer === "probes") return 1;
+  return 0;
+}
+
+function countRenderableArcs(
+  nodes: GeoNodePoint[],
+  onlyMeasuredLinks: boolean,
+  focusHostName: string | null,
+  maxPairsPerNetwork = 34,
+): number {
+  if (nodes.length < 2) return 0;
+  const byNet = new Map<number, GeoNodePoint[]>();
+  const units = new Map<string, [number, number, number]>();
+  for (const node of nodes) {
+    units.set(node.id, latLngToUnitVec3(node.lat, node.lng));
+    const list = byNet.get(node.networkIndex) ?? [];
+    list.push(node);
+    byNet.set(node.networkIndex, list);
+  }
+
+  let total = 0;
+  for (const netNodes of byNet.values()) {
+    let added = 0;
+    for (let i = 0; i < netNodes.length; i += 1) {
+      for (let j = i + 1; j < netNodes.length; j += 1) {
+        if (added >= maxPairsPerNetwork) break;
+        const na = netNodes[i];
+        const nb = netNodes[j];
+        const aName = na.name || na.id.split(":").pop() || na.id;
+        const bName = nb.name || nb.id.split(":").pop() || nb.id;
+        if (focusHostName && aName !== focusHostName && bName !== focusHostName) {
+          continue;
+        }
+        const uA = units.get(na.id)!;
+        const uB = units.get(nb.id)!;
+        const d = Math.max(-1, Math.min(1, uA[0] * uB[0] + uA[1] * uB[1] + uA[2] * uB[2]));
+        if (Math.acos(d) < 0.004) continue;
+        if (onlyMeasuredLinks) {
+          const ab = na.peerRttMs?.[bName];
+          const ba = nb.peerRttMs?.[aName];
+          if (typeof ab !== "number" && typeof ba !== "number") continue;
+        }
+        added += 1;
+        total += 1;
+      }
+    }
+  }
+  return total;
 }
 
 /**
- * Generates deduplicated H3 resolution-3 geospatial telemetry cells around
- * active nodes and regional clusters.
+ * Projects ONLY real network data onto the 3D globe based on the currently open
+ * visible Query Set. Every H3 cell is the exact resolution-3 tile containing a
+ * matching host (zero invented neighbor rings, zero decorative clusters).
+ *
+ * - Open `hosts` / `host` / `networks` -> H3 tiles colored by real CPU/RAM load
+ *   + bundled RTT ping arcs (measured `peer_rtt_ms` only in live mode).
+ * - Open `plugins` -> cyan H3 tiles strictly on hosts with deployed plugins/blobs.
+ * - Open `users` -> violet H3 tiles strictly on nodes viewed/shelled by users.
+ * - Open `recovery` / `tests` / `log` -> green (all pass) or red (failing) tiles.
+ * - No query tables open -> base node markers only (0 H3 tiles, 0 ping arcs).
  */
-export function buildSimulatedH3DataCells(
-  nodes: GeoNodePoint[],
+export function buildQueryDrivenGlobeLayers(
+  networks: MeshNetwork[],
+  visibleQueries: SavedQuery[],
+  selectedHostName: string,
+  isSimulated: boolean,
   resolution = 3,
-  includeSimulatedClusters = true,
-): H3DataCell[] {
-  const map = new Map<string, H3DataCell>();
-
-  const seedCell = (
-    lat: number,
-    lng: number,
-    networkIndex: number,
-    baseIntensity: number,
-    ringSize: number,
-  ) => {
-    const center = latLngToCell(lat, lng, resolution);
-    const disk = gridDisk(center, ringSize);
-    disk.forEach((cell, idx) => {
-      // Smooth radial falloff from center cell (idx 0) to outer ring
-      const falloff = idx === 0 ? 1.0 : idx <= 6 ? 0.62 : 0.34;
-      const intensity = Math.min(1, baseIntensity * falloff);
-      const existing = map.get(cell);
-      if (!existing || intensity > existing.intensity) {
-        map.set(cell, { cell, intensity, networkIndex });
-      }
+): GlobeQueryLayers {
+  const markers: GlobeMarkerSpec[] = [];
+  networks.forEach((net, networkIndex) => {
+    net.snapshot.nodes.forEach((node, nodeIndex) => {
+      markers.push({
+        networkSlug: net.slug,
+        networkIndex,
+        nodeIndex,
+        node,
+      });
     });
+  });
+
+  if (visibleQueries.length === 0) {
+    const markerSig = markers
+      .map(
+        (m) =>
+          `${m.networkSlug}:${m.node.name}:${m.node.lat.toFixed(2)},${m.node.lng.toFixed(2)}:${m.node.online ? 1 : 0}:${nodeLoadPercent(m.node.stats) ?? -1}`,
+      )
+      .join("|");
+    return {
+      signature: `base|${markerSig}`,
+      markers,
+      h3Cells: [],
+      arcNodes: [],
+      onlyMeasuredLinks: !isSimulated,
+      focusHostName: null,
+      activeLayers: [],
+      measuredArcCount: 0,
+      legend: "BASE NODES ONLY",
+      legendTooltip:
+        "No query table open — showing base node markers only. Open hosts, plugins, users, or tests tables to project real H3 tiles and measured RTT arcs.",
+    };
+  }
+
+  const cellMap = new Map<string, H3DataCell>();
+  const activeLayerSet = new Set<H3LayerKind>();
+  const arcNodeMap = new Map<string, GeoNodePoint>();
+  let hasBroadArcQuery = false;
+  let hasSingleHostQuery = false;
+
+  const upsertCell = (
+    host: MeshHost,
+    networkIndex: number,
+    layer: H3LayerKind,
+    colorHex: number,
+    intensity: number,
+  ) => {
+    if (!Number.isFinite(host.lat) || !Number.isFinite(host.lng)) return;
+    const cell = latLngToCell(host.lat, host.lng, resolution);
+    const clampedIntensity = Math.max(0.18, Math.min(1, intensity));
+    const existing = cellMap.get(cell);
+    if (!existing) {
+      cellMap.set(cell, {
+        cell,
+        intensity: clampedIntensity,
+        colorHex,
+        layer,
+        networkIndex,
+        hosts: [host.name],
+      });
+      return;
+    }
+    if (!existing.hosts.includes(host.name)) {
+      existing.hosts.push(host.name);
+    }
+    const nextPri = layerPriority(layer, colorHex);
+    const curPri = layerPriority(existing.layer, existing.colorHex);
+    if (
+      nextPri > curPri ||
+      (nextPri === curPri && clampedIntensity > existing.intensity)
+    ) {
+      existing.layer = layer;
+      existing.colorHex = colorHex;
+      existing.intensity = Math.max(existing.intensity, clampedIntensity);
+    }
   };
 
-  for (const node of nodes) {
-    seedCell(node.lat, node.lng, node.networkIndex, 0.95, 1);
-  }
-  if (includeSimulatedClusters) {
-    for (const cluster of SIMULATED_GEOSPATIAL_CLUSTERS) {
-      seedCell(
-        cluster.lat,
-        cluster.lng,
-        cluster.networkIndex,
-        cluster.intensity,
-        cluster.ringSize,
-      );
+  const addArcNetwork = (net: MeshNetwork, networkIndex: number) => {
+    for (const host of net.hosts) {
+      const id = `${net.slug}:${host.name}`;
+      if (!arcNodeMap.has(id)) {
+        arcNodeMap.set(id, {
+          id,
+          name: host.name,
+          networkIndex,
+          lat: host.lat,
+          lng: host.lng,
+          rttMs: host.rtt_ms ?? null,
+          peerRttMs: host.peer_rtt_ms,
+        });
+      }
+    }
+  };
+
+  const resolveTargetNetworks = (q: SavedQuery): Array<{ net: MeshNetwork; idx: number }> => {
+    if (q.kind === "networks") {
+      return networks.map((net, idx) => ({ net, idx }));
+    }
+    const idx = networks.findIndex((n) => n.slug === q.networkSlug);
+    if (idx >= 0) return [{ net: networks[idx], idx }];
+    return networks[0] ? [{ net: networks[0], idx: 0 }] : [];
+  };
+
+  for (const q of visibleQueries) {
+    const targets = resolveTargetNetworks(q);
+    for (const { net, idx } of targets) {
+      if (q.kind === "networks" || q.kind === "hosts" || q.kind === "host") {
+        activeLayerSet.add("load");
+        addArcNetwork(net, idx);
+        if (q.kind === "host") {
+          hasSingleHostQuery = true;
+          const picked =
+            net.hosts.find((h) => h.name === selectedHostName) ?? net.hosts[0];
+          if (picked) {
+            const load = nodeLoadPercent(picked.stats);
+            upsertCell(
+              picked,
+              idx,
+              "load",
+              parseHexColor(nodeLoadColor(picked.stats)),
+              load !== null ? Math.max(0.22, load / 100) : 0.25,
+            );
+          }
+        } else {
+          hasBroadArcQuery = true;
+          for (const host of net.hosts) {
+            const load = nodeLoadPercent(host.stats);
+            upsertCell(
+              host,
+              idx,
+              "load",
+              parseHexColor(nodeLoadColor(host.stats)),
+              load !== null ? Math.max(0.22, load / 100) : 0.25,
+            );
+          }
+        }
+      } else if (q.kind === "plugins") {
+        activeLayerSet.add("plugins");
+        for (const host of net.hosts) {
+          const pluginCount = host.plugins.length;
+          const blobObjects = host.blobStore?.objects ?? 0;
+          if (pluginCount > 0 || blobObjects > 0) {
+            const intensity = Math.min(1, 0.45 + pluginCount * 0.2 + (blobObjects > 0 ? 0.15 : 0));
+            upsertCell(host, idx, "plugins", H3_LAYER_COLORS.plugins, intensity);
+          }
+        }
+      } else if (q.kind === "users") {
+        activeLayerSet.add("users");
+        const activeHostNames = new Set<string>();
+        for (const user of net.users) {
+          for (const loc of user.locations) {
+            if (loc.viewingNode) activeHostNames.add(loc.viewingNode);
+          }
+          for (const sn of user.shellNodes) {
+            if (sn) activeHostNames.add(sn);
+          }
+        }
+        for (const host of net.hosts) {
+          if (activeHostNames.has(host.name)) {
+            upsertCell(host, idx, "users", H3_LAYER_COLORS.users, 0.85);
+          }
+        }
+      } else if (q.kind === "recovery" || q.kind === "tests" || q.kind === "log") {
+        activeLayerSet.add("probes");
+        const hasFailingTest =
+          (q.kind === "tests" || q.kind === "log") &&
+          net.tests.some((t) => t.status === "fail");
+        for (const host of net.hosts) {
+          const fail = isHostProbeFailing(host) || hasFailingTest;
+          upsertCell(
+            host,
+            idx,
+            "probes",
+            fail ? H3_LAYER_COLORS.probesFail : H3_LAYER_COLORS.probesPass,
+            fail ? 0.95 : 0.48,
+          );
+        }
+      }
     }
   }
 
-  return [...map.values()];
+  const h3Cells = [...cellMap.values()];
+  const arcNodes = [...arcNodeMap.values()];
+  const onlyMeasuredLinks = !isSimulated;
+  const focusHostName =
+    hasSingleHostQuery && !hasBroadArcQuery && selectedHostName
+      ? selectedHostName
+      : null;
+  const measuredArcCount = countRenderableArcs(
+    arcNodes,
+    onlyMeasuredLinks,
+    focusHostName,
+  );
+
+  const layerOrder: H3LayerKind[] = ["load", "plugins", "users", "probes"];
+  const activeLayers = layerOrder.filter((l) => activeLayerSet.has(l));
+  const layerLabel = activeLayers.map((l) => l.toUpperCase()).join("+");
+  const arcPart =
+    arcNodes.length > 0
+      ? `ARCS: ${measuredArcCount} ${onlyMeasuredLinks ? "RTT" : "SIM RTT"}`
+      : "NO RTT QUERY";
+  const legend = `H3: ${layerLabel} (${h3Cells.length}) · ${arcPart}`;
+
+  const legendTooltip = [
+    `Active Query Set drives every 3D overlay (exact res-3 H3 tile per node, 0 decorative halos).`,
+    `LOAD (hosts/networks): green <40%, amber 40–75%, red ≥75% max(CPU, RAM).`,
+    `PLUGINS: cyan tiles on hosts serving verified iroh-blobs plugins.`,
+    `USERS: violet tiles on nodes actively viewed or shelled by signed-in users.`,
+    `PROBES (tests/recovery/log): green all-pass, red failing.`,
+    `ARCS: ${onlyMeasuredLinks ? "measured peer_rtt_ms only" : "simulated RTT"} (<50ms green, 50–120ms cyan, ≥120ms amber).`,
+  ].join(" ");
+
+  const signature = [
+    onlyMeasuredLinks ? "live" : "sim",
+    focusHostName ?? "",
+    markers
+      .map(
+        (m) =>
+          `${m.networkSlug}:${m.node.name}:${m.node.lat.toFixed(2)},${m.node.lng.toFixed(2)}:${m.node.online ? 1 : 0}:${nodeLoadPercent(m.node.stats) ?? -1}`,
+      )
+      .join("|"),
+    h3Cells
+      .map((c) => `${c.cell}:${c.layer}:${c.colorHex.toString(16)}:${c.intensity.toFixed(2)}`)
+      .sort()
+      .join("|"),
+    arcNodes
+      .map(
+        (a) =>
+          `${a.id}:${a.lat.toFixed(2)},${a.lng.toFixed(2)}:${Object.entries(a.peerRttMs ?? {})
+            .sort(([k1], [k2]) => k1.localeCompare(k2))
+            .map(([k, v]) => `${k}=${Math.round(v)}`)
+            .join(",")}`,
+      )
+      .join("|"),
+  ].join("##");
+
+  return {
+    signature,
+    markers,
+    h3Cells,
+    arcNodes,
+    onlyMeasuredLinks,
+    focusHostName,
+    activeLayers,
+    measuredArcCount,
+    legend,
+    legendTooltip,
+  };
 }
 
 function latLngToVector(lat: number, lng: number, radius: number): THREE.Vector3 {
@@ -107,9 +410,8 @@ function latLngToVector(lat: number, lng: number, radius: number): THREE.Vector3
 }
 
 /**
- * Renders the simulated geospatial H3 hex heatmap tiles on top of the globe
- * using vertex colors (single draw call for fills + single draw call for crisp
- * outlines, zero runtime geometry overhead).
+ * Renders query-driven exact H3 res-3 hex tiles on top of the globe using
+ * vertex colors driven directly by each cell's real metric color and intensity.
  */
 export class GeospatialH3Overlay {
   readonly group = new THREE.Group();
@@ -124,25 +426,17 @@ export class GeospatialH3Overlay {
     const edgePositions: number[] = [];
     const edgeColors: number[] = [];
 
-    const colorLow = new THREE.Color(0x1f8f6b);
-    const colorMid = new THREE.Color(0x36d66b);
-    const colorHigh = new THREE.Color(0x66f2ff);
     const tmpColor = new THREE.Color();
 
     for (const item of cells) {
       const boundary = cellToBoundary(item.cell, true);
-      // Slight radial elevation proportional to simulated geospatial intensity
+      // Radial elevation proportional to real metric intensity [0..1]
       const lift = 1.0045 + item.intensity * 0.0055;
       const fillRadius = earthRadius * lift;
       const edgeRadius = earthRadius * (lift + 0.0012);
 
-      if (item.intensity < 0.55) {
-        tmpColor.copy(colorLow).lerp(colorMid, item.intensity / 0.55);
-      } else {
-        tmpColor.copy(colorMid).lerp(colorHigh, (item.intensity - 0.55) / 0.45);
-      }
-      // Attenuate brightness by intensity so outer ring cells gently blend into globe
-      const gain = 0.35 + item.intensity * 0.65;
+      tmpColor.setHex(item.colorHex);
+      const gain = 0.45 + item.intensity * 0.55;
       const r = tmpColor.r * gain;
       const g = tmpColor.g * gain;
       const b = tmpColor.b * gain;
@@ -192,7 +486,7 @@ export class GeospatialH3Overlay {
     this.fillMaterial = new THREE.MeshBasicMaterial({
       vertexColors: true,
       transparent: true,
-      opacity: 0.34,
+      opacity: 0.36,
       side: THREE.DoubleSide,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
@@ -213,7 +507,7 @@ export class GeospatialH3Overlay {
     this.edgeMaterial = new THREE.LineBasicMaterial({
       vertexColors: true,
       transparent: true,
-      opacity: 0.48,
+      opacity: 0.58,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
@@ -225,8 +519,8 @@ export class GeospatialH3Overlay {
 
   updatePulse(timeSec: number): void {
     const wave = 0.5 + 0.5 * Math.sin(timeSec * 0.9);
-    this.fillMaterial.opacity = 0.26 + wave * 0.14;
-    this.edgeMaterial.opacity = 0.38 + wave * 0.18;
+    this.fillMaterial.opacity = 0.28 + wave * 0.14;
+    this.edgeMaterial.opacity = 0.48 + wave * 0.18;
   }
 
   dispose(): void {

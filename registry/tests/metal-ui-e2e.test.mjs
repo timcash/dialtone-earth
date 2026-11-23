@@ -10,7 +10,10 @@ import {
   highlightTypeScript,
 } from "../src/camera-policy.ts";
 import { buildBundledPingArcs } from "../src/edge-bundling.ts";
-import { buildSimulatedH3DataCells } from "../src/h3-geodata.ts";
+import {
+  buildQueryDrivenGlobeLayers,
+  H3_LAYER_COLORS,
+} from "../src/h3-geodata.ts";
 import { adaptLiveMeshToNetwork } from "../src/live-adapter.ts";
 import {
   bestEffortIntervalMs,
@@ -287,27 +290,52 @@ test("metal-live-parity: adapts live metal channel nodes, dialtone-shell plugin,
   );
 });
 
-test("metal-globe-h3-arcs: builds H3 telemetry cells and bundled atmospheric ping arcs from metal nodes", () => {
+test("metal-globe-h3-arcs: globe overlays are 100% query-driven with zero cloud layer or fake H3 halos", () => {
+  // 1. Verify decorative cloud/atmosphere layers and fake H3 clusters are completely gone
+  const materialsTs = readFileSync(resolve(REGISTRY_DIR, "src/hud-globe-materials.ts"), "utf8");
+  const globeTs = readFileSync(resolve(REGISTRY_DIR, "src/overview-globe.ts"), "utf8");
+  const geodataTs = readFileSync(resolve(REGISTRY_DIR, "src/h3-geodata.ts"), "utf8");
+  assert.ok(!materialsTs.includes("createHudCloudMaterial"), "cloud layer must be removed");
+  assert.ok(!materialsTs.includes("createHudAtmosphereMaterial"), "fake atmosphere halo must be removed");
+  assert.ok(!globeTs.includes("createHudCloudMaterial"), "overview-globe must not render clouds");
+  assert.ok(!globeTs.includes("addRelayMicroNode"), "overview-globe must not render fake relay micro-nodes");
+  assert.ok(!geodataTs.includes("SIMULATED_GEOSPATIAL_CLUSTERS"), "fake H3 demo clusters must be removed");
+  assert.ok(!geodataTs.includes("gridDisk"), "fake 1-ring H3 neighbor halos must be removed");
+
+  // 2. Verify live metal channel query-driven projection
   const metalNet = adaptLiveMeshToNetwork(buildRealMetalChannelPayloads());
-  const points = metalNet.hosts.map((h) => ({
-    id: h.name,
-    networkIndex: 0,
-    lat: h.lat,
-    lng: h.lng,
-    rttMs: h.rtt_ms ?? 25,
-  }));
+  const queries = createDefaultQuerySet([metalNet]);
+  const hostsQ = queries.find((q) => q.kind === "hosts");
+  const pluginsQ = queries.find((q) => q.kind === "plugins");
+  const usersQ = queries.find((q) => q.kind === "users");
+  const hostQ = createCustomQuery(queries, {
+    kind: "host",
+    source: "channel",
+    networkSlug: "metal",
+    rate: "med",
+  });
+  const testsQ = queries.find((q) => q.kind === "tests");
 
-  const liveOnlyCells = buildSimulatedH3DataCells(points, 3, false);
-  const withDemoCells = buildSimulatedH3DataCells(points, 3, true);
-  assert.ok(liveOnlyCells.length >= 5, `expected >= 5 H3 cells for 5 metal nodes, got ${liveOnlyCells.length}`);
-  assert.ok(
-    liveOnlyCells.length < withDemoCells.length,
-    `live-only H3 cells (${liveOnlyCells.length}) must exclude simulated demo clusters (${withDemoCells.length})`,
-  );
-  assert.ok(liveOnlyCells.every((c) => typeof c.cell === "string" && c.cell.length > 0 && c.intensity > 0));
+  // Globe-only (no query tables open) -> 0 H3 tiles, 0 RTT arcs
+  const baseOnly = buildQueryDrivenGlobeLayers([metalNet], [], "legion-metal", false);
+  assert.equal(baseOnly.markers.length, 5);
+  assert.equal(baseOnly.h3Cells.length, 0);
+  assert.equal(baseOnly.arcNodes.length, 0);
+  assert.equal(baseOnly.measuredArcCount, 0);
+  assert.equal(baseOnly.legend, "BASE NODES ONLY");
 
-  const arcs = buildBundledPingArcs(points, 2.8, { segments: 24 });
-  assert.ok(arcs.length >= 4, `expected >= 4 bundled ping arcs across metal nodes, got ${arcs.length}`);
+  // Hosts query open -> exact 1 res-3 tile per host (5 nodes = 5 tiles, never 35-tile halo!) + measured peer_rtt_ms arcs only
+  const hostsLayers = buildQueryDrivenGlobeLayers([metalNet], [hostsQ], "legion-metal", false);
+  assert.equal(hostsLayers.h3Cells.length, 5, `expected exact 5 H3 tiles for 5 metal hosts, got ${hostsLayers.h3Cells.length}`);
+  assert.equal(hostsLayers.onlyMeasuredLinks, true);
+  assert.ok(hostsLayers.measuredArcCount >= 5, `expected real measured RTT arcs, got ${hostsLayers.measuredArcCount}`);
+  assert.match(hostsLayers.legend, /^H3: LOAD \(5\) · ARCS: \d+ RTT$/);
+
+  const arcs = buildBundledPingArcs(hostsLayers.arcNodes, 2.8, {
+    segments: 24,
+    onlyMeasuredLinks: true,
+  });
+  assert.equal(arcs.length, hostsLayers.measuredArcCount);
   for (const arc of arcs) {
     assert.equal(arc.points.length, 25);
     const mid = arc.points[12];
@@ -317,6 +345,33 @@ test("metal-globe-h3-arcs: builds H3 telemetry cells and bundled atmospheric pin
       `expected metal ping arc ${arc.fromId}->${arc.toId} to curve into atmosphere (>2.82), got ${midRadius.toFixed(3)}`,
     );
   }
+
+  // Plugins query only -> cyan tile ONLY on plugin host (legion-metal), 0 RTT arcs
+  const pluginsLayers = buildQueryDrivenGlobeLayers([metalNet], [pluginsQ], "legion-metal", false);
+  assert.equal(pluginsLayers.h3Cells.length, 1);
+  assert.equal(pluginsLayers.h3Cells[0].colorHex, H3_LAYER_COLORS.plugins);
+  assert.deepEqual(pluginsLayers.h3Cells[0].hosts, ["legion-metal"]);
+  assert.equal(pluginsLayers.arcNodes.length, 0);
+  assert.equal(pluginsLayers.legend, "H3: PLUGINS (1) · NO RTT QUERY");
+
+  // Single host query -> exact 1 H3 tile for focused host + arcs focused on that host
+  const singleHostLayers = buildQueryDrivenGlobeLayers([metalNet], [hostQ], "mac-metal", false);
+  assert.equal(singleHostLayers.h3Cells.length, 1);
+  assert.deepEqual(singleHostLayers.h3Cells[0].hosts, ["mac-metal"]);
+  assert.equal(singleHostLayers.focusHostName, "mac-metal");
+  const focusedArcs = buildBundledPingArcs(singleHostLayers.arcNodes, 2.8, {
+    segments: 16,
+    onlyMeasuredLinks: true,
+    focusHostName: singleHostLayers.focusHostName,
+  });
+  assert.equal(focusedArcs.length, 2, "mac-metal has measured peer_rtt_ms to legion-metal and vm-us-metal only");
+
+  // Users & probes queries -> violet / green tiles driven strictly by real data
+  const usersLayers = buildQueryDrivenGlobeLayers([metalNet], [usersQ], "legion-metal", false);
+  assert.ok(usersLayers.h3Cells.every((c) => c.colorHex === H3_LAYER_COLORS.users));
+  const testsLayers = buildQueryDrivenGlobeLayers([metalNet], [testsQ], "legion-metal", false);
+  assert.equal(testsLayers.h3Cells.length, 5);
+  assert.ok(testsLayers.h3Cells.every((c) => c.colorHex === H3_LAYER_COLORS.probesPass));
 });
 
 test("metal-tiling-wm-rates: supports whole-app tiling defaults, 1|2 & 2x2 splits, globe pane, and best-effort rates", () => {
@@ -505,19 +560,17 @@ test("metal-live-daemon-8788: adapts real live metal channel daemon into globe H
     `expected distinct globe coordinates for all ${liveNet.hosts.length} live metal nodes, got ${coordSet.size}`,
   );
 
-  // Verify real H3 cells and bundled atmospheric ping arcs on real live metal nodes
-  const points = liveNet.hosts.map((h) => ({
-    id: h.name,
-    networkIndex: 0,
-    lat: h.lat,
-    lng: h.lng,
-    rttMs: h.rtt_ms ?? 25,
-  }));
-  const h3Cells = buildSimulatedH3DataCells(points, 3);
-  assert.ok(h3Cells.length >= liveNet.hosts.length);
+  // Verify query-driven H3 cells and real measured peer_rtt_ms arcs on live metal nodes
+  const liveQueries = createDefaultQuerySet([liveNet]);
+  const liveHostsQ = liveQueries.find((q) => q.kind === "hosts");
+  const liveLayers = buildQueryDrivenGlobeLayers([liveNet], [liveHostsQ], liveNet.hosts[0].name, false);
+  assert.ok(liveLayers.h3Cells.length >= 1 && liveLayers.h3Cells.length <= liveNet.hosts.length);
 
-  const arcs = buildBundledPingArcs(points, 2.8, { segments: 24 });
-  assert.ok(arcs.length >= 1, `expected bundled atmospheric ping arcs across live metal peers`);
+  const arcs = buildBundledPingArcs(liveLayers.arcNodes, 2.8, {
+    segments: 24,
+    onlyMeasuredLinks: true,
+  });
+  assert.ok(arcs.length >= 1, `expected real measured peer_rtt_ms arcs across live metal peers`);
   for (const arc of arcs) {
     const mid = arc.points[12];
     const r = Math.hypot(mid[0], mid[1], mid[2]);

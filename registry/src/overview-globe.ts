@@ -2,26 +2,18 @@ import { latLngToCell } from "h3-js";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import type { CameraTarget } from "./camera-policy";
+import { buildBundledPingArcs } from "./edge-bundling";
 import {
-  buildBundledPingArcs,
-  type GeoNodePoint,
-} from "./edge-bundling";
-import {
-  buildSimulatedH3DataCells,
   GeospatialH3Overlay,
-  SIMULATED_GEOSPATIAL_CLUSTERS,
+  type GlobeQueryLayers,
 } from "./h3-geodata";
 import { HexLayer } from "./hex-layer";
-import {
-  createHudAtmosphereMaterial,
-  createHudCloudMaterial,
-  createHudOutlineMaterial,
-} from "./hud-globe-materials";
+import { createHudOutlineMaterial } from "./hud-globe-materials";
 import {
   NODE_DOT_RADIUS_RATIO,
   nodeLoadColor,
 } from "./node-load";
-import type { NetworkNode, OverviewNetwork } from "./types";
+import type { NetworkNode } from "./types";
 
 const EARTH_RADIUS = 50;
 const DEG_TO_RAD = Math.PI / 180;
@@ -50,30 +42,22 @@ type ArcVisual = {
   material: THREE.ShaderMaterial;
 };
 
-export type OverviewGlobeOptions = {
-  includeSimulatedGeodata?: boolean;
-};
-
 export type OverviewGlobeController = {
   dispose: () => void;
   setCameraTarget: (target: CameraTarget | null) => void;
+  syncQueryLayers: (layers: GlobeQueryLayers) => void;
 };
 
 export async function mountOverviewGlobe(
   container: HTMLElement,
-  networks: OverviewNetwork[],
-  options: OverviewGlobeOptions = {},
+  initialLayers: GlobeQueryLayers,
 ): Promise<OverviewGlobeController> {
   const landCells = await loadLandCells();
-  const globe = new OverviewGlobe(
-    container,
-    networks,
-    landCells,
-    options.includeSimulatedGeodata ?? true,
-  );
+  const globe = new OverviewGlobe(container, initialLayers, landCells);
   return {
     dispose: () => globe.dispose(),
     setCameraTarget: (target) => globe.setCameraTarget(target),
+    syncQueryLayers: (layers) => globe.syncQueryLayers(layers),
   };
 }
 
@@ -110,8 +94,9 @@ class OverviewGlobe {
   });
   private readonly controls: OrbitControls;
   private readonly globe = new THREE.Group();
+  private readonly dynamicLayerGroup = new THREE.Group();
   private readonly hexLayer: HexLayer;
-  private readonly geoOverlay: GeospatialH3Overlay;
+  private geoOverlay: GeospatialH3Overlay | null = null;
   private readonly markers: MarkerVisual[] = [];
   private readonly arcs: ArcVisual[] = [];
   private readonly targetReticle: THREE.LineLoop<
@@ -120,7 +105,6 @@ class OverviewGlobe {
   >;
   private readonly resizeObserver: ResizeObserver;
   private limbMaterial!: THREE.ShaderMaterial;
-  private cloudMaterial!: THREE.ShaderMaterial;
   private readonly reducedMotion = window.matchMedia(
     "(prefers-reduced-motion: reduce)",
   ).matches;
@@ -135,12 +119,14 @@ class OverviewGlobe {
   private fromRotation = new THREE.Quaternion();
   private targetRotation = new THREE.Quaternion();
   private lastTargetKey = "";
+  private lastTarget: CameraTarget | null = null;
+  private lastLayerSignature = "";
+  private networkSlugs: string[] = [];
 
   constructor(
     private readonly container: HTMLElement,
-    private readonly networks: OverviewNetwork[],
+    initialLayers: GlobeQueryLayers,
     landCells: string[],
-    includeSimulatedGeodata: boolean,
   ) {
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -166,38 +152,7 @@ class OverviewGlobe {
     this.addEarth();
     this.hexLayer = new HexLayer(landCells, EARTH_RADIUS);
     this.globe.add(this.hexLayer.group);
-
-    const allGeoPoints: GeoNodePoint[] = [];
-    networks.forEach((network, networkIndex) => {
-      network.snapshot.nodes.forEach((node, nodeIndex) => {
-        this.addNode(node, network.slug, networkIndex, nodeIndex);
-        allGeoPoints.push({
-          id: `${network.slug}:${node.name}`,
-          networkIndex,
-          lat: node.lat,
-          lng: node.lng,
-          rttMs: node.rtt_ms ?? null,
-        });
-      });
-    });
-
-    if (includeSimulatedGeodata) {
-      SIMULATED_GEOSPATIAL_CLUSTERS.forEach((cluster) => {
-        this.addRelayMicroNode(cluster.lat, cluster.lng);
-        allGeoPoints.push({
-          id: cluster.id,
-          networkIndex: cluster.networkIndex % Math.max(1, networks.length),
-          lat: cluster.lat,
-          lng: cluster.lng,
-          rttMs: null,
-        });
-      });
-    }
-
-    const h3Cells = buildSimulatedH3DataCells(allGeoPoints, 3, includeSimulatedGeodata);
-    this.geoOverlay = new GeospatialH3Overlay(h3Cells, EARTH_RADIUS);
-    this.globe.add(this.geoOverlay.group);
-    this.addBundledPingArcs(allGeoPoints);
+    this.globe.add(this.dynamicLayerGroup);
 
     // Reticle ring highlighting any custom geolocation returned by the TS camera policy
     this.targetReticle = new THREE.LineLoop(
@@ -214,6 +169,8 @@ class OverviewGlobe {
     this.targetReticle.renderOrder = 7;
     this.globe.add(this.targetReticle);
 
+    this.syncQueryLayers(initialLayers);
+
     this.camera.position.set(0, 0, DEFAULT_CAMERA_DISTANCE);
     this.camera.lookAt(0, 0, 0);
     this.controls.target.set(0, 0, 0);
@@ -226,19 +183,56 @@ class OverviewGlobe {
   }
 
   /**
+   * Rebuilds data-driven globe overlays (node markers, exact query-driven H3
+   * tiles, and real measured RTT ping arcs) strictly when the active Query Set
+   * or underlying network telemetry changes. Preserves WebGL context & camera.
+   */
+  syncQueryLayers(layers: GlobeQueryLayers): void {
+    if (layers.signature === this.lastLayerSignature) return;
+    this.lastLayerSignature = layers.signature;
+
+    this.clearDynamicLayers();
+
+    const slugSet: string[] = [];
+    for (const marker of layers.markers) {
+      if (!slugSet.includes(marker.networkSlug)) {
+        slugSet.push(marker.networkSlug);
+      }
+      this.addNode(
+        marker.node,
+        marker.networkSlug,
+        marker.networkIndex,
+        marker.nodeIndex,
+      );
+    }
+    this.networkSlugs = slugSet;
+
+    if (layers.h3Cells.length > 0) {
+      this.geoOverlay = new GeospatialH3Overlay(layers.h3Cells, EARTH_RADIUS);
+      this.dynamicLayerGroup.add(this.geoOverlay.group);
+    }
+
+    if (layers.arcNodes.length >= 2) {
+      this.addBundledPingArcs(layers);
+    }
+
+    this.renderer.domElement.dataset.h3CellCount = String(layers.h3Cells.length);
+    this.renderer.domElement.dataset.arcCount = String(this.arcs.length);
+    this.renderer.domElement.dataset.activeLayers =
+      layers.activeLayers.join(",") || "none";
+
+    this.applyTargetHighlight(this.lastTarget);
+  }
+
+  /**
    * Direct policy-driven geolocation camera target: smoothly slerps the globe
    * to center (target.lat, target.lng) and highlights the target node/network.
    */
   setCameraTarget(target: CameraTarget | null): void {
+    this.lastTarget = target;
     if (!target) {
       this.targetReticle.visible = false;
-      this.markers.forEach((m) => {
-        m.active = false;
-        m.ring.visible = false;
-      });
-      this.arcs.forEach((a) => {
-        a.material.uniforms.uFocusGain.value = 0.85;
-      });
+      this.applyTargetHighlight(null);
       this.renderer.domElement.dataset.cameraTarget = "free";
       return;
     }
@@ -258,24 +252,7 @@ class OverviewGlobe {
     );
     this.targetReticle.visible = true;
 
-    const focusNetIdx = target.network
-      ? this.networks.findIndex((n) => n.slug === target.network)
-      : -1;
-
-    this.markers.forEach((marker) => {
-      const isMatch =
-        Boolean(target.node) &&
-        marker.nodeName === target.node &&
-        (!target.network || marker.networkSlug === target.network);
-      marker.active = isMatch;
-      marker.ring.visible = isMatch;
-      marker.mesh.material.color.copy(marker.baseColor);
-    });
-
-    this.arcs.forEach((arc) => {
-      arc.material.uniforms.uFocusGain.value =
-        focusNetIdx < 0 || arc.networkIndex === focusNetIdx ? 1.0 : 0.42;
-    });
+    this.applyTargetHighlight(target);
 
     if (key === this.lastTargetKey || this.userDragging) {
       return;
@@ -311,8 +288,8 @@ class OverviewGlobe {
     this.controls.removeEventListener("start", this.handleControlStart);
     this.controls.removeEventListener("end", this.handleControlEnd);
     this.controls.dispose();
+    this.clearDynamicLayers();
     this.hexLayer.dispose();
-    this.geoOverlay.dispose();
     this.scene.traverse((object) => {
       if (
         !(
@@ -331,6 +308,64 @@ class OverviewGlobe {
     });
     this.renderer.dispose();
     this.renderer.domElement.remove();
+  }
+
+  private clearDynamicLayers(): void {
+    if (this.geoOverlay) {
+      this.geoOverlay.dispose();
+      this.geoOverlay = null;
+    }
+    this.dynamicLayerGroup.traverse((object) => {
+      if (
+        !(
+          object instanceof THREE.Mesh ||
+          object instanceof THREE.Points ||
+          object instanceof THREE.Line
+        )
+      ) {
+        return;
+      }
+      object.geometry.dispose();
+      const materials = Array.isArray(object.material)
+        ? object.material
+        : [object.material];
+      materials.forEach((material) => material.dispose());
+    });
+    this.dynamicLayerGroup.clear();
+    this.markers.length = 0;
+    this.arcs.length = 0;
+  }
+
+  private applyTargetHighlight(target: CameraTarget | null): void {
+    if (!target) {
+      this.markers.forEach((m) => {
+        m.active = false;
+        m.ring.visible = false;
+      });
+      this.arcs.forEach((a) => {
+        a.material.uniforms.uFocusGain.value = 0.85;
+      });
+      return;
+    }
+
+    const focusNetIdx = target.network
+      ? this.networkSlugs.indexOf(target.network)
+      : -1;
+
+    this.markers.forEach((marker) => {
+      const isMatch =
+        Boolean(target.node) &&
+        marker.nodeName === target.node &&
+        (!target.network || marker.networkSlug === target.network);
+      marker.active = isMatch;
+      marker.ring.visible = isMatch;
+      marker.mesh.material.color.copy(marker.baseColor);
+    });
+
+    this.arcs.forEach((arc) => {
+      arc.material.uniforms.uFocusGain.value =
+        focusNetIdx < 0 || arc.networkIndex === focusNetIdx ? 1.0 : 0.42;
+    });
   }
 
   private addEarth(): void {
@@ -364,47 +399,16 @@ class OverviewGlobe {
       }),
     );
     this.globe.add(graticule);
-
-    this.cloudMaterial = createHudCloudMaterial();
-    const clouds = new THREE.Mesh(
-      new THREE.SphereGeometry(EARTH_RADIUS * 1.028, 40, 28),
-      this.cloudMaterial,
-    );
-    this.globe.add(clouds);
-
-    const atmosphere = new THREE.Mesh(
-      new THREE.SphereGeometry(EARTH_RADIUS * 1.055, 40, 28),
-      createHudAtmosphereMaterial(),
-    );
-    this.globe.add(atmosphere);
   }
 
-  private addRelayMicroNode(lat: number, lng: number): void {
-    const direction = latLngToVector(lat, lng, 1);
-    const position = direction
-      .clone()
-      .multiplyScalar(EARTH_RADIUS * 1.011);
-    const mesh = new THREE.Mesh(
-      new THREE.CircleGeometry(NODE_DOT_RADIUS * 0.52, 12),
-      new THREE.MeshBasicMaterial({
-        color: 0x66f2ff,
-        transparent: true,
-        opacity: 0.72,
-        side: THREE.DoubleSide,
-      }),
-    );
-    mesh.position.copy(position);
-    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), direction);
-    mesh.renderOrder = 4;
-    this.globe.add(mesh);
-  }
-
-  private addBundledPingArcs(geoPoints: GeoNodePoint[]): void {
-    const bundled = buildBundledPingArcs(geoPoints, EARTH_RADIUS, {
+  private addBundledPingArcs(layers: GlobeQueryLayers): void {
+    const bundled = buildBundledPingArcs(layers.arcNodes, EARTH_RADIUS, {
       segments: 44,
       beta: 0.74,
       forceIterations: 2,
       maxPairsPerNetwork: 34,
+      onlyMeasuredLinks: layers.onlyMeasuredLinks,
+      focusHostName: layers.focusHostName,
     });
 
     bundled.forEach((edge) => {
@@ -421,9 +425,9 @@ class OverviewGlobe {
       geometry.setAttribute("aProgress", new THREE.BufferAttribute(progress, 1));
 
       const colorHex =
-        edge.rttMs < 35
+        edge.rttMs < 50
           ? 0x4ef5b8
-          : edge.rttMs < 85
+          : edge.rttMs < 120
             ? 0x56d4ff
             : 0xffc966;
 
@@ -438,7 +442,7 @@ class OverviewGlobe {
         networkIndex: edge.networkIndex,
         material,
       });
-      this.globe.add(line);
+      this.dynamicLayerGroup.add(line);
     });
   }
 
@@ -501,7 +505,7 @@ class OverviewGlobe {
       baseColor: new THREE.Color(color),
       active: false,
     });
-    this.globe.add(mesh, ring);
+    this.dynamicLayerGroup.add(mesh, ring);
   }
 
   private updateCameraTransition(now: number): void {
@@ -559,8 +563,7 @@ class OverviewGlobe {
     const now = performance.now();
     this.updateCameraTransition(now);
     const timeSec = now / 1000;
-    this.cloudMaterial.uniforms.uTime.value = timeSec;
-    this.geoOverlay.updatePulse(timeSec);
+    this.geoOverlay?.updatePulse(timeSec);
     if (!this.reducedMotion) {
       for (let i = 0; i < this.arcs.length; i += 1) {
         this.arcs[i].material.uniforms.uTime.value = timeSec;
