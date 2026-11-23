@@ -17,7 +17,8 @@ import type { NetworkNode } from "./types";
 
 const EARTH_RADIUS = 50;
 const DEG_TO_RAD = Math.PI / 180;
-const DEFAULT_CAMERA_DISTANCE = EARTH_RADIUS * (9.2 / 2.8);
+const BASE_CAMERA_FOV = 34;
+const DEFAULT_CAMERA_DISTANCE = EARTH_RADIUS * 4.8;
 const TRANSITION_MS = 1_400;
 const NODE_DOT_RADIUS = EARTH_RADIUS * NODE_DOT_RADIUS_RATIO;
 const NODE_RING_RADIUS = EARTH_RADIUS * (0.12 / 2.8);
@@ -86,7 +87,7 @@ async function loadLandCells(): Promise<string[]> {
 
 class OverviewGlobe {
   private readonly scene = new THREE.Scene();
-  private readonly camera = new THREE.PerspectiveCamera(34, 1, 0.05, 1000);
+  private readonly camera = new THREE.PerspectiveCamera(BASE_CAMERA_FOV, 1, 0.05, 1000);
   private readonly renderer = new THREE.WebGLRenderer({
     antialias: true,
     alpha: true,
@@ -142,7 +143,7 @@ class OverviewGlobe {
     this.controls.dampingFactor = 0.055;
     this.controls.enablePan = false;
     this.controls.minDistance = 118;
-    this.controls.maxDistance = 260;
+    this.controls.maxDistance = 420;
     this.controls.rotateSpeed = 0.42;
     this.controls.zoomSpeed = 0.68;
     this.controls.addEventListener("start", this.handleControlStart);
@@ -262,7 +263,7 @@ class OverviewGlobe {
     const desiredRot = targetQuaternionForDirection(direction);
     const desiredDist =
       typeof target.distance === "number"
-        ? THREE.MathUtils.clamp(target.distance, 120, 240)
+        ? THREE.MathUtils.clamp(target.distance, 120, 380)
         : DEFAULT_CAMERA_DISTANCE;
 
     if (this.reducedMotion) {
@@ -552,7 +553,17 @@ class OverviewGlobe {
   private resize(): void {
     const width = Math.max(this.container.clientWidth, 1);
     const height = Math.max(this.container.clientHeight, 1);
-    this.camera.aspect = width / height;
+    const aspect = width / height;
+    this.camera.aspect = aspect;
+    if (aspect < 1) {
+      // Keep the full globe unclipped horizontally inside tall split panes.
+      const halfRad = THREE.MathUtils.degToRad(BASE_CAMERA_FOV / 2);
+      const fitFov =
+        2 * THREE.MathUtils.radToDeg(Math.atan(Math.tan(halfRad) / aspect));
+      this.camera.fov = Math.min(fitFov, 58);
+    } else {
+      this.camera.fov = BASE_CAMERA_FOV;
+    }
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height, false);
     this.limbMaterial.uniforms.uResolution.value.set(width, height);
