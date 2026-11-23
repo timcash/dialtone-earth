@@ -1,5 +1,51 @@
 ![Dialtone logo](docs/dialtone-logo.svg)
 
+# Dialtone Earth
+
+## Template CLI & Test Dashboard
+
+This repository follows the `timcash/template` single-CLI + Vite test dashboard layout at the repository root (`go.mod`, `cli.go`, `test_runs.go`, `cli_test.go`, `ui/`). The root Go CLI uses only the Go standard library and records immutable per-run logs in `logs/<test-id>.json` and `logs/<test-id>.log` alongside `logs/state.json`.
+
+### Install the CLI (single command)
+
+Install the `dialtone-earth` binary into `~/.local/bin` (macOS/Linux) or `%USERPROFILE%\.local\bin` (Windows) without changing shell profiles or system `PATH`:
+
+**macOS / Linux:**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/timcash/dialtone-earth/main/install.sh | sh
+```
+
+**Windows PowerShell:**
+
+```powershell
+irm https://raw.githubusercontent.com/timcash/dialtone-earth/main/install.ps1 | iex
+```
+
+### CLI Actions
+
+Run from the repository root with `./dialtone-earth.sh <action>` (macOS/Linux), `.\dialtone-earth.ps1 <action>` (Windows PowerShell), or `go run . <action>`:
+
+```sh
+go run . help                         # commands and flags
+go run . install                      # project dependencies
+go run . lint                         # Go and TypeScript checks
+go run . format                       # format Go sources
+go run . build                        # Go CLI binary and web UI
+go run . auth status --json           # nonsecret auth state
+go run . auth help                    # auth contract and exit codes
+go run . test                         # run and record all tests
+go run . test --list                  # list without running
+go run . test --filter TestDialtoneEarth
+go run . dev --port 5174              # local test dashboard (http://127.0.0.1:5174/)
+go run . deploy                       # LOCAL bundle in deploy/local only
+go run . clean                        # generated artifacts; retains run logs
+```
+
+Open `http://127.0.0.1:5174/` after running `dev` to view the test dashboard. Visiting the page does not start tests until **Start tests** is clicked. `auth status` is provider-neutral and defaults to `not_configured` (exit `1`) without reading credentials or contacting the network.
+
+---
+
 # Dialtone
 
 Dialtone is a task-first plugin runtime.

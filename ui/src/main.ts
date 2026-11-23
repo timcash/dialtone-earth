@@ -1,0 +1,205 @@
+import "./style.css";
+import { elapsedSeconds, normalizeStatus, statusLabel, testLogHref } from "./model.js";
+
+type TestRow = {
+  name: string;
+  title: string;
+  status: string;
+  elapsed: string;
+  timestamp: string;
+  "test-id"?: string;
+};
+
+type TestRun = TestRow & {
+  "test-id": string;
+  command: string;
+  log: string;
+  artifact?: string;
+  completed_at?: string;
+};
+
+const appElement = document.querySelector<HTMLElement>("#app");
+if (!appElement) {
+  throw new Error("missing #app");
+}
+const app: HTMLElement = appElement;
+
+let tests: TestRow[] = [];
+let loaded = false;
+let errorMessage = "";
+let starting = false;
+
+function render(): void {
+  const passed = tests.filter((test) => normalizeStatus(test.status) === "pass").length;
+  const failed = tests.filter((test) => normalizeStatus(test.status) === "fail").length;
+  const running = tests.some((test) => normalizeStatus(test.status) === "running");
+
+  app.innerHTML = `
+    <main>
+      <header>
+        <p class="eyebrow">Dialtone Earth</p>
+        <section class="heading-row">
+          <div>
+            <h1>Tests</h1>
+          </div>
+          <button data-testid="start-tests" type="button" ${starting || running ? "disabled" : ""}>
+            ${starting ? "Starting…" : running ? "Running…" : "Start tests"}
+          </button>
+        </section>
+        <section class="summary" aria-label="Test summary">
+          <span><strong>${tests.length}</strong> total</span>
+          <span class="passed"><strong>${passed}</strong> passed</span>
+          <span class="${failed > 0 ? "failed" : ""}"><strong>${failed}</strong> failed</span>
+        </section>
+        ${errorMessage ? `<p class="error" role="alert">${escapeHtml(errorMessage)}</p>` : ""}
+      </header>
+      <section class="test-list" aria-label="Tests">
+        ${tests.length > 0 ? tests.map(renderTest).join("") : `<p class="empty">${loaded ? "No tests listed yet. Press Start tests." : "Loading tests…"}</p>`}
+      </section>
+    </main>
+  `;
+
+  const startButton = app.querySelector<HTMLButtonElement>("[data-testid='start-tests']");
+  startButton?.addEventListener("click", () => {
+    startAllTests().catch(showError);
+  });
+}
+
+function renderTest(test: TestRow): string {
+  const status = normalizeStatus(test.status);
+  const elapsed = elapsedSeconds(test).toFixed(2);
+  const logHref = testLogHref(test["test-id"], import.meta.env.BASE_URL);
+  return `
+    <article class="test-card ${status}" data-status="${status}" data-testid="test-row">
+      <section class="test-copy">
+        <h2>${escapeHtml(test.title)}</h2>
+        <code>${escapeHtml(test.name)}</code>
+      </section>
+      <section class="result" aria-label="${escapeHtml(test.title)} result">
+        <strong>${statusLabel(test.status)}</strong>
+        <time>${elapsed}s</time>
+        ${logHref ? `<a data-testid="test-log-link" href="${escapeHtml(logHref)}" target="_blank" rel="noreferrer" aria-label="Log for ${escapeHtml(test.title)}">Log ↗</a>` : '<span class="no-log" title="Log available when this test starts">—</span>'}
+      </section>
+    </article>
+  `;
+}
+
+async function refreshTests(): Promise<void> {
+  const response = await fetch("/api/tests", { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`Could not load tests: HTTP ${response.status}`);
+  }
+  const payload = (await response.json()) as { tests?: TestRow[] };
+  if (!Array.isArray(payload.tests)) {
+    throw new Error("Could not load tests: malformed response");
+  }
+  const changed = !loaded || JSON.stringify(tests) !== JSON.stringify(payload.tests) || errorMessage !== "";
+  tests = payload.tests;
+  loaded = true;
+  errorMessage = "";
+  if (changed) render();
+}
+
+async function startAllTests(): Promise<void> {
+  starting = true;
+  errorMessage = "";
+  render();
+  const response = await fetch("/api/tests/run", { method: "POST" });
+  const payload = (await response.json()) as { error?: string };
+  starting = false;
+  if (!response.ok) {
+    throw new Error(payload.error || `Could not start tests: HTTP ${response.status}`);
+  }
+  await refreshTests();
+}
+
+function showError(error: unknown): void {
+  starting = false;
+  errorMessage = error instanceof Error ? error.message : String(error);
+  render();
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => {
+    const entities: Record<string, string> = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#039;",
+    };
+    return entities[character] ?? character;
+  });
+}
+
+let renderedRun = "";
+
+function runDetails(run: TestRun): string {
+  const details = [
+    ["test-id", `<code data-testid="test-run-id">${escapeHtml(run["test-id"])}</code>`],
+    ["Go test", `<code>${escapeHtml(run.name)}</code>`],
+    ["Status", statusLabel(run.status)],
+    ["Elapsed", `<span data-testid="test-run-elapsed">${elapsedSeconds(run).toFixed(2)}s</span>`],
+    ["Started", `<time>${escapeHtml(run.timestamp)}</time>`],
+    ...(run.completed_at ? [["Finished", `<time>${escapeHtml(run.completed_at)}</time>`]] : []),
+    ...(run.artifact ? [["Log file", `<code>${escapeHtml(run.artifact)}</code>`]] : []),
+  ];
+  return details.map(([label, value]) => `<dt>${label}</dt><dd>${value}</dd>`).join("");
+}
+
+async function refreshLogPage(testId: string): Promise<void> {
+  const response = await fetch(`/api/test-runs/${encodeURIComponent(testId)}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(response.status === 404 ? "This test run could not be found." : `Could not load log: HTTP ${response.status}`);
+  const { run } = (await response.json()) as { run: TestRun };
+  const serialized = JSON.stringify(run);
+  if (renderedRun === serialized) {
+    const elapsed = app.querySelector('[data-testid="test-run-elapsed"]');
+    if (elapsed && run.status === "running") elapsed.textContent = `${elapsedSeconds(run).toFixed(2)}s`;
+    return;
+  }
+  renderedRun = serialized;
+  app.innerHTML = `
+    <main class="log-page">
+      <header>
+        <p><a href="${import.meta.env.BASE_URL}">← All tests</a></p>
+        <p class="eyebrow">Dialtone Earth / test run</p>
+        <h1>${escapeHtml(run.title)}</h1>
+        <dl class="run-details">${runDetails(run)}</dl>
+        <h2>Rerun this test</h2>
+        <pre class="command" data-testid="test-run-command"><code>${escapeHtml(run.command)}</code></pre>
+        <a href="/api/test-runs/${encodeURIComponent(testId)}/log" target="_blank" rel="noreferrer">Raw log</a>
+      </header>
+      <h2>Output</h2>
+      <pre class="log-output" data-testid="test-log-output" aria-label="Test run output">${escapeHtml(run.log || "Waiting for output…")}</pre>
+    </main>`;
+}
+
+if (location.pathname.replace(/\/$/, "").endsWith("/logs")) {
+  const testId = new URLSearchParams(location.search).get("test-id") || "";
+  if (!testLogHref(testId)) {
+    app.innerHTML = `<main><a href="${import.meta.env.BASE_URL}">← All tests</a><p role="alert">A valid test-id is required.</p></main>`;
+  } else {
+    app.innerHTML = "<main><p>Loading test run…</p></main>";
+    const refresh = () =>
+      refreshLogPage(testId).catch((error: unknown) => {
+        renderedRun = "";
+        app.innerHTML = `<main><a href="${import.meta.env.BASE_URL}">← All tests</a><p role="alert">${escapeHtml(error instanceof Error ? error.message : String(error))}</p></main>`;
+      });
+    void refresh();
+    setInterval(refresh, 500);
+  }
+} else {
+  render();
+  refreshTests().catch(showError);
+  setInterval(() => {
+    refreshTests().catch(showError);
+  }, 500);
+  setInterval(() => {
+    const rows = app.querySelectorAll<HTMLElement>('[data-testid="test-row"]');
+    tests.forEach((test, index) => {
+      if (normalizeStatus(test.status) !== "running") return;
+      const time = rows[index]?.querySelector("time");
+      if (time) time.textContent = `${elapsedSeconds(test).toFixed(2)}s`;
+    });
+  }, 100);
+}
