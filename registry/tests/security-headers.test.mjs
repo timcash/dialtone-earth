@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -45,3 +45,63 @@ test("wrangler serves real 404 pages for unknown paths instead of SPA fallback",
   );
   assert.match(notFoundHtml, /404/i);
 });
+
+test("public apex ships zero static network snapshots and never fetches /networks/ anonymously", async () => {
+  await assert.rejects(
+    access(path.join(registryRoot, "public", "networks")),
+    { code: "ENOENT" },
+    "registry/public/networks must not exist on the public apex (#374)",
+  );
+
+  const mainTs = await readFile(
+    path.join(registryRoot, "src", "main.ts"),
+    "utf8",
+  );
+  assert.doesNotMatch(
+    mainTs,
+    /\/networks\//,
+    "public main.ts must not fetch /networks/ anonymously",
+  );
+  assert.doesNotMatch(
+    mainTs,
+    /\/n\//,
+    "public main.ts must not serve anonymous /n/<network> routes",
+  );
+
+  const publicFiles = await listFiles(path.join(registryRoot, "public"));
+  for (const file of publicFiles) {
+    if (file.endsWith(".json") && !file.endsWith("land.h3.json")) {
+      assert.fail(`unexpected public JSON data file shipped on apex: ${file}`);
+    }
+    if (file.endsWith(".html") || file.endsWith("_headers") || file.endsWith(".svg")) {
+      const content = await readFile(file, "utf8");
+      for (const forbidden of [
+        "metal.json",
+        "grok-bot-metal",
+        "legion-metal",
+        "vm-us",
+        "vm-eu",
+        "vm-asia",
+      ]) {
+        assert.ok(
+          !content.includes(forbidden),
+          `public asset ${file} leaks private identifier ${forbidden}`,
+        );
+      }
+    }
+  }
+});
+
+async function listFiles(dir) {
+  const entries = await readdir(dir, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await listFiles(full)));
+    } else {
+      files.push(full);
+    }
+  }
+  return files;
+}
