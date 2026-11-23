@@ -10,8 +10,13 @@ export interface GatewayEnv {
   ACCESS_AUD_MAP?: string;
   /** JSON map of exact hostname -> enrolled Dialtone v0.5.5 origin URL(s) */
   MESH_ORIGINS_MAP?: string;
+  /** Optional origin URL serving timcash/template /api/tests & /api/test-runs */
+  TEST_DASHBOARD_ORIGIN?: string;
   /** Optional bearer token sent to enrolled Dialtone origin API */
   MESH_ORIGIN_TOKEN?: string;
+  /** Optional explicit login/logout paths exposed to the UI */
+  ACCESS_LOGIN_URL?: string;
+  ACCESS_LOGOUT_URL?: string;
 }
 
 export interface AccessVerificationResult {
@@ -43,6 +48,7 @@ export const SECURITY_HEADERS: Record<string, string> = {
 /** Read-only allowlist mapping gateway routes to real Dialtone v0.5.5 + template endpoints. */
 const ALLOWED_MESH_ROUTES: Record<string, string> = {
   "/api/mesh/state": "/api/mesh",
+  "/api/mesh/full-state": "/api/state",
   "/api/mesh/details": "/api/details",
   "/api/mesh/plugins": "/api/plugins",
   "/api/mesh/shell/sessions": "/api/shell/sessions",
@@ -93,6 +99,9 @@ export async function handleGatewayRequest(
     auth = { valid: false, reason: "host_not_enrolled" };
   }
 
+  const loginUrl = (env.ACCESS_LOGIN_URL ?? "").trim() || null;
+  const logoutUrl = (env.ACCESS_LOGOUT_URL ?? "/cdn-cgi/access/logout").trim();
+
   if (url.pathname === "/api/session") {
     if (auth.valid && origins.length > 0) {
       return jsonResponse(
@@ -104,6 +113,8 @@ export async function handleGatewayRequest(
           subject: auth.subject ?? "verified-user",
           origin_count: origins.length,
           gateway: "cloudflare-access",
+          login_url: loginUrl,
+          logout_url: logoutUrl,
         },
         200,
       );
@@ -115,6 +126,8 @@ export async function handleGatewayRequest(
         network: null,
         hostname: host,
         gateway: "cloudflare-access",
+        login_url: loginUrl,
+        logout_url: logoutUrl,
         capabilities: [
           "tour",
           "networks",
@@ -156,8 +169,16 @@ export async function handleGatewayRequest(
     );
   }
 
+  const isTestRoute =
+    url.pathname === "/api/mesh/tests" ||
+    url.pathname.startsWith("/api/mesh/test-runs/");
+  const targetOrigins =
+    isTestRoute && env.TEST_DASHBOARD_ORIGIN?.trim()
+      ? [env.TEST_DASHBOARD_ORIGIN.trim(), ...origins]
+      : origins;
+
   return proxyToEnrolledOrigins(
-    origins,
+    targetOrigins,
     upstreamPath,
     env.MESH_ORIGIN_TOKEN,
     fetchImpl,
