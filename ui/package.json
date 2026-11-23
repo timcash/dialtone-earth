@@ -1,0 +1,17 @@
+{
+  "name": "dialtone-earth-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "lint": "tsc --noEmit --pretty false",
+    "test": "node --test test/*.test.mjs && tsc --noEmit --pretty false"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5"
+  }
+}
