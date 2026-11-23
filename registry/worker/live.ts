@@ -191,13 +191,25 @@ export async function handleLiveRoute(
       ? await env.DIALTONE_AUTH_TOKENS.get(LIVE_STATE_KV_KEY)
       : null;
     const state = sanitizeStoredState(raw);
+    const etag = `"live-rev-${state.revision}"`;
+    const ifNoneMatch = (request.headers.get("If-None-Match") ?? "").trim();
+    const normalizedTag = ifNoneMatch.replace(/^W\//i, "");
+    if (normalizedTag && normalizedTag === etag) {
+      const headers = new Headers(securityHeaders);
+      headers.set("ETag", etag);
+      headers.set("Cache-Control", "no-store");
+      return new Response(null, { status: 304, headers });
+    }
     if (request.method === "HEAD") {
       const headers = new Headers(securityHeaders);
       headers.set("Content-Type", "application/json; charset=utf-8");
+      headers.set("ETag", etag);
       headers.set("Cache-Control", "no-store");
       return new Response(null, { status: 200, headers });
     }
-    return liveJsonResponse(state, 200, securityHeaders);
+    const resp = liveJsonResponse(state, 200, securityHeaders);
+    resp.headers.set("ETag", etag);
+    return resp;
   }
 
   if (

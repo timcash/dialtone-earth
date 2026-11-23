@@ -2,12 +2,17 @@ import "./hud.css";
 import { aggregateNetwork } from "./aggregates";
 import { adaptLiveMeshToNetwork } from "./live-adapter";
 import {
+  computeAdaptivePollMs,
+  formatCadenceLabel,
+  liveEndpointForQuery,
+  type TableQuery,
+} from "./mesh-cadence";
+import {
   SIMULATED_NETWORKS,
   SIMULATED_TOUR_STEPS,
   summarizeSystemResources,
   type MeshHost,
   type MeshNetwork,
-  type NetworkFocusTab,
   type SimTestRun,
   type TourStep,
   type TourView,
@@ -44,23 +49,37 @@ type LiveSiteState = {
 type AppState = {
   session: SessionInfo;
   liveSite: LiveSiteState | null;
+  liveEtag: string | null;
   networks: MeshNetwork[];
   tourSteps: TourStep[];
-  view: TourView;
+  query: TableQuery;
   networkSlug: string;
   hostName: string;
-  networkTab: NetworkFocusTab;
   testId: string;
   tourPlaying: boolean;
+  tourCaptionsVisible: boolean;
   tourStepIndex: number;
   liveError: string | null;
   loadedLogCache: Record<string, SimTestRun>;
-  shellFilterNode: string;
+  unchangedStreak: number;
+  notModifiedCount: number;
+  currentPollMs: number | null;
+  lastMeshHash: string | null;
+  liveRawCache: Record<string, Record<string, unknown> | null>;
 };
 
 const TOUR_INTERVAL_MS = 6_500;
 const PRESENCE_INTERVAL_MS = 30_000;
-const LIVE_POLL_INTERVAL_MS = 1_500;
+
+const QUERY_TABS: Array<{ id: TableQuery; label: string }> = [
+  { id: "networks", label: "networks" },
+  { id: "hosts", label: "hosts" },
+  { id: "plugins", label: "plugins" },
+  { id: "users", label: "users" },
+  { id: "recovery", label: "recovery" },
+  { id: "tests", label: "tests" },
+  { id: "log", label: "log" },
+];
 
 const appElement = document.querySelector<HTMLDivElement>("#app");
 if (!appElement) throw new Error("Missing app root");
@@ -74,26 +93,31 @@ const state: AppState = {
     gateway: "cloudflare-access",
   },
   liveSite: null,
+  liveEtag: null,
   networks: SIMULATED_NETWORKS,
   tourSteps: SIMULATED_TOUR_STEPS,
-  view: "overview",
+  query: "networks",
   networkSlug: SIMULATED_NETWORKS[0].slug,
   hostName: SIMULATED_NETWORKS[0].hosts[0].name,
-  networkTab: "hosts",
   testId:
     SIMULATED_NETWORKS[0].tests[4]?.testId ??
     SIMULATED_NETWORKS[0].tests[0].testId,
   tourPlaying: true,
+  tourCaptionsVisible: true,
   tourStepIndex: 0,
   liveError: null,
   loadedLogCache: {},
-  shellFilterNode: "all",
+  unchangedStreak: 0,
+  notModifiedCount: 0,
+  currentPollMs: 2_000,
+  lastMeshHash: null,
+  liveRawCache: {},
 };
 
 let globeController: OverviewGlobeController | null = null;
 let tourTimer: number | null = null;
 let presenceTimer: number | null = null;
-let livePollTimer: number | null = null;
+let adaptivePollTimer: number | null = null;
 
 void boot();
 
@@ -106,21 +130,14 @@ async function boot(): Promise<void> {
   state.session = await detectSession();
   if (state.session.authenticated && state.session.mode === "live") {
     state.tourPlaying = false;
-    const liveNetwork = await loadLiveNetwork(state.session);
-    if (liveNetwork) {
-      state.networks = [liveNetwork];
-      state.networkSlug = liveNetwork.slug;
-      state.hostName = liveNetwork.hosts[0]?.name ?? "";
-      state.testId = liveNetwork.tests[0]?.testId ?? "";
-      state.tourSteps = buildLiveTourSteps(liveNetwork);
-      state.tourStepIndex = 0;
-    }
+    state.tourCaptionsVisible = false;
+    await syncActiveLiveQuery(true);
   } else {
-    await pollLiveSiteState(true);
+    await syncPublicLiveControl(true);
   }
 
   mountShell();
-  renderPanels();
+  renderAll();
 
   const stage = app.querySelector<HTMLElement>(".globe-stage");
   if (stage) {
@@ -133,9 +150,20 @@ async function boot(): Promise<void> {
     syncGlobeFocus();
   }
 
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      clearAdaptivePollTimer();
+      state.currentPollMs = null;
+      renderAll();
+    } else {
+      state.unchangedStreak = 0;
+      void runAdaptiveMeshTick();
+    }
+  });
+
   startTourTimer();
   startPresenceHeartbeat();
-  startLiveSitePolling();
+  scheduleNextAdaptivePoll();
 }
 
 async function detectSession(): Promise<SessionInfo> {
@@ -171,134 +199,206 @@ async function detectSession(): Promise<SessionInfo> {
   };
 }
 
-async function loadLiveNetwork(
-  session: SessionInfo,
-): Promise<MeshNetwork | null> {
-  try {
-    const [mesh, plugins, sessions, processes, probe, fullState, tests, users] =
-      await Promise.all([
-        fetchOptionalJson("/api/mesh/state"),
-        fetchOptionalJson("/api/mesh/plugins"),
-        fetchOptionalJson("/api/mesh/shell/sessions"),
-        fetchOptionalJson("/api/mesh/processes"),
-        fetchOptionalJson("/api/mesh/probe"),
-        fetchOptionalJson("/api/mesh/full-state"),
-        fetchOptionalJson("/api/mesh/tests"),
-        fetchOptionalJson("/api/mesh/users"),
-      ]);
-    if (!mesh) {
-      state.liveError =
-        "Authenticated session active, but enrolled Dialtone origin did not return /api/mesh/state.";
-      return null;
+function viewToQuery(view: TourView, networkTab?: string): TableQuery {
+  switch (view) {
+    case "overview":
+      return "networks";
+    case "network":
+      if (networkTab === "plugins") return "plugins";
+      if (networkTab === "recovery") return "recovery";
+      return "hosts";
+    case "host":
+      return "host";
+    case "users":
+      return "users";
+    case "tests":
+      return "tests";
+    case "log":
+      return "log";
+  }
+}
+
+function queryToPresenceView(query: TableQuery): TourView {
+  switch (query) {
+    case "networks":
+      return "overview";
+    case "hosts":
+    case "plugins":
+    case "recovery":
+      return "network";
+    case "host":
+      return "host";
+    case "users":
+      return "users";
+    case "tests":
+      return "tests";
+    case "log":
+      return "log";
+  }
+}
+
+/**
+ * Single-query-only live mesh sync: fetches ONLY the endpoint backing the
+ * currently displayed table query instead of fanning out to all endpoints.
+ */
+async function syncActiveLiveQuery(initial = false): Promise<boolean> {
+  if (!state.session.authenticated || state.session.mode !== "live") {
+    return false;
+  }
+
+  if (state.query === "log" && state.testId && /^[a-f0-9]{32}$/.test(state.testId)) {
+    if (state.loadedLogCache[state.testId]) {
+      return false; // Immutable log already cached: zero network traffic.
     }
-    return adaptLiveMeshToNetwork({
-      hostname: session.hostname || window.location.hostname,
-      networkName: session.network ?? undefined,
-      currentUser: session.subject,
-      mesh,
-      plugins,
-      sessions,
-      processes,
-      probe,
-      fullState,
-      tests,
-      users,
-    });
-  } catch (error) {
-    state.liveError =
-      error instanceof Error ? error.message : "Failed to load live mesh data.";
-    return null;
+    const payload = await fetchOptionalJson(`/api/mesh/test-runs/${state.testId}`);
+    const run =
+      payload?.run && typeof payload.run === "object"
+        ? (payload.run as Record<string, unknown>)
+        : null;
+    if (!run) return false;
+    state.loadedLogCache[state.testId] = {
+      testId: state.testId,
+      name: typeof run.name === "string" ? run.name : state.testId,
+      title: typeof run.title === "string" ? run.title : state.testId,
+      status:
+        run.status === "pass" ||
+        run.status === "fail" ||
+        run.status === "running" ||
+        run.status === "skip"
+          ? run.status
+          : "pass",
+      elapsed: typeof run.elapsed === "string" ? run.elapsed : "0.00",
+      timestamp: typeof run.timestamp === "string" ? run.timestamp : "none",
+      completedAt:
+        typeof run.completed_at === "string" ? run.completed_at : "",
+      command:
+        typeof run.command === "string"
+          ? run.command
+          : `go run . test --filter "^${String(run.name ?? "")}$"`,
+      artifact:
+        typeof run.artifact === "string"
+          ? run.artifact
+          : `logs/${state.testId}.log`,
+      log: typeof run.log === "string" ? run.log : "(empty log)",
+    };
+    return true;
   }
-}
 
-async function reportLivePresence(): Promise<void> {
-  if (!state.session.authenticated || state.session.mode !== "live") return;
-  try {
-    await fetch("/api/mesh/presence", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      cache: "no-store",
-      body: JSON.stringify({
-        view: state.view,
-        node: state.view === "overview" ? null : state.hostName || null,
-      }),
-    });
-  } catch {
-    // Non-blocking heartbeat
+  const endpoint = liveEndpointForQuery(state.query, state.testId);
+  if (!endpoint) return false;
+
+  const payload = await fetchOptionalJson(endpoint);
+  if (!payload) {
+    if (initial && !state.liveRawCache["/api/mesh/state"]) {
+      state.liveError = `Authenticated session active, but ${endpoint} did not respond.`;
+    }
+    return false;
   }
-}
 
-async function refreshLiveUsers(): Promise<void> {
-  if (!state.session.authenticated || state.session.mode !== "live") return;
-  const payload = await fetchOptionalJson("/api/mesh/users");
-  if (!payload) return;
-  const net = activeNetwork();
+  state.liveError = null;
+  const serialized = JSON.stringify(payload);
+  const changed = serialized !== state.lastMeshHash;
+  state.lastMeshHash = serialized;
+  state.liveRawCache[endpoint] = payload;
+
+  const meshPayload =
+    state.liveRawCache["/api/mesh/state"] ??
+    (endpoint === "/api/mesh/state"
+      ? payload
+      : {
+          nodes: [],
+          mesh_config: { channel: state.session.network ?? "live" },
+        });
+
   const adapted = adaptLiveMeshToNetwork({
-    hostname: net.hostname,
-    networkName: net.slug,
+    hostname: state.session.hostname || window.location.hostname,
+    networkName: state.session.network ?? undefined,
     currentUser: state.session.subject,
-    mesh: { nodes: [], mesh_config: { channel: net.slug } },
-    users: payload,
+    mesh: meshPayload,
+    plugins: state.liveRawCache["/api/mesh/plugins"] ?? null,
+    sessions: state.liveRawCache["/api/mesh/shell/sessions"] ?? null,
+    processes: state.liveRawCache["/api/mesh/processes"] ?? null,
+    probe: state.liveRawCache["/api/mesh/probe"] ?? null,
+    fullState: state.liveRawCache["/api/mesh/full-state"] ?? null,
+    tests: state.liveRawCache["/api/mesh/tests"] ?? null,
+    users: state.liveRawCache["/api/mesh/users"] ?? null,
   });
-  net.users = adapted.users;
-  if (adapted.shellAuditLog.length > 0 || Array.isArray(payload.shell_audit_log)) {
-    net.shellAuditLog = adapted.shellAuditLog;
+
+  state.networks = [adapted];
+  state.networkSlug = adapted.slug;
+  if (!adapted.hosts.some((h) => h.name === state.hostName)) {
+    state.hostName = adapted.hosts[0]?.name ?? "";
   }
-  renderPanels();
+  if (!adapted.tests.some((t) => t.testId === state.testId)) {
+    state.testId = adapted.tests[0]?.testId ?? "";
+  }
+  state.tourSteps = buildLiveTourSteps(adapted);
+  return changed;
 }
 
-function startPresenceHeartbeat(): void {
-  if (presenceTimer !== null) {
-    window.clearInterval(presenceTimer);
-    presenceTimer = null;
-  }
-  if (!state.session.authenticated || state.session.mode !== "live") return;
-  void reportLivePresence();
-  presenceTimer = window.setInterval(() => {
-    if (document.hidden) return;
-    void reportLivePresence();
-    if (state.view === "users") {
-      void refreshLiveUsers();
+/**
+ * Public dialtone.earth live-control sync using ETag / If-None-Match (304 = 0 bytes).
+ */
+async function syncPublicLiveControl(initial = false): Promise<boolean> {
+  if (state.session.authenticated) return false;
+  try {
+    const headers: Record<string, string> = {};
+    if (state.liveEtag) {
+      headers["If-None-Match"] = state.liveEtag;
     }
-  }, PRESENCE_INTERVAL_MS);
-}
+    const response = await fetch("/api/live", {
+      headers,
+      cache: "no-store",
+      signal: AbortSignal.timeout(4_000),
+    });
+    if (response.status === 304) {
+      state.notModifiedCount += 1;
+      return false;
+    }
+    if (!response.ok) return false;
+    const etag = response.headers.get("ETag");
+    if (etag) state.liveEtag = etag;
+    const payload = (await response.json()) as Record<string, unknown>;
+    if (!payload || typeof payload.revision !== "number") return false;
+    const next: LiveSiteState = {
+      revision: Math.floor(payload.revision),
+      updated_at:
+        typeof payload.updated_at === "string" ? payload.updated_at : null,
+      updated_by:
+        typeof payload.updated_by === "string" ? payload.updated_by : null,
+      title: typeof payload.title === "string" ? payload.title : null,
+      badge: typeof payload.badge === "string" ? payload.badge : null,
+      banner: typeof payload.banner === "string" ? payload.banner : null,
+      headline: typeof payload.headline === "string" ? payload.headline : null,
+      subline: typeof payload.subline === "string" ? payload.subline : null,
+      theme:
+        payload.theme === "light" || payload.theme === "dark"
+          ? payload.theme
+          : null,
+      view:
+        payload.view === "overview" ||
+        payload.view === "network" ||
+        payload.view === "host" ||
+        payload.view === "users" ||
+        payload.view === "tests" ||
+        payload.view === "log"
+          ? payload.view
+          : null,
+      network: typeof payload.network === "string" ? payload.network : null,
+      tour_playing:
+        typeof payload.tour_playing === "boolean" ? payload.tour_playing : null,
+    };
 
-async function pollLiveSiteState(initial = false): Promise<void> {
-  if (state.session.authenticated) return;
-  const payload = await fetchOptionalJson("/api/live");
-  if (!payload || typeof payload.revision !== "number") return;
-  const next: LiveSiteState = {
-    revision: Math.floor(payload.revision),
-    updated_at: typeof payload.updated_at === "string" ? payload.updated_at : null,
-    updated_by: typeof payload.updated_by === "string" ? payload.updated_by : null,
-    title: typeof payload.title === "string" ? payload.title : null,
-    badge: typeof payload.badge === "string" ? payload.badge : null,
-    banner: typeof payload.banner === "string" ? payload.banner : null,
-    headline: typeof payload.headline === "string" ? payload.headline : null,
-    subline: typeof payload.subline === "string" ? payload.subline : null,
-    theme:
-      payload.theme === "light" || payload.theme === "dark"
-        ? payload.theme
-        : null,
-    view:
-      payload.view === "overview" ||
-      payload.view === "network" ||
-      payload.view === "host" ||
-      payload.view === "users" ||
-      payload.view === "tests" ||
-      payload.view === "log"
-        ? payload.view
-        : null,
-    network: typeof payload.network === "string" ? payload.network : null,
-    tour_playing:
-      typeof payload.tour_playing === "boolean" ? payload.tour_playing : null,
-  };
-  const changed =
-    state.liveSite === null || state.liveSite.revision !== next.revision;
-  if (!changed) return;
+    const changed =
+      state.liveSite === null || state.liveSite.revision !== next.revision;
+    if (!changed) return false;
 
-  state.liveSite = next;
-  applyLiveSiteState(next, initial);
+    state.liveSite = next;
+    applyLiveSiteState(next, initial);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function applyLiveSiteState(live: LiveSiteState, initial: boolean): void {
@@ -318,31 +418,99 @@ function applyLiveSiteState(live: LiveSiteState, initial: boolean): void {
     }
   }
   if (live.view) {
-    state.view = live.view;
+    state.query = viewToQuery(live.view);
   }
   if (typeof live.tour_playing === "boolean") {
     state.tourPlaying = live.tour_playing;
+    state.tourCaptionsVisible = live.tour_playing;
     if (!initial) {
       if (state.tourPlaying) startTourTimer();
       else clearTourTimer();
     }
   }
   if (!initial) {
-    renderPanels();
+    renderAll();
     syncGlobeFocus();
   }
 }
 
-function startLiveSitePolling(): void {
-  if (livePollTimer !== null) {
-    window.clearInterval(livePollTimer);
-    livePollTimer = null;
+function clearAdaptivePollTimer(): void {
+  if (adaptivePollTimer !== null) {
+    window.clearTimeout(adaptivePollTimer);
+    adaptivePollTimer = null;
   }
-  if (state.session.authenticated) return;
-  livePollTimer = window.setInterval(() => {
+}
+
+function scheduleNextAdaptivePoll(): void {
+  clearAdaptivePollTimer();
+  const nextMs = computeAdaptivePollMs({
+    unchangedStreak: state.unchangedStreak,
+    hidden: document.hidden,
+  });
+  state.currentPollMs = nextMs;
+  if (nextMs === null) return;
+  adaptivePollTimer = window.setTimeout(() => {
+    void runAdaptiveMeshTick();
+  }, nextMs);
+}
+
+async function runAdaptiveMeshTick(): Promise<void> {
+  if (document.hidden) {
+    state.currentPollMs = null;
+    return;
+  }
+  const changed = state.session.authenticated
+    ? await syncActiveLiveQuery(false)
+    : await syncPublicLiveControl(false);
+  if (changed) {
+    state.unchangedStreak = 0;
+  } else {
+    state.unchangedStreak += 1;
+  }
+  scheduleNextAdaptivePoll();
+  renderAll();
+}
+
+function triggerImmediateQuerySync(): void {
+  state.unchangedStreak = 0;
+  if (state.session.authenticated) {
+    void syncActiveLiveQuery(false).then(() => {
+      scheduleNextAdaptivePoll();
+      renderAll();
+    });
+  } else {
+    scheduleNextAdaptivePoll();
+  }
+}
+
+async function reportLivePresence(): Promise<void> {
+  if (!state.session.authenticated || state.session.mode !== "live") return;
+  try {
+    await fetch("/api/mesh/presence", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      body: JSON.stringify({
+        view: queryToPresenceView(state.query),
+        node: state.query === "networks" ? null : state.hostName || null,
+      }),
+    });
+  } catch {
+    // Non-blocking heartbeat
+  }
+}
+
+function startPresenceHeartbeat(): void {
+  if (presenceTimer !== null) {
+    window.clearInterval(presenceTimer);
+    presenceTimer = null;
+  }
+  if (!state.session.authenticated || state.session.mode !== "live") return;
+  void reportLivePresence();
+  presenceTimer = window.setInterval(() => {
     if (document.hidden) return;
-    void pollLiveSiteState(false);
-  }, LIVE_POLL_INTERVAL_MS);
+    void reportLivePresence();
+  }, PRESENCE_INTERVAL_MS);
 }
 
 async function fetchOptionalJson(
@@ -363,48 +531,9 @@ async function fetchOptionalJson(
   }
 }
 
-async function loadLiveTestRunLog(testId: string): Promise<void> {
-  if (!state.session.authenticated || !/^[a-f0-9]{32}$/.test(testId)) return;
-  if (state.loadedLogCache[testId]) return;
-  const payload = await fetchOptionalJson(`/api/mesh/test-runs/${testId}`);
-  const run =
-    payload?.run && typeof payload.run === "object"
-      ? (payload.run as Record<string, unknown>)
-      : null;
-  if (!run) return;
-  state.loadedLogCache[testId] = {
-    testId,
-    name: typeof run.name === "string" ? run.name : testId,
-    title: typeof run.title === "string" ? run.title : testId,
-    status:
-      run.status === "pass" ||
-      run.status === "fail" ||
-      run.status === "running" ||
-      run.status === "skip"
-        ? run.status
-        : "pass",
-    elapsed: typeof run.elapsed === "string" ? run.elapsed : "0.00",
-    timestamp: typeof run.timestamp === "string" ? run.timestamp : "none",
-    completedAt:
-      typeof run.completed_at === "string" ? run.completed_at : "",
-    command:
-      typeof run.command === "string"
-        ? run.command
-        : `go run . test --filter "^${String(run.name ?? "")}$"`,
-    artifact:
-      typeof run.artifact === "string" ? run.artifact : `logs/${testId}.log`,
-    log: typeof run.log === "string" ? run.log : "(empty log)",
-  };
-  renderPanels();
-}
-
 function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
   const firstHost = net.hosts[0]?.name ?? null;
   const firstTestId = net.tests[0]?.testId;
-  const authLabel =
-    state.session.gateway === "dialtone-magic-link"
-      ? "dialtone.earth email link"
-      : "Cloudflare Access";
   return [
     {
       id: "live-overview",
@@ -412,18 +541,18 @@ function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
       view: "overview",
       networkSlug: net.slug,
       hostName: null,
-      headline: `Live Authenticated Mesh: ${net.slug} (${net.hosts.length} peers)`,
-      caption: `Signed in as ${state.session.subject ?? "verified user"} via ${authLabel}. Displaying real live Dialtone v${net.snapshot.latest_release} telemetry using the exact same UI model as the signed-out simulated tour.`,
+      headline: `Live mesh ${net.slug} (${net.hosts.length} peers)`,
+      caption: `Single-query gossip telemetry for ${net.slug} at minimal adaptive base traffic.`,
     },
     {
-      id: "live-network",
-      label: "LIVE NETWORK",
+      id: "live-hosts",
+      label: "LIVE HOSTS",
       view: "network",
       networkSlug: net.slug,
       hostName: null,
       networkTab: "hosts",
-      headline: `Live Network: ${net.slug} (${net.channelFingerprint})`,
-      caption: `Real allowlisted Dialtone peers, OS/arch versions, neighbor RTTs, and continuous probe status across ${net.hosts.length} live nodes.`,
+      headline: `Live peers on ${net.slug}`,
+      caption: `Active Dialtone peers, OS/arch versions, CPU/RAM load, RTTs, and probes.`,
     },
     {
       id: "live-host",
@@ -431,9 +560,8 @@ function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
       view: "host",
       networkSlug: net.slug,
       hostName: firstHost,
-      headline: `Live Host: ${firstHost ?? "origin"}`,
-      caption:
-        "Live CPU, RAM, Disk, supervised blob processes, iroh-blobs store, and persistent dialtone/shell/1 sessions.",
+      headline: `Inspecting host ${firstHost ?? "origin"}`,
+      caption: `Per-host compute telemetry, blob store, and persistent dialtone/shell/1 sessions.`,
     },
     {
       id: "live-users",
@@ -441,9 +569,8 @@ function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
       view: "users",
       networkSlug: net.slug,
       hostName: null,
-      headline: `Signed-In Users & Redacted Shell Log (${net.users.length} active)`,
-      caption:
-        "Logged-in members for this private network, active locations, viewed nodes, and shared dialtone-shell log with keys and passwords redacted.",
+      headline: `Active members on ${net.slug}`,
+      caption: `Signed-in network presence and redacted dialtone-shell audit log.`,
     },
     {
       id: "live-tests",
@@ -451,9 +578,8 @@ function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
       view: "tests",
       networkSlug: net.slug,
       hostName: null,
-      headline: `Live Recorded Test Suite (${net.tests.length} runs)`,
-      caption:
-        "Immutable per-execution test records served through the authenticated Cloudflare gateway.",
+      headline: `Recorded tests (${net.tests.length})`,
+      caption: `Immutable per-run test results fetched on demand.`,
     },
     ...(firstTestId
       ? [
@@ -464,9 +590,8 @@ function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
             networkSlug: net.slug,
             hostName: null,
             testId: firstTestId,
-            headline: `Live Immutable Execution Log (${firstTestId.slice(0, 12)}…)`,
-            caption:
-              "Per-run immutable log artifact fetched live through /api/mesh/test-runs/<test-id>.",
+            headline: `Immutable log ${firstTestId.slice(0, 10)}`,
+            caption: `Cached once per test-id so repeat reads send zero network traffic.`,
           },
         ]
       : []),
@@ -476,14 +601,15 @@ function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
 function mountShell(): void {
   document.title = state.session.authenticated
     ? `dialtone.earth — live ${state.networkSlug} mesh`
-    : "dialtone.earth — simulated system tour";
+    : state.liveSite?.title
+      ? `${state.liveSite.title} — dialtone.earth`
+      : "dialtone.earth — simulated system tour";
   app.innerHTML = `
-    <main class="hud-shell overview-page sim-shell">
+    <main class="hud-shell earth-minimal-shell">
       <div class="globe-stage"></div>
       <div class="scene-shade" aria-hidden="true"></div>
-      <div class="sim-top-chrome" id="sim-top-chrome"></div>
-      <section class="sim-drawer" id="sim-drawer" aria-live="polite"></section>
-      <footer class="sim-tour-bar" id="sim-tour-bar" aria-label="Guided tour controls"></footer>
+      <aside class="tour-captions" id="tour-captions" aria-live="polite" data-testid="tour-captions"></aside>
+      <section class="bottom-table-dock" id="bottom-table-dock" aria-label="Live mesh query table"></section>
     </main>
   `;
 }
@@ -507,668 +633,464 @@ function activeTestRun(net: MeshNetwork): SimTestRun | null {
   );
 }
 
-function renderPanels(): void {
-  const topEl = app.querySelector<HTMLElement>("#sim-top-chrome");
-  const drawerEl = app.querySelector<HTMLElement>("#sim-drawer");
-  const tourEl = app.querySelector<HTMLElement>("#sim-tour-bar");
-  if (!topEl || !drawerEl || !tourEl) return;
-
-  const summary = summarizeSystemResources(state.networks);
-  const net = activeNetwork();
-  const host = activeHost(net);
-  const testRun = activeTestRun(net);
-
-  const isLive = state.session.authenticated && !net.simulated;
-  const liveCtrl = !isLive ? state.liveSite : null;
-  const wordmarkText = liveCtrl?.title || "dialtone // earth";
-  const modeBadge = isLive
-    ? `<span class="sim-badge is-live" data-testid="live-badge">LIVE MESH · ${escapeHtml(net.slug.toUpperCase())} (${escapeHtml(state.session.subject ?? "CLOUDFLARE ACCESS")})</span>`
-    : liveCtrl?.badge
-      ? `<span class="sim-badge is-live" data-testid="live-cli-badge">${escapeHtml(liveCtrl.badge)}</span>`
-      : `<span class="sim-badge is-sim" data-testid="simulated-badge">SIMULATED TOUR · NOT SIGNED IN</span>`;
-
-  const liveBannerHtml = liveCtrl?.banner
-    ? `<div class="sim-live-banner" data-testid="live-cli-banner" role="status">
-        <span class="sim-live-dot" aria-hidden="true"></span>
-        <span class="sim-live-label">LIVE CLI · REV #${liveCtrl.revision}</span>
-        <span class="sim-live-text">${escapeHtml(liveCtrl.banner)}</span>
-        ${liveCtrl.updated_at ? `<span class="sim-live-time">${escapeHtml(liveCtrl.updated_at)}</span>` : ""}
-      </div>`
-    : "";
-  const shellEl = app.querySelector<HTMLElement>(".sim-shell");
-  if (shellEl) {
-    shellEl.classList.toggle("has-live-banner", Boolean(liveCtrl?.banner));
-  }
-
-  const authAction = isLive
-    ? `<a class="sim-nav-btn" data-testid="auth-logout" href="${escapeHtml(state.session.logout_url || "/cdn-cgi/access/logout")}">Sign out</a>`
-    : state.session.login_url
-      ? `<a class="sim-nav-btn is-active" data-testid="auth-login" href="${escapeHtml(state.session.login_url)}">Sign in</a>`
-      : "";
-
-  topEl.innerHTML = `
-    <header class="sim-header">
-      <div class="sim-brand-group">
-        <a class="overview-wordmark" href="/">${escapeHtml(wordmarkText)}</a>
-        ${modeBadge}
-      </div>
-      <nav class="sim-nav" aria-label="System tour views">
-        ${navButton("overview", "Overview")}
-        ${navButton("network", `Network: ${net.slug}`)}
-        ${navButton("host", `Host: ${host?.name ?? "none"}`)}
-        ${navButton("users", `Users (${net.users.length})`)}
-        ${navButton("tests", `Tests (${net.tests.length})`)}
-        ${navButton("log", "Log")}
-        ${authAction}
-      </nav>
-    </header>
-    <section class="sim-resource-strip" aria-label="System-wide resource statistics">
-      <span><b>NETS</b> ${summary.networks}</span>
-      <span><b>NODES</b> ${summary.onlineNodes}/${summary.totalNodes}</span>
-      <span><b>USERS</b> ${summary.activeUsers}</span>
-      <span><b>CPU</b> ${summary.cpuCores}c (${summary.avgCpuPercent}%)</span>
-      <span><b>RAM</b> ${summary.memUsedGb}/${summary.memTotalGb} GB</span>
-      <span><b>DISK</b> ${summary.diskUsedTb}/${summary.diskTotalTb} TB</span>
-      <span><b>GPU VRAM</b> ${summary.gpuUsedGb}/${summary.gpuTotalGb} GB</span>
-      <span><b>BLOBS</b> ${summary.blobObjects} (${summary.blobTotalMb} MB)</span>
-      <span><b>PLUGINS</b> ${summary.activePlugins}</span>
-      <span><b>SHELLS</b> ${summary.activeShellSessions}</span>
-      <span><b>TESTS</b> ${summary.passingTests}/${summary.totalTests} PASS</span>
-    </section>
-    ${liveBannerHtml}
-  `;
-
-  if (state.view === "overview") {
-    drawerEl.innerHTML = renderOverviewView(summary, isLive);
-  } else if (state.view === "network") {
-    drawerEl.innerHTML = renderNetworkView(net);
-  } else if (state.view === "host" && host) {
-    drawerEl.innerHTML = renderHostView(net, host);
-  } else if (state.view === "users") {
-    drawerEl.innerHTML = renderUsersView(net, isLive);
-  } else if (state.view === "tests") {
-    drawerEl.innerHTML = renderTestsView(net);
-  } else if (testRun) {
-    drawerEl.innerHTML = renderLogView(net, testRun);
-  } else {
-    drawerEl.innerHTML = `<p class="sim-dim">No test run selected.</p>`;
-  }
-
-  const currentStep = state.tourSteps[state.tourStepIndex] ?? state.tourSteps[0];
-  const tourHeadline = liveCtrl?.headline || currentStep.headline;
-  const tourCaption = liveCtrl?.subline || currentStep.caption;
-  tourEl.innerHTML = `
-    <div class="sim-tour-copy">
-      <div class="sim-tour-meta">
-        <span class="sim-step-tag">STEP ${state.tourStepIndex + 1}/${state.tourSteps.length} · ${escapeHtml(currentStep.label)}</span>
-        <strong class="sim-tour-headline">${escapeHtml(tourHeadline)}</strong>
-      </div>
-      <p class="sim-tour-caption">${escapeHtml(tourCaption)}</p>
-    </div>
-    <div class="sim-tour-controls">
-      <button type="button" class="sim-btn" data-action="prev-step">◀ Prev</button>
-      <button type="button" class="sim-btn is-primary" data-action="toggle-tour" aria-pressed="${state.tourPlaying}">
-        ${state.tourPlaying ? "⏸ Pause Tour" : "▶ Play Tour"}
-      </button>
-      <button type="button" class="sim-btn" data-action="next-step">Next ▶</button>
-    </div>
-  `;
-
+function renderAll(): void {
+  renderTourCaptions();
+  renderBottomTable();
   bindInteractions();
 }
 
-function navButton(view: TourView, label: string): string {
-  const active = state.view === view ? "is-active" : "";
-  return `<button type="button" class="sim-nav-btn ${active}" data-nav="${view}">${escapeHtml(label)}</button>`;
-}
+/**
+ * The ONLY text outside the bottom table: closed-caption text in the top-left
+ * strictly when a tour is active.
+ */
+function renderTourCaptions(): void {
+  const ccEl = app.querySelector<HTMLElement>("#tour-captions");
+  if (!ccEl) return;
 
-function renderOverviewView(
-  summary: ReturnType<typeof summarizeSystemResources>,
-  isLive: boolean,
-): string {
-  const authLabel =
-    state.session.gateway === "dialtone-magic-link"
-      ? "dialtone.earth email link"
-      : "Cloudflare Access";
-  const banner = state.liveError
-    ? `<p class="sim-callout">${escapeHtml(state.liveError)}</p>`
-    : isLive
-      ? `<p class="sim-callout is-live">Authenticated via <strong>${escapeHtml(authLabel)}</strong> as <code>${escapeHtml(state.session.subject ?? "user")}</code>. Showing <strong>live real-time telemetry</strong> from your enrolled Dialtone v0.5.5 mesh (identical data model and screens to the signed-out simulated tour).</p>`
-      : `<p class="sim-callout">You are viewing <strong>simulated Dialtone v0.5.5 telemetry</strong> (zero private data). Select any network below to inspect hosts, signed-in users, blob-backed plugins, error recovery, and test logs—or sign in to inspect your live mesh.</p>`;
-
-  const rows = state.networks
-    .map((net) => {
-      const agg = aggregateNetwork(net.snapshot);
-      const active = net.slug === state.networkSlug ? "is-selected" : "";
-      const online = net.hosts.filter((h) => h.online).length;
-      return `
-      <button type="button" class="sim-table-row sim-net-row ${active}" data-select-network="${escapeHtml(net.slug)}">
-        <span class="sim-strong">${escapeHtml(net.slug)}</span>
-        <span>${online}/${net.hosts.length}</span>
-        <span>${escapeHtml(agg.cpu)}</span>
-        <span>${escapeHtml(agg.memory)}</span>
-        <span>${escapeHtml(agg.gpuMemory)}</span>
-        <span>${net.blobStore.objects} blobs</span>
-        <span>${net.tests.filter((t) => t.status === "pass").length}/${net.tests.length} pass</span>
-      </button>
-    `;
-    })
-    .join("");
-
-  const liveCtrl = !isLive ? state.liveSite : null;
-  const heading = liveCtrl?.headline
-    ? escapeHtml(liveCtrl.headline)
-    : `SYSTEM-WIDE OVERVIEW (${isLive ? "LIVE MESH" : "SIMULATED"})`;
-  const subline = liveCtrl?.subline
-    ? escapeHtml(liveCtrl.subline)
-    : "Click any network to inspect its hosts, plugin rollouts, iroh-blobs store, error recovery, and tests.";
-
-  return `
-    <div class="sim-panel-head">
-      <div>
-        <h2>${heading}</h2>
-        <p class="sim-sub">${subline}</p>
-      </div>
-      <div class="node-load-legend">
-        <span class="node-load-legend-title">LOAD</span>
-        <span><i class="load-low"></i>LOW</span>
-        <span><i class="load-medium"></i>MED</span>
-        <span><i class="load-high"></i>HIGH</span>
-      </div>
-    </div>
-    ${banner}
-    <div class="sim-table" role="table" aria-label="Dialtone networks">
-      <div class="sim-table-row sim-table-head" role="row">
-        <span>NETWORK</span>
-        <span>NODES</span>
-        <span>CPU</span>
-        <span>RAM</span>
-        <span>GPU VRAM</span>
-        <span>BLOB STORE</span>
-        <span>TESTS</span>
-      </div>
-      ${rows}
-    </div>
-    <div class="sim-mini-grid">
-      <article class="sim-mini-card">
-        <h3>CLOUDFLARE ACCESS GATEWAY</h3>
-        <p>Exact-hostname RS256 JWT verification (<code>Cf-Access-Jwt-Assertion</code>) fronts enrolled Dialtone v0.5.5 Tunnel origins with fail-closed <code>401</code> denial and <code>Cache-Control: private, no-store</code>.</p>
-      </article>
-      <article class="sim-mini-card">
-        <h3>BLOB-BACKED PLUGINS &amp; SHELLS</h3>
-        <p>${summary.activePlugins} verified plugin(s) (<code>dialtone/shell/1</code>, <code>dialtone/exec/1</code>, stdio-RPC binaries) and ${summary.activeShellSessions} persistent cross-OS session(s) across ${summary.totalNodes} host(s).</p>
-      </article>
-      <article class="sim-mini-card">
-        <h3>SELF-HEALING &amp; EVENTS</h3>
-        <p>${summary.recoveryEventsCount} recorded mesh/recovery event(s) tracking peer discovery, watchdog <code>EXIT_RESTART</code>, blob verification, and probe status.</p>
-      </article>
-    </div>
-  `;
-}
-
-function renderNetworkView(net: MeshNetwork): string {
-  const tabBtn = (tab: NetworkFocusTab, label: string) =>
-    `<button type="button" class="sim-subtab ${state.networkTab === tab ? "is-active" : ""}" data-net-tab="${tab}">${escapeHtml(label)}</button>`;
-
-  let body = "";
-  if (state.networkTab === "hosts") {
-    body = `
-      <div class="sim-table" role="table" aria-label="${escapeHtml(net.slug)} hosts">
-        <div class="sim-table-row sim-host-row sim-table-head">
-          <span>HOST</span>
-          <span>OS / ARCH</span>
-          <span>CPU</span>
-          <span>RAM</span>
-          <span>RTT</span>
-          <span>PROBES</span>
-        </div>
-        ${net.hosts
-          .map(
-            (h) => `
-          <button type="button" class="sim-table-row sim-host-row" data-select-host="${escapeHtml(h.name)}">
-            <span class="sim-strong"><i class="sim-dot"></i> ${escapeHtml(h.name)}</span>
-            <span>${escapeHtml(h.os)}/${escapeHtml(h.arch)} · v${escapeHtml(h.version)}</span>
-            <span>${h.stats.cpu_percent !== null ? `${h.stats.cpu_percent}%` : "n/a"}${h.stats.cpu_cores !== null ? ` (${h.stats.cpu_cores}c)` : ""}</span>
-            <span>${h.stats.mem_percent !== null ? `${h.stats.mem_percent}%` : "n/a"}</span>
-            <span>${h.rtt_ms !== null && h.rtt_ms !== undefined ? (h.rtt_ms === 0 ? "origin" : `${h.rtt_ms.toFixed(1)} ms`) : "n/a"}</span>
-            <span>${escapeHtml(h.probeSummary)}</span>
-          </button>
-        `,
-          )
-          .join("")}
-      </div>
-    `;
-  } else if (state.networkTab === "plugins") {
-    body = `
-      <div class="sim-table" role="table" aria-label="Plugin deployments">
-        <div class="sim-table-row sim-plugin-row sim-table-head">
-          <span>PLUGIN</span>
-          <span>RUNTIME / PROTOCOL</span>
-          <span>REPO</span>
-          <span>SHA-256 DIGEST</span>
-          <span>SIZE</span>
-          <span>STATUS</span>
-        </div>
-        ${net.plugins
-          .map(
-            (p) => `
-          <div class="sim-table-row sim-plugin-row">
-            <span class="sim-strong">${escapeHtml(p.name)} ${escapeHtml(p.version)}</span>
-            <span>${escapeHtml(p.runtime)} (${escapeHtml(p.protocol)})</span>
-            <span>${escapeHtml(p.repo)}</span>
-            <code>${escapeHtml(p.digest)}</code>
-            <span>${(p.sizeBytes / 1e6).toFixed(2)} MB</span>
-            <span class="sim-pill is-ok">${escapeHtml(p.status.toUpperCase())}</span>
-          </div>
-        `,
-          )
-          .join("")}
-      </div>
-    `;
-  } else if (state.networkTab === "blobs") {
-    const b = net.blobStore;
-    body = `
-      <div class="sim-mini-grid">
-        <article class="sim-mini-card">
-          <h3>IROH-BLOBS STORE</h3>
-          <p><strong>${b.objects}</strong> content-addressed objects · <strong>${(b.totalBytes / 1e6).toFixed(2)} MB</strong> total · <strong>${b.pinnedPlugins}</strong> pinned plugin/program(s).</p>
-        </article>
-        <article class="sim-mini-card">
-          <h3>QUIC TRANSFER &amp; INTEGRITY</h3>
-          <p><strong>${b.peerPulls24h}</strong> peer fetch(es) · <strong>${b.cacheHitPercent}%</strong> local cache hit · <strong>${b.verifiedSha256Percent}%</strong> SHA-256 verified.</p>
-        </article>
-        <article class="sim-mini-card">
-          <h3>LATEST BLOB STATUS</h3>
-          <p><code>${escapeHtml(b.recentTransfer)}</code></p>
-        </article>
-      </div>
-    `;
-  } else {
-    body = `
-      <div class="sim-recovery-list" aria-label="Error recovery timeline">
-        ${net.recoveryEvents
-          .map(
-            (ev) => `
-          <article class="sim-recovery-card">
-            <div class="sim-recovery-head">
-              <span class="sim-pill is-${ev.stage === "detected" ? "warn" : "ok"}">${escapeHtml(ev.stage.toUpperCase())}</span>
-              <strong>${escapeHtml(ev.host)}</strong>
-              <span>${escapeHtml(ev.timestamp)}</span>
-              ${ev.recoveryMs > 0 ? `<span>+${ev.recoveryMs} ms</span>` : ""}
-            </div>
-            <p><b>Trigger:</b> ${escapeHtml(ev.trigger)}</p>
-            <p><b>Action:</b> ${escapeHtml(ev.action)} · <code>${escapeHtml(ev.probeAfter)}</code></p>
-          </article>
-        `,
-          )
-          .join("")}
-      </div>
-    `;
+  if (!state.tourCaptionsVisible) {
+    ccEl.innerHTML = "";
+    ccEl.hidden = true;
+    return;
   }
 
-  return `
-    <div class="sim-panel-head">
-      <div>
-        <h2>NETWORK // ${escapeHtml(net.slug.toUpperCase())} <span class="sim-dim">(${escapeHtml(net.hostname)} · ${escapeHtml(net.channelFingerprint)})</span></h2>
-        <p class="sim-sub">${escapeHtml(net.regionSummary)} · Dialtone v${escapeHtml(net.snapshot.latest_release)} · Click any host or inspect plugins, blobs, recovery, and tests.</p>
-      </div>
-      <div class="sim-head-actions">
-        <button type="button" class="sim-btn" data-nav="users">Users &amp; Shell Log (${net.users.length}) →</button>
-        <button type="button" class="sim-btn" data-nav="tests">Network Tests (${net.tests.length}) →</button>
-      </div>
-    </div>
-    <div class="sim-subtabs" role="tablist">
-      ${tabBtn("hosts", `Hosts (${net.hosts.length})`)}
-      ${tabBtn("plugins", `Plugin Deployments (${net.plugins.length})`)}
-      ${tabBtn("blobs", `Blob Store (${net.blobStore.objects})`)}
-      ${tabBtn("recovery", `Error Recovery (${net.recoveryEvents.length})`)}
-    </div>
-    ${body}
+  const net = activeNetwork();
+  const isLive = state.session.authenticated && !net.simulated;
+  const liveCtrl = !isLive ? state.liveSite : null;
+  const step = state.tourSteps[state.tourStepIndex] ?? state.tourSteps[0];
+  if (!step) {
+    ccEl.innerHTML = "";
+    ccEl.hidden = true;
+    return;
+  }
+
+  const headline = liveCtrl?.headline || step.headline;
+  const caption = liveCtrl?.subline || step.caption;
+
+  ccEl.hidden = false;
+  ccEl.innerHTML = `
+    <div class="cc-line cc-kicker">CC · TOUR ${state.tourStepIndex + 1}/${state.tourSteps.length} · ${escapeHtml(step.label)}</div>
+    <div class="cc-line cc-headline">${escapeHtml(headline)}</div>
+    <div class="cc-line cc-body">${escapeHtml(caption)}</div>
   `;
 }
 
-function renderHostView(net: MeshNetwork, host: MeshHost): string {
-  const ramUsed =
-    host.stats.mem_used_bytes !== null
-      ? (host.stats.mem_used_bytes / 1e9).toFixed(1)
-      : "n/a";
-  const ramTotal =
-    host.stats.mem_total_bytes !== null
-      ? (host.stats.mem_total_bytes / 1e9).toFixed(1)
-      : "n/a";
-  const gpuLine =
-    host.stats.gpu_mem_used_bytes !== null &&
-    host.stats.gpu_mem_total_bytes !== null
-      ? `${host.gpuName ?? "GPU"} · ${(host.stats.gpu_mem_used_bytes / 1e9).toFixed(1)}/${(host.stats.gpu_mem_total_bytes / 1e9).toFixed(1)} GB${host.gpuLoadPercent !== null ? ` (${host.gpuLoadPercent}%)` : ""}`
-      : "No GPU sensor reported (distinct from 0)";
+function renderBottomTable(): void {
+  const dockEl = app.querySelector<HTMLElement>("#bottom-table-dock");
+  if (!dockEl) return;
 
-  const sessionsHtml =
-    host.sessions.length > 0
-      ? host.sessions
-          .map(
-            (s) => `
-          <div class="sim-session-card">
-            <div class="sim-recovery-head">
-              <strong>${escapeHtml(s.name)}</strong>
-              <span>${escapeHtml(s.shell)} · ${escapeHtml(s.cwd)}</span>
-              <span class="sim-pill is-ok">${escapeHtml(s.status.toUpperCase())}</span>
-            </div>
-            <pre class="sim-code">$ ${escapeHtml(s.lastCommand)}\n${escapeHtml(s.lastOutput)}</pre>
-          </div>
-        `,
-          )
-          .join("")
-      : `<p class="sim-dim">No active shell sessions on this host right now.</p>`;
+  const net = activeNetwork();
+  const host = activeHost(net);
+  const testRun = activeTestRun(net);
+  const summary = summarizeSystemResources(state.networks);
+  const isLive = state.session.authenticated && !net.simulated;
+  const liveCtrl = !isLive ? state.liveSite : null;
 
-  const procHtml =
-    host.processes.length > 0
-      ? host.processes
-          .map(
-            (p) =>
-              `<p><strong>${escapeHtml(p.name)}</strong> pid=${p.pid} · <code>${escapeHtml(p.digest)}</code> · restarts=${p.restarts} · <span class="sim-pill is-ok">${escapeHtml(p.status)}</span></p>`,
-          )
-          .join("")
-      : `<p class="sim-dim">No supervised blob processes reported on this host.</p>`;
+  const brand = liveCtrl?.title || "dialtone // earth";
+  const statusPill = isLive
+    ? `<span class="tbl-pill is-live" data-testid="live-badge">● LIVE · ${escapeHtml(net.slug)}</span>`
+    : liveCtrl?.badge
+      ? `<span class="tbl-pill is-live" data-testid="live-cli-badge">● ${escapeHtml(liveCtrl.badge)}</span>`
+      : `<span class="tbl-pill is-sim" data-testid="simulated-badge">○ SIM · ${summary.onlineNodes}/${summary.totalNodes}</span>`;
 
-  return `
-    <div class="sim-panel-head">
-      <div>
-        <h2>HOST // ${escapeHtml(host.name)} <span class="sim-dim">(${escapeHtml(host.role)} · ${escapeHtml(net.slug)})</span></h2>
-        <p class="sim-sub">${escapeHtml(host.os)}/${escapeHtml(host.arch)} · Dialtone v${escapeHtml(host.version)} · Relay ${escapeHtml(host.relay_region)} · ${escapeHtml(host.probeSummary)}</p>
-      </div>
-      <div class="sim-head-actions">
-        <button type="button" class="sim-btn" data-nav="network">← Back to ${escapeHtml(net.slug)}</button>
-        <button type="button" class="sim-btn" data-nav="tests">Network Tests →</button>
-      </div>
-    </div>
-    <div class="sim-mini-grid">
-      <article class="sim-mini-card">
-        <h3>COMPUTE &amp; MEMORY</h3>
-        <p>CPU: <strong>${host.stats.cpu_percent ?? "n/a"}%</strong> (${host.stats.cpu_cores ?? "n/a"} cores, load ${host.stats.load_avg_1m ?? "n/a"})</p>
-        <p>RAM: <strong>${ramUsed}/${ramTotal} GB</strong> (${host.stats.mem_percent ?? "n/a"}%) · Disk: <strong>${host.stats.disk_percent ?? "n/a"}%</strong></p>
-        <p>GPU: <strong>${escapeHtml(gpuLine)}</strong></p>
-      </article>
-      <article class="sim-mini-card">
-        <h3>SUPERVISED BLOB PROCESSES</h3>
-        ${procHtml}
-      </article>
-      <article class="sim-mini-card">
-        <h3>HOST BLOB STORE</h3>
-        <p><strong>${host.blobStore.objects}</strong> blobs · <strong>${(host.blobStore.totalBytes / 1e6).toFixed(2)} MB</strong> · ${host.blobStore.cacheHitPercent}% cache hit</p>
-        <p><code>${escapeHtml(host.blobStore.recentTransfer)}</code></p>
-      </article>
-    </div>
-    <div class="sim-section-block">
-      <h3>PERSISTENT QUIC SHELL SESSIONS (<code>dialtone/shell/1</code>)</h3>
-      ${sessionsHtml}
-    </div>
-  `;
-}
-
-function renderUsersView(net: MeshNetwork, isLive: boolean): string {
-  const totalLocations = net.users.reduce((sum, u) => sum + u.locations.length, 0);
-  const allShellNodes = Array.from(
-    new Set(net.shellAuditLog.map((e) => e.node).filter(Boolean)),
-  );
-  const activeFilter =
-    state.shellFilterNode === "all" ||
-    allShellNodes.includes(state.shellFilterNode)
-      ? state.shellFilterNode
-      : "all";
-  const filteredLog =
-    activeFilter === "all"
-      ? net.shellAuditLog
-      : net.shellAuditLog.filter((e) => e.node === activeFilter);
-  const totalRedactions = net.shellAuditLog.reduce(
-    (sum, e) => sum + e.redactedCount,
-    0,
+  const cadenceText = formatCadenceLabel(
+    state.currentPollMs,
+    state.unchangedStreak,
+    state.notModifiedCount,
   );
 
-  const usersHtml =
-    net.users.length > 0
-      ? net.users
-          .map((user) => {
-            const locRows = user.locations
-              .map((loc) => {
-                const nodeChip = loc.viewingNode
-                  ? `<button type="button" class="sim-inline-node" data-select-host="${escapeHtml(loc.viewingNode)}">${escapeHtml(loc.viewingNode)}</button>`
-                  : `<span class="sim-dim">${escapeHtml(loc.viewingView)}</span>`;
-                return `
-                  <div class="sim-user-loc-row">
-                    <span><b>LOC</b> ${escapeHtml(loc.location)}</span>
-                    <span><b>VIEWING</b> ${nodeChip}</span>
-                    <span class="sim-dim">${escapeHtml(loc.lastSeenAt)}</span>
-                  </div>
-                `;
-              })
-              .join("");
+  const authAction = isLive
+    ? `<a class="tbl-chip" data-testid="auth-logout" href="${escapeHtml(state.session.logout_url || "/cdn-cgi/access/logout")}">sign out</a>`
+    : state.session.login_url
+      ? `<a class="tbl-chip" data-testid="auth-login" href="${escapeHtml(state.session.login_url)}">sign in</a>`
+      : "";
 
-            const shellNodeChips =
-              user.shellNodes.length > 0
-                ? user.shellNodes
-                    .map(
-                      (node) =>
-                        `<button type="button" class="sim-inline-node" data-select-host="${escapeHtml(node)}">${escapeHtml(node)}</button>`,
-                    )
-                    .join(" ")
-                : `<span class="sim-dim">none recorded</span>`;
-
-            return `
-              <article class="sim-user-card" data-testid="network-user-card">
-                <div class="sim-recovery-head">
-                  <span class="sim-strong"><i class="sim-dot"></i> ${escapeHtml(user.email)}</span>
-                  <span class="sim-pill is-ok">${escapeHtml(user.status.toUpperCase())}</span>
-                  <span class="sim-pill">${user.locations.length} ${user.locations.length === 1 ? "LOCATION" : "LOCATIONS"}</span>
-                  <span class="sim-dim">${escapeHtml(user.role)}</span>
-                </div>
-                <div class="sim-user-locs">${locRows}</div>
-                <div class="sim-user-shell-nodes">
-                  <b>DIALTONE-SHELL NODES</b> ${shellNodeChips}
-                </div>
-              </article>
-            `;
-          })
-          .join("")
-      : `<p class="sim-dim">No active logged-in users reported for ${escapeHtml(net.hostname)} yet.</p>`;
-
-  const filterBar = `
-    <div class="sim-subtabs" role="tablist" aria-label="Filter shell audit log by node">
-      <button type="button" class="sim-subtab ${activeFilter === "all" ? "is-active" : ""}" data-shell-filter="all">All nodes (${net.shellAuditLog.length})</button>
-      ${allShellNodes
-        .map(
-          (node) =>
-            `<button type="button" class="sim-subtab ${activeFilter === node ? "is-active" : ""}" data-shell-filter="${escapeHtml(node)}">${escapeHtml(node)}</button>`,
-        )
-        .join("")}
-    </div>
-  `;
-
-  const auditHtml =
-    filteredLog.length > 0
-      ? filteredLog
+  const networkPicker =
+    state.query !== "networks" && state.networks.length > 1
+      ? `<span class="tbl-net-group">${state.networks
           .map(
-            (entry) => `
-              <article class="sim-session-card" data-testid="shell-audit-entry">
-                <div class="sim-recovery-head">
-                  <button type="button" class="sim-inline-node" data-select-host="${escapeHtml(entry.node)}">${escapeHtml(entry.node)}</button>
-                  <strong>${escapeHtml(entry.user)}</strong>
-                  <span>${escapeHtml(entry.sessionName)} · ${escapeHtml(entry.shell)} · ${escapeHtml(entry.cwd)}</span>
-                  <span class="sim-dim">${escapeHtml(entry.timestamp)}</span>
-                  ${entry.redactedCount > 0 ? `<span class="sim-pill is-warn">${entry.redactedCount} REDACTED</span>` : ""}
-                </div>
-                <pre class="sim-code">$ ${escapeHtml(entry.command)}${entry.output ? `\n${escapeHtml(entry.output)}` : ""}</pre>
-              </article>
-            `,
+            (n) =>
+              `<button type="button" class="tbl-chip ${n.slug === net.slug ? "is-active" : ""}" data-switch-network="${escapeHtml(n.slug)}">${escapeHtml(n.slug)}</button>`,
           )
-          .join("")
-      : `<p class="sim-dim">No dialtone-shell commands recorded for this filter yet.</p>`;
+          .join("")}</span>`
+      : "";
 
-  return `
-    <div class="sim-panel-head">
-      <div>
-        <h2>SIGNED-IN USERS // ${escapeHtml(net.slug.toUpperCase())} <span class="sim-dim">(${escapeHtml(net.hostname)})</span></h2>
-        <p class="sim-sub">${net.users.length} logged-in user(s) across ${totalLocations} active location(s) · Shared <code>dialtone-shell</code> audit log visible to all signed-in members (${totalRedactions} secret value(s) redacted).</p>
-      </div>
-      <div class="sim-head-actions">
-        <span class="sim-pill is-warn" data-testid="redaction-badge">KEYS &amp; PASSWORDS REDACTED</span>
-        ${isLive ? `<button type="button" class="sim-btn" data-action="refresh-users">↻ Refresh</button>` : ""}
-        <button type="button" class="sim-btn" data-nav="network">← Back to ${escapeHtml(net.slug)}</button>
-      </div>
-    </div>
-    <div class="sim-section-block">
-      <h3>LOGGED-IN MEMBERS &amp; ACTIVE LOCATIONS</h3>
-      <div class="sim-recovery-list">${usersHtml}</div>
-    </div>
-    <div class="sim-section-block" style="margin-top:14px">
-      <h3>SHARED DIALTONE-SHELL LOG (KEYS &amp; PASSWORDS REDACTED)</h3>
-      ${filterBar}
-      <div class="sim-recovery-list">${auditHtml}</div>
-    </div>
-  `;
-}
+  const queryButtons = QUERY_TABS.map((tab) => {
+    const active =
+      state.query === tab.id || (state.query === "host" && tab.id === "hosts")
+        ? "is-active"
+        : "";
+    return `<button type="button" class="tbl-tab ${active}" data-query="${tab.id}">${tab.label}</button>`;
+  }).join("");
 
-function renderTestsView(net: MeshNetwork): string {
-  const passed = net.tests.filter((t) => t.status === "pass").length;
-  return `
-    <div class="sim-panel-head">
-      <div>
-        <h2>NETWORK TESTS // ${escapeHtml(net.slug.toUpperCase())} <span class="sim-dim">(timcash/template run contract)</span></h2>
-        <p class="sim-sub">${net.tests.length} total · ${passed} passed · 0 failed · Click <strong>Log ↗</strong> on any test to inspect its immutable per-run transcript.</p>
-      </div>
-      <div class="sim-head-actions">
-        <button type="button" class="sim-btn" data-nav="network">← Back to ${escapeHtml(net.slug)}</button>
-      </div>
-    </div>
-    <div class="sim-table" role="table" aria-label="Network test runs">
-      ${net.tests
-        .map(
-          (t) => `
-        <div class="sim-table-row sim-test-row" data-testid="sim-test-row">
-          <div class="sim-test-title">
-            <span class="sim-strong">${escapeHtml(t.title)}</span>
-            <code>${escapeHtml(t.name)}</code>
-          </div>
-          <span class="sim-pill is-ok">${t.status === "pass" ? "PASSED" : escapeHtml(t.status.toUpperCase())}</span>
-          <span>${escapeHtml(t.elapsed)}s</span>
-          <button type="button" class="sim-link-btn" data-open-log="${escapeHtml(t.testId)}">Log ↗</button>
+  const inlineNotice = state.liveError
+    ? `<tr class="tbl-notice-row is-warn"><td colspan="8">${escapeHtml(state.liveError)}</td></tr>`
+    : liveCtrl?.banner
+      ? `<tr class="tbl-notice-row is-live" data-testid="live-cli-banner"><td colspan="8"><span class="tbl-dot is-low"></span><strong>REV #${liveCtrl.revision}</strong> ${escapeHtml(liveCtrl.banner)}${!state.tourCaptionsVisible && liveCtrl.headline ? ` — <em>${escapeHtml(liveCtrl.headline)}</em>` : ""}</td></tr>`
+      : !state.tourCaptionsVisible && liveCtrl?.headline
+        ? `<tr class="tbl-notice-row is-live"><td colspan="8"><span class="tbl-dot is-low"></span><strong>${escapeHtml(liveCtrl.headline)}</strong>${liveCtrl.subline ? ` — ${escapeHtml(liveCtrl.subline)}` : ""}</td></tr>`
+        : "";
+
+  const { columns, rowsHtml, queryDescriptor } = buildSingleQueryTable(
+    net,
+    host,
+    testRun,
+  );
+
+  dockEl.innerHTML = `
+    <div class="earth-table-frame">
+      <div class="earth-table-bar">
+        <div class="earth-bar-left">
+          <a class="tbl-brand" href="/">${escapeHtml(brand)}</a>
+          ${statusPill}
+          <span class="tbl-query-id" data-testid="active-query">QUERY: ${escapeHtml(queryDescriptor)}</span>
+          ${networkPicker}
         </div>
-      `,
-        )
-        .join("")}
+        <div class="earth-bar-tabs" role="tablist" aria-label="Single active table query">
+          ${queryButtons}
+        </div>
+        <div class="earth-bar-right">
+          <span class="tbl-cadence" data-testid="mesh-cadence" title="Adaptive gossip sync interval with ETag/304 backoff">${escapeHtml(cadenceText)}</span>
+          <button type="button" class="tbl-chip" data-action="prev-step" title="Previous tour step">◀</button>
+          <button type="button" class="tbl-chip ${state.tourPlaying ? "is-active" : ""}" data-action="toggle-tour" aria-pressed="${state.tourPlaying}">${state.tourPlaying ? "⏸ tour" : "▶ tour"}</button>
+          <button type="button" class="tbl-chip" data-action="next-step" title="Next tour step">▶</button>
+          ${authAction}
+        </div>
+      </div>
+      <div class="earth-table-scroll">
+        <table class="earth-table" data-testid="earth-table">
+          <thead>
+            ${inlineNotice}
+            <tr>${columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("")}</tr>
+          </thead>
+          <tbody>
+            ${rowsHtml}
+          </tbody>
+        </table>
+      </div>
     </div>
   `;
 }
 
-function renderLogView(net: MeshNetwork, run: SimTestRun): string {
-  return `
-    <div class="sim-panel-head">
-      <div>
-        <h2>EXECUTION LOG // ${escapeHtml(run.title)}</h2>
-        <p class="sim-sub">test-id: <code>${escapeHtml(run.testId)}</code> · ${escapeHtml(run.artifact)} · ${escapeHtml(run.elapsed)}s</p>
-      </div>
-      <div class="sim-head-actions">
-        <button type="button" class="sim-btn" data-nav="tests">← All ${escapeHtml(net.slug)} Tests</button>
-      </div>
-    </div>
-    <div class="sim-log-meta">
-      <span><b>GO TEST</b> <code>${escapeHtml(run.name)}</code></span>
-      <span><b>STATUS</b> <span class="sim-pill is-ok">${run.status === "pass" ? "PASSED" : escapeHtml(run.status.toUpperCase())}</span></span>
-      <span><b>RERUN</b> <code>${escapeHtml(run.command)}</code></span>
-    </div>
-    <pre class="sim-code sim-log-pre" data-testid="sim-log-output">${escapeHtml(run.log)}</pre>
-  `;
+function buildSingleQueryTable(
+  net: MeshNetwork,
+  host: MeshHost | null,
+  testRun: SimTestRun | null,
+): { columns: string[]; rowsHtml: string; queryDescriptor: string } {
+  if (state.query === "networks") {
+    const rowsHtml = state.networks
+      .map((n) => {
+        const agg = aggregateNetwork(n.snapshot);
+        const online = n.hosts.filter((h) => h.online).length;
+        const pass = n.tests.filter((t) => t.status === "pass").length;
+        const selected = n.slug === state.networkSlug ? "is-selected" : "";
+        return `<tr class="is-clickable ${selected}" data-select-network="${escapeHtml(n.slug)}">
+          <td class="c-strong"><span class="tbl-dot ${online === n.hosts.length ? "is-low" : "is-med"}"></span>${escapeHtml(n.slug)}</td>
+          <td>${online}/${n.hosts.length}</td>
+          <td>${escapeHtml(agg.cpu)}</td>
+          <td>${escapeHtml(agg.memory)}</td>
+          <td>${escapeHtml(agg.gpuMemory)}</td>
+          <td>${n.blobStore.objects} (${Math.round(n.blobStore.totalBytes / 1_000_000)} MB)</td>
+          <td>${pass}/${n.tests.length} pass</td>
+        </tr>`;
+      })
+      .join("");
+    return {
+      columns: ["NETWORK", "NODES", "CPU", "RAM", "GPU", "BLOBS", "TESTS"],
+      rowsHtml,
+      queryDescriptor: "networks",
+    };
+  }
+
+  if (state.query === "hosts") {
+    const rowsHtml =
+      net.hosts
+        .map((h) => {
+          const cpuPct = h.stats.cpu_percent ?? 0;
+          const memPct = h.stats.mem_percent ?? 0;
+          const loadClass =
+            Math.max(cpuPct, memPct) >= 80
+              ? "is-high"
+              : Math.max(cpuPct, memPct) >= 55
+                ? "is-med"
+                : "is-low";
+          const selected = h.name === state.hostName ? "is-selected" : "";
+          const rtt =
+            typeof h.rtt_ms === "number" && h.rtt_ms > 0
+              ? `${h.rtt_ms.toFixed(1)} ms`
+              : "local";
+          const memUsed = ((h.stats.mem_used_bytes ?? 0) / 1e9).toFixed(1);
+          const memTotal = ((h.stats.mem_total_bytes ?? 0) / 1e9).toFixed(0);
+          return `<tr class="is-clickable ${selected}" data-select-host="${escapeHtml(h.name)}">
+            <td class="c-strong"><span class="tbl-dot ${loadClass}"></span>${escapeHtml(h.name)}</td>
+            <td>${escapeHtml(h.os)}/${escapeHtml(h.arch)}</td>
+            <td>${cpuPct.toFixed(0)}% (${h.stats.cpu_cores ?? 0}c)</td>
+            <td>${memUsed}/${memTotal} GB</td>
+            <td>${escapeHtml(rtt)}</td>
+            <td>${h.blobStore.objects}</td>
+            <td>${escapeHtml(h.probeSummary)}</td>
+          </tr>`;
+        })
+        .join("") ||
+      `<tr><td colspan="7" class="c-dim">No hosts reported in ${escapeHtml(net.slug)}.</td></tr>`;
+    return {
+      columns: ["HOST", "OS/ARCH", "CPU", "RAM", "RTT", "BLOBS", "PROBES"],
+      rowsHtml,
+      queryDescriptor: `hosts · ${net.slug}`,
+    };
+  }
+
+  if (state.query === "host" && host) {
+    const cpuPct = (host.stats.cpu_percent ?? 0).toFixed(1);
+    const load1m = (host.stats.load_avg_1m ?? 0).toFixed(2);
+    const memUsed = ((host.stats.mem_used_bytes ?? 0) / 1e9).toFixed(1);
+    const memTotal = ((host.stats.mem_total_bytes ?? 0) / 1e9).toFixed(0);
+    const diskUsed = ((host.stats.disk_used_bytes ?? 0) / 1e9).toFixed(0);
+    const diskTotal = ((host.stats.disk_total_bytes ?? 0) / 1e9).toFixed(0);
+    const gpuUsed = ((host.stats.gpu_mem_used_bytes ?? 0) / 1e9).toFixed(1);
+    const gpuTotal = ((host.stats.gpu_mem_total_bytes ?? 0) / 1e9).toFixed(0);
+    const blobMb = (host.blobStore.totalBytes / 1e6).toFixed(1);
+    const rows: Array<[string, string, string]> = [
+      [
+        "host",
+        `${host.name} (${host.os}/${host.arch})`,
+        `v${host.version} · ${host.relay_region} · ${host.probeSummary}`,
+      ],
+      [
+        "compute",
+        `CPU ${cpuPct}% (${host.stats.cpu_cores ?? 0}c, load ${load1m})`,
+        `RAM ${memUsed}/${memTotal} GB · DISK ${diskUsed}/${diskTotal} GB${host.gpuName ? ` · GPU ${host.gpuName} (${gpuUsed}/${gpuTotal} GB)` : ""}`,
+      ],
+      [
+        "blobs",
+        `${host.blobStore.objects} objects (${blobMb} MB)`,
+        host.blobStore.recentTransfer || "content-addressed iroh-blobs store",
+      ],
+      ...host.processes.map(
+        (p): [string, string, string] => [
+          `proc:${p.name}`,
+          `${p.status} (pid=${p.pid}, restarts=${p.restarts})`,
+          p.digest,
+        ],
+      ),
+      ...host.sessions.map(
+        (s): [string, string, string] => [
+          `shell:${s.name}`,
+          `${s.shell} · ${s.status} · ${s.cwd}`,
+          `$ ${s.lastCommand}`,
+        ],
+      ),
+    ];
+    const rowsHtml = rows
+      .map(
+        ([k, v, detail]) => `<tr>
+          <td class="c-strong">${escapeHtml(k)}</td>
+          <td>${escapeHtml(v)}</td>
+          <td class="c-dim">${escapeHtml(detail)}</td>
+        </tr>`,
+      )
+      .join("");
+    return {
+      columns: ["RESOURCE", "STATE", "DETAIL"],
+      rowsHtml,
+      queryDescriptor: `host · ${host.name}`,
+    };
+  }
+
+  if (state.query === "plugins") {
+    const rowsHtml =
+      net.plugins
+        .map(
+          (p) => `<tr>
+          <td class="c-strong"><span class="tbl-dot ${p.status === "deployed" ? "is-low" : "is-med"}"></span>${escapeHtml(p.name)}</td>
+          <td>v${escapeHtml(p.version)}</td>
+          <td>${escapeHtml(p.protocol)}</td>
+          <td>${escapeHtml(p.runtime)}</td>
+          <td>${(p.sizeBytes / 1024).toFixed(0)} KB</td>
+          <td>${escapeHtml(p.status)}</td>
+        </tr>`,
+        )
+        .join("") ||
+      `<tr><td colspan="6" class="c-dim">No plugins deployed on ${escapeHtml(net.slug)}.</td></tr>`;
+    return {
+      columns: ["PLUGIN", "VER", "PROTOCOL", "RUNTIME", "SIZE", "STATUS"],
+      rowsHtml,
+      queryDescriptor: `plugins · ${net.slug}`,
+    };
+  }
+
+  if (state.query === "recovery") {
+    const rowsHtml =
+      net.recoveryEvents
+        .map(
+          (ev) => `<tr>
+          <td class="c-strong">${escapeHtml(ev.host)}</td>
+          <td><span class="tbl-dot ${ev.stage === "verified" ? "is-low" : "is-med"}"></span>${escapeHtml(ev.stage)}</td>
+          <td>${escapeHtml(ev.trigger)}</td>
+          <td>${escapeHtml(ev.action)}</td>
+          <td>${ev.recoveryMs} ms</td>
+          <td class="c-dim">${escapeHtml(ev.probeAfter)}</td>
+        </tr>`,
+        )
+        .join("") ||
+      `<tr><td colspan="6" class="c-dim">No recovery events recorded on ${escapeHtml(net.slug)}.</td></tr>`;
+    return {
+      columns: ["HOST", "STAGE", "TRIGGER", "ACTION", "RECOVERY", "PROBE"],
+      rowsHtml,
+      queryDescriptor: `recovery · ${net.slug}`,
+    };
+  }
+
+  if (state.query === "users") {
+    const rowsHtml =
+      net.users
+        .map((u) => {
+          const locs = u.locations
+            .map((l) => `${l.location} [${l.viewingNode || l.viewingView}]`)
+            .join("; ");
+          return `<tr>
+            <td class="c-strong"><span class="tbl-dot ${u.status === "active" ? "is-low" : "is-med"}"></span>${escapeHtml(u.email)}</td>
+            <td>${escapeHtml(u.role)}</td>
+            <td>${escapeHtml(u.status)}</td>
+            <td>${escapeHtml(locs || "—")}</td>
+            <td>${escapeHtml(u.shellNodes.join(", ") || "—")}</td>
+          </tr>`;
+        })
+        .join("") ||
+      `<tr><td colspan="5" class="c-dim">No active users on ${escapeHtml(net.slug)}.</td></tr>`;
+    return {
+      columns: ["USER", "ROLE", "STATUS", "LOCATIONS / VIEW", "SHELL NODES"],
+      rowsHtml,
+      queryDescriptor: `users · ${net.slug}`,
+    };
+  }
+
+  if (state.query === "tests") {
+    const rowsHtml =
+      net.tests
+        .map((t) => {
+          const dot =
+            t.status === "pass"
+              ? "is-low"
+              : t.status === "fail"
+                ? "is-high"
+                : "is-med";
+          const selected = t.testId === state.testId ? "is-selected" : "";
+          return `<tr class="is-clickable ${selected}" data-open-log="${escapeHtml(t.testId)}">
+            <td class="c-strong"><span class="tbl-dot ${dot}"></span>${escapeHtml(t.title)}</td>
+            <td>${escapeHtml(t.status.toUpperCase())}</td>
+            <td>${escapeHtml(t.elapsed)}s</td>
+            <td class="c-dim">${escapeHtml(t.timestamp)}</td>
+            <td class="c-dim">${escapeHtml(t.testId.slice(0, 12))}…</td>
+          </tr>`;
+        })
+        .join("") ||
+      `<tr><td colspan="5" class="c-dim">No test runs recorded on ${escapeHtml(net.slug)}.</td></tr>`;
+    return {
+      columns: ["TEST", "STATUS", "ELAPSED", "TIMESTAMP", "ID"],
+      rowsHtml,
+      queryDescriptor: `tests · ${net.slug}`,
+    };
+  }
+
+  // query === "log"
+  if (!testRun) {
+    return {
+      columns: ["LINE", "OUTPUT"],
+      rowsHtml: `<tr><td colspan="2" class="c-dim">Select a test run to inspect its immutable log.</td></tr>`,
+      queryDescriptor: `log · none`,
+    };
+  }
+  const lines = [
+    `$ ${testRun.command}   [${testRun.status.toUpperCase()} · ${testRun.elapsed}s · ${testRun.artifact}]`,
+    ...testRun.log.split(/\r?\n/),
+  ];
+  const rowsHtml = lines
+    .map(
+      (line, idx) => `<tr>
+        <td class="c-dim">${idx + 1}</td>
+        <td class="c-mono-line">${escapeHtml(line)}</td>
+      </tr>`,
+    )
+    .join("");
+  return {
+    columns: ["#", `LOG · ${testRun.title}`],
+    rowsHtml,
+    queryDescriptor: `log · ${testRun.testId.slice(0, 10)}`,
+  };
 }
 
 function bindInteractions(): void {
-  app.querySelectorAll<HTMLButtonElement>("[data-nav]").forEach((btn) => {
+  app.querySelectorAll<HTMLButtonElement>("[data-query]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const target = btn.dataset.nav as TourView | undefined;
-      if (!target) return;
-      pauseTour();
-      state.view = target;
-      renderPanels();
+      const q = btn.dataset.query as TableQuery | undefined;
+      if (!q) return;
+      exitTour();
+      state.query = q;
+      renderAll();
       syncGlobeFocus();
+      triggerImmediateQuerySync();
       void reportLivePresence();
-      if (target === "users") {
-        void refreshLiveUsers();
-      }
-      if (target === "log" && state.testId) {
-        void loadLiveTestRunLog(state.testId);
-      }
     });
   });
 
   app
-    .querySelectorAll<HTMLButtonElement>("[data-select-network]")
+    .querySelectorAll<HTMLButtonElement>("[data-switch-network]")
     .forEach((btn) => {
       btn.addEventListener("click", () => {
-        const slug = btn.dataset.selectNetwork;
+        const slug = btn.dataset.switchNetwork;
         if (!slug) return;
         const net =
           state.networks.find((n) => n.slug === slug) ?? state.networks[0];
-        pauseTour();
+        exitTour();
         state.networkSlug = net.slug;
         state.hostName = net.hosts[0]?.name ?? "";
         state.testId = net.tests[0]?.testId ?? "";
-        state.networkTab = "hosts";
-        state.view = "network";
-        renderPanels();
+        renderAll();
         syncGlobeFocus();
       });
     });
 
   app
-    .querySelectorAll<HTMLButtonElement>("[data-select-host]")
-    .forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const hostName = btn.dataset.selectHost;
-        if (!hostName) return;
-        pauseTour();
-        state.hostName = hostName;
-        state.view = "host";
-        renderPanels();
+    .querySelectorAll<HTMLElement>("[data-select-network]")
+    .forEach((row) => {
+      row.addEventListener("click", () => {
+        const slug = row.dataset.selectNetwork;
+        if (!slug) return;
+        const net =
+          state.networks.find((n) => n.slug === slug) ?? state.networks[0];
+        exitTour();
+        state.networkSlug = net.slug;
+        state.hostName = net.hosts[0]?.name ?? "";
+        state.testId = net.tests[0]?.testId ?? "";
+        state.query = "hosts";
+        renderAll();
         syncGlobeFocus();
-        void reportLivePresence();
+        triggerImmediateQuerySync();
       });
     });
 
-  app
-    .querySelectorAll<HTMLButtonElement>("[data-shell-filter]")
-    .forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const node = btn.dataset.shellFilter;
-        if (!node) return;
-        pauseTour();
-        state.shellFilterNode = node;
-        renderPanels();
-      });
-    });
-
-  app
-    .querySelector<HTMLButtonElement>('[data-action="refresh-users"]')
-    ?.addEventListener("click", () => {
-      void reportLivePresence().then(() => refreshLiveUsers());
-    });
-
-  app.querySelectorAll<HTMLButtonElement>("[data-net-tab]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const tab = btn.dataset.netTab as NetworkFocusTab | undefined;
-      if (!tab) return;
-      pauseTour();
-      state.networkTab = tab;
-      renderPanels();
+  app.querySelectorAll<HTMLElement>("[data-select-host]").forEach((row) => {
+    row.addEventListener("click", () => {
+      const hostName = row.dataset.selectHost;
+      if (!hostName) return;
+      exitTour();
+      state.hostName = hostName;
+      state.query = "host";
+      renderAll();
+      syncGlobeFocus();
+      void reportLivePresence();
     });
   });
 
-  app.querySelectorAll<HTMLButtonElement>("[data-open-log]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const id = btn.dataset.openLog;
+  app.querySelectorAll<HTMLElement>("[data-open-log]").forEach((row) => {
+    row.addEventListener("click", () => {
+      const id = row.dataset.openLog;
       if (!id) return;
-      pauseTour();
+      exitTour();
       state.testId = id;
-      state.view = "log";
-      renderPanels();
-      void loadLiveTestRunLog(id);
+      state.query = "log";
+      renderAll();
+      triggerImmediateQuerySync();
     });
   });
 
@@ -1192,9 +1114,10 @@ function bindInteractions(): void {
     .querySelector<HTMLButtonElement>('[data-action="toggle-tour"]')
     ?.addEventListener("click", () => {
       state.tourPlaying = !state.tourPlaying;
+      state.tourCaptionsVisible = state.tourPlaying;
       if (state.tourPlaying) startTourTimer();
       else clearTourTimer();
-      renderPanels();
+      renderAll();
     });
 }
 
@@ -1202,27 +1125,30 @@ function applyTourStep(index: number, keepPlaying: boolean): void {
   const step = state.tourSteps[index];
   if (!step) return;
   state.tourStepIndex = index;
-  state.view = step.view;
+  state.tourCaptionsVisible = true;
+  state.query = viewToQuery(step.view, step.networkTab);
   if (step.networkSlug) {
     state.networkSlug = step.networkSlug;
     const net = activeNetwork();
     state.hostName = step.hostName ?? net.hosts[0]?.name ?? "";
     state.testId = step.testId ?? net.tests[0]?.testId ?? "";
   }
-  if (step.networkTab) state.networkTab = step.networkTab;
-  if (!keepPlaying) pauseTour();
-  renderPanels();
+  if (!keepPlaying) {
+    state.tourPlaying = false;
+    clearTourTimer();
+  }
+  renderAll();
   syncGlobeFocus();
-  if (state.view === "log" && state.testId) {
-    void loadLiveTestRunLog(state.testId);
+  if (state.session.authenticated) {
+    triggerImmediateQuerySync();
   }
 }
 
 function syncGlobeFocus(): void {
   if (!globeController) return;
-  if (state.view === "overview") {
+  if (state.query === "networks") {
     globeController.focusTarget(null, null);
-  } else if (state.view === "host") {
+  } else if (state.query === "host") {
     globeController.focusTarget(state.networkSlug, state.hostName);
   } else {
     globeController.focusTarget(state.networkSlug, null);
@@ -1246,8 +1172,9 @@ function clearTourTimer(): void {
   }
 }
 
-function pauseTour(): void {
+function exitTour(): void {
   state.tourPlaying = false;
+  state.tourCaptionsVisible = false;
   clearTourTimer();
 }
 

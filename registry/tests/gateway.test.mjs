@@ -865,15 +865,28 @@ test("public /api/live supports Bearer-authenticated PATCH/DELETE on dialtone.ea
   assert.equal(patched.state.view, "network");
   assert.equal(patched.state.tour_playing, false);
 
-  // Subsequent public GET sees the live mutation
+  // Subsequent public GET sees the live mutation and returns ETag for 304 polls
   const getAfter = await handleGatewayRequest(
     new Request("https://dialtone.earth/api/live"),
     env,
     deps,
   );
+  const etag = getAfter.headers.get("ETag");
+  assert.equal(etag, '"live-rev-1"');
   const afterBody = await getAfter.json();
   assert.equal(afterBody.revision, 1);
   assert.equal(afterBody.headline, "LIVE DEMO");
+
+  // Conditional GET with matching ETag returns zero-body 304 Not Modified
+  const notModified = await handleGatewayRequest(
+    new Request("https://dialtone.earth/api/live", {
+      headers: { "If-None-Match": etag },
+    }),
+    env,
+    deps,
+  );
+  assert.equal(notModified.status, 304);
+  assert.equal(await notModified.text(), "");
 
   // Authenticated DELETE resets fields & increments revision so browsers revert live
   const delResp = await handleGatewayRequest(

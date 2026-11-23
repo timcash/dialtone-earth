@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { adaptLiveMeshToNetwork } from "../src/live-adapter.ts";
 import {
+  computeAdaptivePollMs,
+  formatCadenceLabel,
+  liveEndpointForQuery,
+} from "../src/mesh-cadence.ts";
+import {
   SIMULATED_NETWORKS,
   SIMULATED_TOUR_STEPS,
   summarizeSystemResources,
@@ -175,4 +180,25 @@ test("adaptLiveMeshToNetwork produces the exact same MeshNetwork schema as simul
   assert.equal(summary.blobObjects, 42);
   assert.equal(summary.activePlugins, 1);
   assert.equal(summary.passingTests, 1);
+});
+
+test("adaptive gossip-mesh cadence backs off to minimal base rate and pauses when hidden", () => {
+  assert.equal(computeAdaptivePollMs({ unchangedStreak: 0, hidden: true, random: 0.5 }), null);
+  assert.equal(computeAdaptivePollMs({ unchangedStreak: 0, hidden: false, random: 0.5 }), 2_000);
+  assert.equal(computeAdaptivePollMs({ unchangedStreak: 2, hidden: false, random: 0.5 }), 4_000);
+  assert.equal(computeAdaptivePollMs({ unchangedStreak: 3, hidden: false, random: 0.5 }), 8_000);
+  assert.equal(computeAdaptivePollMs({ unchangedStreak: 4, hidden: false, random: 0.5 }), 15_000);
+  assert.equal(computeAdaptivePollMs({ unchangedStreak: 12, hidden: false, random: 0.5 }), 30_000);
+
+  // Single-query endpoint mapping: never fans out
+  assert.equal(liveEndpointForQuery("networks"), "/api/mesh/state");
+  assert.equal(liveEndpointForQuery("hosts"), "/api/mesh/state");
+  assert.equal(liveEndpointForQuery("plugins"), "/api/mesh/plugins");
+  assert.equal(liveEndpointForQuery("users"), "/api/mesh/users");
+  assert.equal(liveEndpointForQuery("tests"), "/api/mesh/tests");
+  assert.equal(liveEndpointForQuery("log", "a".repeat(32)), `/api/mesh/test-runs/${"a".repeat(32)}`);
+  assert.equal(liveEndpointForQuery("log", "../bad"), null);
+
+  assert.equal(formatCadenceLabel(30_000, 8, 5), "GOSSIP BASE 30s · 5×304");
+  assert.equal(formatCadenceLabel(null, 0, 0), "MESH PAUSED");
 });
