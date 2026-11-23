@@ -445,3 +445,90 @@ test("metal-kv-config-and-captions: persists layout & camera studio policy in CF
   assert.ok(mainTs.includes('data-testid="camera-page"'));
   assert.ok(mainTs.includes('data-testid="camera-ts-highlight"'));
 });
+
+test("metal-live-daemon-8788: adapts real live metal channel daemon into globe H3 arcs and Camera Studio", async (t) => {
+  const base = (process.env.METAL_LIVE_URL || "http://127.0.0.1:8788").replace(/\/+$/, "");
+  let mesh;
+  try {
+    const resp = await fetch(`${base}/api/mesh`, { signal: AbortSignal.timeout(2_500) });
+    if (!resp.ok) {
+      t.skip(`live metal daemon returned HTTP ${resp.status} at ${base}`);
+      return;
+    }
+    mesh = await resp.json();
+  } catch {
+    t.skip(`live local metal daemon not reachable at ${base}`);
+    return;
+  }
+
+  const fetchOpt = async (path) => {
+    try {
+      const r = await fetch(`${base}${path}`, { signal: AbortSignal.timeout(2_500) });
+      return r.ok ? await r.json() : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const [plugins, sessions, probe, processes] = await Promise.all([
+    fetchOpt("/api/plugins"),
+    fetchOpt("/api/shell/sessions"),
+    fetchOpt("/api/probe"),
+    fetchOpt("/api/processes"),
+  ]);
+
+  const liveNet = adaptLiveMeshToNetwork({
+    hostname: "metal.dialtone.earth",
+    networkName: "metal",
+    currentUser: "live-metal-test",
+    mesh,
+    plugins,
+    sessions,
+    probe,
+    processes,
+  });
+
+  assert.equal(liveNet.simulated, false);
+  assert.equal(liveNet.slug, "metal");
+  assert.ok(liveNet.hosts.length >= 2, `expected >= 2 live metal peers, got ${liveNet.hosts.length}`);
+
+  // Verify co-located peers (e.g. legion/build-1/rosie) fanned out to distinct coordinates
+  const coordSet = new Set(liveNet.hosts.map((h) => `${h.lat.toFixed(2)},${h.lng.toFixed(2)}`));
+  assert.equal(
+    coordSet.size,
+    liveNet.hosts.length,
+    `expected distinct globe coordinates for all ${liveNet.hosts.length} live metal nodes, got ${coordSet.size}`,
+  );
+
+  // Verify real H3 cells and bundled atmospheric ping arcs on real live metal nodes
+  const points = liveNet.hosts.map((h) => ({
+    id: h.name,
+    networkIndex: 0,
+    lat: h.lat,
+    lng: h.lng,
+    rttMs: h.rtt_ms ?? 25,
+  }));
+  const h3Cells = buildSimulatedH3DataCells(points, 3);
+  assert.ok(h3Cells.length >= liveNet.hosts.length);
+
+  const arcs = buildBundledPingArcs(points, 2.8, { segments: 24 });
+  assert.ok(arcs.length >= 1, `expected bundled atmospheric ping arcs across live metal peers`);
+  for (const arc of arcs) {
+    const mid = arc.points[12];
+    const r = Math.hypot(mid[0], mid[1], mid[2]);
+    assert.ok(Number.isFinite(r) && r > 2.82, `arc ${arc.fromId}->${arc.toId} invalid radius ${r}`);
+  }
+
+  // Verify all 8 TypeScript Camera Studio presets evaluate cleanly against real live metal nodes
+  const camCtx = buildCameraContext([liveNet], "metal");
+  assert.equal(camCtx.nodes.length, liveNet.hosts.length);
+  for (const preset of CAMERA_PRESETS) {
+    const res = evaluateCameraPolicy(preset.code, camCtx);
+    assert.equal(res.ok, true, `preset ${preset.id} failed on live metal daemon: ${res.error}`);
+    assert.ok(res.target && Number.isFinite(res.target.lat) && Number.isFinite(res.target.lng));
+  }
+
+  console.log(
+    `LIVE METAL OK: ${liveNet.hosts.length} nodes (${liveNet.hosts.map((h) => h.name).join(", ")}), ${arcs.length} bundled arcs, ${liveNet.plugins.length} plugin(s)`,
+  );
+});

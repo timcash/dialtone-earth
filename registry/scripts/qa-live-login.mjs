@@ -190,6 +190,39 @@ async function main() {
     `  [PASS] live session (${meshJson.nodes.length} nodes) + /api/mesh/users shows ${QA_EMAIL} at ${qaUser.locations[0].location} viewing ${firstNode}`,
   );
 
+  // 7b. Verify authenticated Cloudflare KV UI config persistence (layout + Camera Studio TS policy)
+  const uiCfgPayload = {
+    version: 2,
+    layout: "1|2",
+    paneContents: ["globe", "q-hosts", "q-plugins"],
+    queries: [
+      { id: "q-hosts", label: "metal hosts", kind: "hosts", source: "channel", networkSlug: "metal", rate: "fast" },
+      { id: "q-plugins", label: "metal plugins", kind: "plugins", source: "channel", networkSlug: "metal", rate: "slow" },
+    ],
+    cameraPolicyCode: 'export function selectTarget(ctx: CameraContext): CameraTarget | null { const p = maxBy(ctx.nodes, n => n.cpu); return p ? { lat: p.lat, lng: p.lng, node: p.name, network: p.network, reason: "qa-live" } : null; }',
+    theme: "dark",
+  };
+  const putCfg = await fetch(`${TARGET_ORIGIN}/api/user/ui-config`, {
+    method: "PUT",
+    headers: { Cookie: cookieHeader, "Content-Type": "application/json" },
+    body: JSON.stringify(uiCfgPayload),
+  });
+  assert.equal(putCfg.status, 200, `PUT /api/user/ui-config returned ${putCfg.status}`);
+  const getCfg = await fetch(`${TARGET_ORIGIN}/api/user/ui-config`, {
+    headers: { Cookie: cookieHeader },
+  });
+  assert.equal(getCfg.status, 200);
+  const loadedCfg = await getCfg.json();
+  assert.equal(loadedCfg.saved, true);
+  assert.equal(loadedCfg.config.layout, "1|2");
+  assert.deepEqual(loadedCfg.config.paneContents, ["globe", "q-hosts", "q-plugins"]);
+  const delCfg = await fetch(`${TARGET_ORIGIN}/api/user/ui-config`, {
+    method: "DELETE",
+    headers: { Cookie: cookieHeader },
+  });
+  assert.equal(delCfg.status, 200);
+  console.log("  [PASS] /api/user/ui-config PUT -> GET -> DELETE verified in Cloudflare KV");
+
   // 8. Logout clears session & presence
   const logout = await fetch(`${TARGET_ORIGIN}/auth/logout`, {
     redirect: "manual",

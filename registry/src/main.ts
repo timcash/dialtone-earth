@@ -711,6 +711,12 @@ async function syncLiveEndpointForKind(
 
   const endpoint = liveEndpointForQuery(kind, state.testId);
   if (!endpoint) return false;
+  if (endpoint !== "/api/mesh/state" && !state.liveRawCache["/api/mesh/state"]) {
+    const meshBootstrap = await fetchOptionalJson("/api/mesh/state");
+    if (meshBootstrap) {
+      state.liveRawCache["/api/mesh/state"] = meshBootstrap;
+    }
+  }
   const payload = await fetchOptionalJson(endpoint);
   if (!payload) {
     if (initial && !state.liveRawCache["/api/mesh/state"]) {

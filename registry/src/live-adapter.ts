@@ -107,8 +107,8 @@ export function adaptLiveMeshToNetwork(input: LiveMeshPayloads): MeshNetwork {
       arch: asString(n.arch) || "unknown",
       version: asString(n.version) || "0.5.5",
       relay_region: relayRegion,
-      lat: Math.round(asNumber(geo.lat) ?? 0),
-      lng: Math.round(asNumber(geo.lng) ?? 0),
+      lat: Math.round((asNumber(geo.lat) ?? 0) * 100) / 100,
+      lng: Math.round((asNumber(geo.lng) ?? 0) * 100) / 100,
       heard: asNumber(n.heard) ?? 0,
       online,
       rtt_ms: rttMs,
@@ -144,6 +144,25 @@ export function adaptLiveMeshToNetwork(input: LiveMeshPayloads): MeshNetwork {
           },
     };
   });
+
+  // Deterministically fan out co-located peers (e.g. multiple nodes in one metro)
+  // by a tiny ~0.35° ring so each node and its bundled ping arcs stay distinct on the 3D globe.
+  const geoGroups = new Map<string, MeshHost[]>();
+  for (const h of hosts) {
+    const key = `${h.lat.toFixed(2)},${h.lng.toFixed(2)}`;
+    const group = geoGroups.get(key) ?? [];
+    group.push(h);
+    geoGroups.set(key, group);
+  }
+  for (const group of geoGroups.values()) {
+    if (group.length < 2) continue;
+    group.forEach((host, idx) => {
+      const angle = (2 * Math.PI * idx) / group.length;
+      const radius = 0.35;
+      host.lat = Math.round((host.lat + Math.sin(angle) * radius) * 100) / 100;
+      host.lng = Math.round((host.lng + Math.cos(angle) * radius) * 100) / 100;
+    });
+  }
 
   const latestVersion =
     hosts.find((h) => h.version)?.version || "0.5.5";

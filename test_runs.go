@@ -121,7 +121,9 @@ func newTestEntry(name string) testEntry {
 
 func testSection(name string) string {
 	switch name {
-	case "TestDialtoneEarthLiveMetalUIParity",
+	case "TestDialtoneEarthLiveMetalDaemonE2E",
+		"TestDialtoneEarthMetalCloudflareLiveE2E",
+		"TestDialtoneEarthLiveMetalUIParity",
 		"TestDialtoneEarthGlobeH3AndBundledArcs",
 		"TestDialtoneEarthTilingWindowManagerAndQueryRates",
 		"TestDialtoneEarthCameraStudioTypeScript",
