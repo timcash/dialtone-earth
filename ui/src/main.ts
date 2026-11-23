@@ -49,94 +49,201 @@ let useBrowser = true;
 let keepSignedIn = true;
 let cdpStatus: CdpStatus = { connected: false, port: 9222 };
 let lastRunningTestName = "";
+let streamNonce = 1;
+let mountedStreamConnected: boolean | null = null;
+let shellMounted = false;
+
+function ensureDashboardShell(): { testsRoot: HTMLElement; viewportRoot: HTMLElement } {
+  if (!shellMounted) {
+    shellMounted = true;
+    app.innerHTML = `
+      <main class="synced-workspace">
+        <section id="cdp-viewport-host" class="viewport-pane" aria-label="Live Chrome CDP browser viewport"></section>
+        <section id="dashboard-tests" class="tests-pane"></section>
+      </main>
+    `;
+  }
+  const testsRoot = app.querySelector<HTMLElement>("#dashboard-tests");
+  const viewportRoot = app.querySelector<HTMLElement>("#cdp-viewport-host");
+  if (!testsRoot || !viewportRoot) {
+    throw new Error("missing dashboard workspace roots");
+  }
+  return { testsRoot, viewportRoot };
+}
+
+function syncViewportPane(): void {
+  const { viewportRoot } = ensureDashboardShell();
+  const runningTest = tests.find((test) => normalizeStatus(test.status) === "running");
+
+  // Only recreate the <img> stream element when CDP connection state changes
+  // so live MJPEG playback never flickers as individual test cards update.
+  if (mountedStreamConnected !== cdpStatus.connected) {
+    mountedStreamConnected = cdpStatus.connected;
+    if (cdpStatus.connected) {
+      streamNonce += 1;
+      viewportRoot.innerHTML = `
+        <div class="viewport-card">
+          <div class="viewport-head">
+            <div class="viewport-title-row">
+              <span class="cdp-pill connected" data-testid="viewport-live-pill">
+                <span class="cdp-dot"></span>
+                LIVE CHROME · CDP :${cdpStatus.port}
+              </span>
+              <code class="viewport-url" data-testid="viewport-url">${escapeHtml(cdpStatus.app_url || "https://metal.dialtone.earth/")}</code>
+            </div>
+            <div class="viewport-actions">
+              <span class="viewport-active-test" data-testid="viewport-active-test"></span>
+              <button data-testid="viewport-reconnect" class="ghost-btn" type="button" title="Reconnect live video stream">Refresh view</button>
+              <button data-testid="viewport-close-browser" class="ghost-btn" type="button">Close</button>
+            </div>
+          </div>
+          <div class="viewport-stage">
+            <img
+              data-testid="cdp-live-stream"
+              class="viewport-stream"
+              src="/api/cdp/stream?v=${streamNonce}"
+              alt="Live Chrome browser running Dialtone Earth tests"
+            />
+          </div>
+        </div>
+      `;
+      viewportRoot.querySelector<HTMLButtonElement>("[data-testid='viewport-reconnect']")?.addEventListener("click", () => {
+        mountedStreamConnected = null;
+        syncViewportPane();
+      });
+      viewportRoot.querySelector<HTMLButtonElement>("[data-testid='viewport-close-browser']")?.addEventListener("click", () => {
+        closeBrowser().catch(showError);
+      });
+    } else {
+      viewportRoot.innerHTML = `
+        <div class="viewport-card viewport-offline">
+          <div class="viewport-head">
+            <span class="cdp-pill offline" data-testid="viewport-live-pill">
+              <span class="cdp-dot"></span>
+              CHROME CDP :${cdpStatus.port} OFFLINE
+            </span>
+            <button data-testid="launch-browser" class="secondary-btn" type="button">Launch live browser</button>
+          </div>
+          <div class="viewport-placeholder">
+            <p>Start the persistent Chrome browser or click <strong>Run browser suite</strong> to watch live tests execute here in real time.</p>
+          </div>
+        </div>
+      `;
+      viewportRoot.querySelector<HTMLButtonElement>("[data-testid='launch-browser']")?.addEventListener("click", () => {
+        launchBrowser().catch(showError);
+      });
+    }
+  }
+
+  const urlEl = viewportRoot.querySelector<HTMLElement>("[data-testid='viewport-url']");
+  if (urlEl && cdpStatus.app_url) {
+    urlEl.textContent = cdpStatus.app_url;
+  }
+  const activeBadge = viewportRoot.querySelector<HTMLElement>("[data-testid='viewport-active-test']");
+  if (activeBadge) {
+    if (runningTest) {
+      activeBadge.textContent = `RUNNING: ${runningTest.title} (${elapsedSeconds(runningTest).toFixed(1)}s)`;
+      activeBadge.classList.add("active");
+    } else {
+      activeBadge.textContent = "READY · Reconnectable";
+      activeBadge.classList.remove("active");
+    }
+  }
+}
 
 function render(): void {
+  const { testsRoot } = ensureDashboardShell();
+  syncViewportPane();
+
   const passed = tests.filter((test) => normalizeStatus(test.status) === "pass").length;
   const failed = tests.filter((test) => normalizeStatus(test.status) === "fail").length;
   const runningTest = tests.find((test) => normalizeStatus(test.status) === "running");
   const running = Boolean(runningTest);
   const sections = groupTestsBySection(tests);
 
-  app.innerHTML = `
-    <main>
-      <header>
-        <p class="eyebrow">Dialtone Earth</p>
-        <section class="heading-row">
-          <div>
-            <h1>Tests</h1>
-          </div>
-          <div class="header-actions">
-            <button data-testid="run-browser-suite" class="secondary-btn" type="button" ${starting || running ? "disabled" : ""}>
-              Run browser suite
-            </button>
-            <button data-testid="start-tests" type="button" ${starting || running ? "disabled" : ""}>
-              ${starting ? "Starting…" : running ? "Running…" : "Start tests"}
-            </button>
-          </div>
-        </section>
-        <section class="cdp-bar" aria-label="Persistent browser controls">
-          <span class="cdp-pill ${cdpStatus.connected ? "connected" : "offline"}" data-testid="cdp-status">
-            <span class="cdp-dot"></span>
-            CDP :${cdpStatus.port} ${cdpStatus.connected ? "connected" : "offline"}
-          </span>
-          <label class="cdp-toggle">
-            <input type="checkbox" data-testid="toggle-browser" ${useBrowser ? "checked" : ""} />
-            <span>Live Browser</span>
-          </label>
-          <label class="cdp-toggle">
-            <input type="checkbox" data-testid="toggle-keep-signed-in" ${keepSignedIn ? "checked" : ""} />
-            <span>Keep signed in</span>
-          </label>
-          ${
-            cdpStatus.connected
-              ? `<button data-testid="close-browser" class="ghost-btn" type="button">Close browser</button>`
-              : ""
-          }
-        </section>
-        <section class="summary" aria-label="Test summary">
-          <span><strong>${tests.length}</strong> total</span>
-          <span><strong>${sections.length}</strong> sections</span>
-          <span class="passed"><strong>${passed}</strong> passed</span>
-          <span class="${failed > 0 ? "failed" : ""}"><strong>${failed}</strong> failed</span>
-        </section>
-        ${errorMessage ? `<p class="error" role="alert">${escapeHtml(errorMessage)}</p>` : ""}
-      </header>
-      <section class="test-sections" aria-label="Test sections">
+  testsRoot.innerHTML = `
+    <header>
+      <p class="eyebrow">Dialtone Earth</p>
+      <section class="heading-row">
+        <div>
+          <h1>Tests</h1>
+        </div>
+        <div class="header-actions">
+          <button data-testid="run-browser-suite" class="secondary-btn" type="button" ${starting || running ? "disabled" : ""}>
+            Run browser suite
+          </button>
+          <button data-testid="start-tests" type="button" ${starting || running ? "disabled" : ""}>
+            ${starting ? "Starting…" : running ? "Running…" : "Start tests"}
+          </button>
+        </div>
+      </section>
+      <section class="cdp-bar" aria-label="Persistent browser controls">
+        <span class="cdp-pill ${cdpStatus.connected ? "connected" : "offline"}" data-testid="cdp-status">
+          <span class="cdp-dot"></span>
+          CDP :${cdpStatus.port} ${cdpStatus.connected ? "connected" : "offline"}
+        </span>
+        <label class="cdp-toggle">
+          <input type="checkbox" data-testid="toggle-browser" ${useBrowser ? "checked" : ""} />
+          <span>Live Browser</span>
+        </label>
+        <label class="cdp-toggle">
+          <input type="checkbox" data-testid="toggle-keep-signed-in" ${keepSignedIn ? "checked" : ""} />
+          <span>Keep signed in</span>
+        </label>
         ${
-          tests.length > 0
-            ? sections.map((section) => renderSection(section, starting || running)).join("")
-            : `<section class="test-list"><p class="empty">${loaded ? "No tests listed yet. Press Start tests." : "Loading tests…"}</p></section>`
+          cdpStatus.connected
+            ? `<button data-testid="close-browser" class="ghost-btn" type="button">Close browser</button>`
+            : `<button data-testid="open-browser-bar" class="ghost-btn" type="button">Launch browser</button>`
         }
       </section>
-    </main>
+      <section class="summary" aria-label="Test summary">
+        <span><strong>${tests.length}</strong> total</span>
+        <span><strong>${sections.length}</strong> sections</span>
+        <span class="passed"><strong>${passed}</strong> passed</span>
+        <span class="${failed > 0 ? "failed" : ""}"><strong>${failed}</strong> failed</span>
+      </section>
+      ${errorMessage ? `<p class="error" role="alert">${escapeHtml(errorMessage)}</p>` : ""}
+    </header>
+    <section class="test-sections" aria-label="Test sections">
+      ${
+        tests.length > 0
+          ? sections.map((section) => renderSection(section, starting || running)).join("")
+          : `<section class="test-list"><p class="empty">${loaded ? "No tests listed yet. Press Start tests." : "Loading tests…"}</p></section>`
+      }
+    </section>
   `;
 
-  const startButton = app.querySelector<HTMLButtonElement>("[data-testid='start-tests']");
+  const startButton = testsRoot.querySelector<HTMLButtonElement>("[data-testid='start-tests']");
   startButton?.addEventListener("click", () => {
     startAllTests().catch(showError);
   });
 
-  const browserSuiteBtn = app.querySelector<HTMLButtonElement>("[data-testid='run-browser-suite']");
+  const browserSuiteBtn = testsRoot.querySelector<HTMLButtonElement>("[data-testid='run-browser-suite']");
   browserSuiteBtn?.addEventListener("click", () => {
     startFilteredTests("^TestBrowser", true).catch(showError);
   });
 
-  const browserToggle = app.querySelector<HTMLInputElement>("[data-testid='toggle-browser']");
+  const browserToggle = testsRoot.querySelector<HTMLInputElement>("[data-testid='toggle-browser']");
   browserToggle?.addEventListener("change", () => {
     useBrowser = Boolean(browserToggle.checked);
   });
 
-  const keepSignedInToggle = app.querySelector<HTMLInputElement>("[data-testid='toggle-keep-signed-in']");
+  const keepSignedInToggle = testsRoot.querySelector<HTMLInputElement>("[data-testid='toggle-keep-signed-in']");
   keepSignedInToggle?.addEventListener("change", () => {
     keepSignedIn = Boolean(keepSignedInToggle.checked);
   });
 
-  const closeBrowserBtn = app.querySelector<HTMLButtonElement>("[data-testid='close-browser']");
+  const closeBrowserBtn = testsRoot.querySelector<HTMLButtonElement>("[data-testid='close-browser']");
   closeBrowserBtn?.addEventListener("click", () => {
     closeBrowser().catch(showError);
   });
 
-  app.querySelectorAll<HTMLButtonElement>("[data-run-single]").forEach((btn) => {
+  const openBrowserBarBtn = testsRoot.querySelector<HTMLButtonElement>("[data-testid='open-browser-bar']");
+  openBrowserBarBtn?.addEventListener("click", () => {
+    launchBrowser().catch(showError);
+  });
+
+  testsRoot.querySelectorAll<HTMLButtonElement>("[data-run-single]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const name = btn.dataset.runSingle || "";
       if (!name) return;
@@ -147,7 +254,7 @@ function render(): void {
 
   if (runningTest && runningTest.name !== lastRunningTestName) {
     lastRunningTestName = runningTest.name;
-    const row = app.querySelector<HTMLElement>(`[data-test-name="${CSS.escape(runningTest.name)}"]`);
+    const row = testsRoot.querySelector<HTMLElement>(`[data-test-name="${CSS.escape(runningTest.name)}"]`);
     row?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   } else if (!runningTest) {
     lastRunningTestName = "";
@@ -264,6 +371,15 @@ async function startFilteredTests(filter: string, withBrowser: boolean): Promise
   void refreshCdpStatus();
 }
 
+async function launchBrowser(): Promise<void> {
+  const response = await fetch("/api/cdp/ensure", { method: "POST" });
+  const payload = (await response.json()) as { error?: string };
+  if (!response.ok) {
+    throw new Error(payload.error || `Could not launch browser: HTTP ${response.status}`);
+  }
+  await refreshCdpStatus();
+}
+
 async function closeBrowser(): Promise<void> {
   const response = await fetch("/api/cdp/close", { method: "POST" });
   const payload = (await response.json()) as { error?: string };
@@ -375,13 +491,18 @@ if (location.pathname.replace(/\/$/, "").endsWith("/logs")) {
   }, 500);
   setInterval(() => {
     void refreshCdpStatus();
-  }, 2000);
+  }, 1500);
   setInterval(() => {
-    tests.forEach((test) => {
-      if (normalizeStatus(test.status) !== "running") return;
-      const row = app.querySelector<HTMLElement>(`[data-test-name="${CSS.escape(test.name)}"]`);
+    const runningTest = tests.find((test) => normalizeStatus(test.status) === "running");
+    if (runningTest) {
+      const row = app.querySelector<HTMLElement>(`[data-test-name="${CSS.escape(runningTest.name)}"]`);
       const time = row?.querySelector("time");
-      if (time) time.textContent = `${elapsedSeconds(test).toFixed(2)}s`;
-    });
+      if (time) time.textContent = `${elapsedSeconds(runningTest).toFixed(2)}s`;
+      const activeBadge = app.querySelector<HTMLElement>("[data-testid='viewport-active-test']");
+      if (activeBadge) {
+        activeBadge.textContent = `RUNNING: ${runningTest.title} (${elapsedSeconds(runningTest).toFixed(1)}s)`;
+        activeBadge.classList.add("active");
+      }
+    }
   }, 100);
 }
