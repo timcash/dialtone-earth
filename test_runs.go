@@ -123,6 +123,7 @@ func testSection(name string) string {
 	switch name {
 	case "TestDialtoneEarthLiveMetalDaemonE2E",
 		"TestDialtoneEarthMetalCloudflareLiveE2E",
+		"TestDialtoneEarthMetalLiveBrowserE2E",
 		"TestDialtoneEarthLiveMetalUIParity",
 		"TestDialtoneEarthGlobeH3AndBundledArcs",
 		"TestDialtoneEarthTilingWindowManagerAndQueryRates",

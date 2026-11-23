@@ -1671,13 +1671,18 @@ function buildSingleQueryTable(
             typeof h.rtt_ms === "number" && h.rtt_ms > 0
               ? `${h.rtt_ms.toFixed(1)} ms`
               : "local";
-          const memUsed = ((h.stats.mem_used_bytes ?? 0) / 1e9).toFixed(1);
-          const memTotal = ((h.stats.mem_total_bytes ?? 0) / 1e9).toFixed(0);
+          const cores = h.stats.cpu_cores ?? 0;
+          const cpuCell = cores > 0 ? `${cpuPct.toFixed(0)}% (${cores}c)` : `${cpuPct.toFixed(0)}%`;
+          const memTotalBytes = h.stats.mem_total_bytes ?? 0;
+          const ramCell =
+            memTotalBytes > 0
+              ? `${((h.stats.mem_used_bytes ?? 0) / 1e9).toFixed(1)}/${(memTotalBytes / 1e9).toFixed(0)} GB`
+              : `${memPct.toFixed(0)}%`;
           return `<tr class="is-clickable ${selected}" data-select-host="${escapeHtml(h.name)}" data-host-net="${escapeHtml(net.slug)}">
             <td class="c-strong"><span class="tbl-dot ${loadClass}"></span>${escapeHtml(h.name)}</td>
             <td>${escapeHtml(h.os)}/${escapeHtml(h.arch)}</td>
-            <td>${cpuPct.toFixed(0)}% (${h.stats.cpu_cores ?? 0}c)</td>
-            <td>${memUsed}/${memTotal} GB</td>
+            <td>${cpuCell}</td>
+            <td>${ramCell}</td>
             <td>${escapeHtml(rtt)}</td>
             <td>${h.blobStore.objects}</td>
             <td>${escapeHtml(h.probeSummary)}</td>

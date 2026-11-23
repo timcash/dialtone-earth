@@ -54,6 +54,7 @@ export interface H3DataCell {
 export function buildSimulatedH3DataCells(
   nodes: GeoNodePoint[],
   resolution = 3,
+  includeSimulatedClusters = true,
 ): H3DataCell[] {
   const map = new Map<string, H3DataCell>();
 
@@ -80,14 +81,16 @@ export function buildSimulatedH3DataCells(
   for (const node of nodes) {
     seedCell(node.lat, node.lng, node.networkIndex, 0.95, 1);
   }
-  for (const cluster of SIMULATED_GEOSPATIAL_CLUSTERS) {
-    seedCell(
-      cluster.lat,
-      cluster.lng,
-      cluster.networkIndex,
-      cluster.intensity,
-      cluster.ringSize,
-    );
+  if (includeSimulatedClusters) {
+    for (const cluster of SIMULATED_GEOSPATIAL_CLUSTERS) {
+      seedCell(
+        cluster.lat,
+        cluster.lng,
+        cluster.networkIndex,
+        cluster.intensity,
+        cluster.ringSize,
+      );
+    }
   }
 
   return [...map.values()];

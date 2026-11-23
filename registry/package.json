@@ -10,6 +10,7 @@
     "dev": "vite",
     "test": "node --test tests/networks.test.mjs tests/security-headers.test.mjs tests/simulation.test.mjs tests/gateway.test.mjs tests/origin-bridge.test.mjs tests/metal-ui-e2e.test.mjs",
     "test:live": "node scripts/qa-live-login.mjs",
+    "test:live:browser": "node scripts/qa-live-browser.mjs",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "deploy": "wrangler deploy"

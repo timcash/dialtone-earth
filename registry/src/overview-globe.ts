@@ -194,7 +194,7 @@ class OverviewGlobe {
       });
     }
 
-    const h3Cells = buildSimulatedH3DataCells(allGeoPoints, 3);
+    const h3Cells = buildSimulatedH3DataCells(allGeoPoints, 3, includeSimulatedGeodata);
     this.geoOverlay = new GeospatialH3Overlay(h3Cells, EARTH_RADIUS);
     this.globe.add(this.geoOverlay.group);
     this.addBundledPingArcs(allGeoPoints);
