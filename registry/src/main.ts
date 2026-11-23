@@ -1681,9 +1681,17 @@ function buildSingleQueryTable(
                 ? "is-med"
                 : "is-low";
           const selected = h.name === state.hostName ? "is-selected" : "";
+          const pathTag =
+            h.path_mode === "lan"
+              ? " LAN"
+              : h.path_mode === "direct"
+                ? " DIR"
+                : h.path_mode === "relay"
+                  ? " RLY"
+                  : "";
           const rtt =
             typeof h.rtt_ms === "number" && h.rtt_ms > 0
-              ? `${h.rtt_ms.toFixed(1)} ms`
+              ? `${h.rtt_ms.toFixed(1)} ms${pathTag}`
               : "local";
           const cores = h.stats.cpu_cores ?? 0;
           const cpuCell = cores > 0 ? `${cpuPct.toFixed(0)}% (${cores}c)` : `${cpuPct.toFixed(0)}%`;

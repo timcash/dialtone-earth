@@ -58,6 +58,36 @@ export function adaptLiveMeshToNetwork(input: LiveMeshPayloads): MeshNetwork {
   const users = adaptUsers(input.users, input.currentUser, shellAuditLog);
 
   const rawNodes = Array.isArray(mesh.nodes) ? mesh.nodes : [];
+
+  // Build symmetric peer RTT graph so every host reports true RTT from `selfNode`
+  // (direct hop if neighbored, else shortest path via Dijkstra) instead of averaging distant WAN peers.
+  const rttGraph = new Map<string, Map<string, number>>();
+  const addGraphEdge = (a: string, b: string, ms: number) => {
+    if (!a || !b || a === b || !Number.isFinite(ms) || ms <= 0) return;
+    let aMap = rttGraph.get(a);
+    if (!aMap) {
+      aMap = new Map();
+      rttGraph.set(a, aMap);
+    }
+    const existing = aMap.get(b);
+    if (existing === undefined || ms < existing) {
+      aMap.set(b, Math.round(ms * 10) / 10);
+    }
+  };
+  for (const raw of rawNodes) {
+    const n = asRecord(raw);
+    const name = asString(n.node) || asString(n.name);
+    if (!name) continue;
+    const peerMap = asRecord(n.peer_rtt_ms);
+    for (const [peerName, val] of Object.entries(peerMap)) {
+      if (typeof val === "number" && Number.isFinite(val) && val > 0) {
+        addGraphEdge(name, peerName, val);
+        addGraphEdge(peerName, name, val);
+      }
+    }
+  }
+  const shortestFromSelf = computeShortestRttFromOrigin(selfNode, rttGraph);
+
   const hosts: MeshHost[] = rawNodes.map((raw) => {
     const n = asRecord(raw);
     const name = asString(n.node) || asString(n.name) || "unknown-node";
@@ -80,12 +110,15 @@ export function adaptLiveMeshToNetwork(input: LiveMeshPayloads): MeshNetwork {
       }
     }
     const rttValues = Object.values(cleanPeerRtt);
-    const rttMs =
-      isSelf
-        ? 0
+    const fromSelf = shortestFromSelf.get(name);
+    const rttMs = isSelf
+      ? 0
+      : typeof fromSelf === "number"
+        ? fromSelf
         : rttValues.length > 0
           ? Math.round((rttValues.reduce((a, b) => a + b, 0) / rttValues.length) * 10) / 10
           : null;
+    const pathMode = classifyPathMode(isSelf, n.observed_remote_addrs);
 
     const nodeProcesses =
       Array.isArray(n.processes) && n.processes.length > 0
@@ -117,6 +150,7 @@ export function adaptLiveMeshToNetwork(input: LiveMeshPayloads): MeshNetwork {
       online,
       rtt_ms: rttMs,
       peer_rtt_ms: cleanPeerRtt,
+      path_mode: pathMode,
       gpuName: null,
       gpuLoadPercent: null,
       probeSummary,
@@ -520,6 +554,76 @@ function extractRelayLabel(url: string): string {
   } catch {
     return "";
   }
+}
+
+function isPrivateLanIpv4(ip: string): boolean {
+  const parts = ip.split(".").map((p) => Number(p));
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+    return false;
+  }
+  const [a, b] = parts;
+  if (a === 10) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  return false;
+}
+
+function classifyPathMode(
+  isSelf: boolean,
+  observedRaw: unknown,
+): "self" | "lan" | "direct" | "relay" | null {
+  if (isSelf) return "self";
+  if (!Array.isArray(observedRaw)) return null;
+  let hasActiveLan = false;
+  let hasActiveIp = false;
+  let hasActiveRelay = false;
+  for (const item of observedRaw) {
+    if (typeof item !== "string") continue;
+    if (item.startsWith("active:ip:")) {
+      hasActiveIp = true;
+      const addr = item.slice("active:ip:".length);
+      const host = addr.startsWith("[") ? "" : addr.split(":")[0] || "";
+      if (isPrivateLanIpv4(host)) hasActiveLan = true;
+    } else if (item.startsWith("active:relay:")) {
+      hasActiveRelay = true;
+    }
+  }
+  if (hasActiveLan) return "lan";
+  if (hasActiveIp) return "direct";
+  if (hasActiveRelay) return "relay";
+  return null;
+}
+
+function computeShortestRttFromOrigin(
+  origin: string,
+  graph: Map<string, Map<string, number>>,
+): Map<string, number> {
+  const dist = new Map<string, number>();
+  if (!origin) return dist;
+  dist.set(origin, 0);
+  const visited = new Set<string>();
+  while (true) {
+    let bestNode: string | null = null;
+    let bestDist = Number.POSITIVE_INFINITY;
+    for (const [node, d] of dist.entries()) {
+      if (!visited.has(node) && d < bestDist) {
+        bestDist = d;
+        bestNode = node;
+      }
+    }
+    if (bestNode === null) break;
+    visited.add(bestNode);
+    const edges = graph.get(bestNode);
+    if (!edges) continue;
+    for (const [neighbor, weight] of edges.entries()) {
+      const alt = Math.round((bestDist + weight) * 10) / 10;
+      const prev = dist.get(neighbor);
+      if (prev === undefined || alt < prev) {
+        dist.set(neighbor, alt);
+      }
+    }
+  }
+  return dist;
 }
 
 function shortenDigest(digest: string): string {

@@ -96,7 +96,8 @@ function buildRealMetalChannelPayloads() {
           updated_at_unix: nowUnix,
           heard: 1812,
           geo_location: { lat: 34.05, lng: -118.24, label: "us-west (LA)" },
-          peer_rtt_ms: { "legion-metal": 14.8, "vm-us-metal": 22.1 },
+          observed_remote_addrs: ["active:ip:192.168.1.220:60554", "active:relay:https://usw1-1.relay.n0.iroh.link./"],
+          peer_rtt_ms: { "legion-metal": 14.8, "vm-us-metal": 22.1, "vm-asia-metal": 180.0 },
           probe: { passed_count: 7, total_count: 7 },
           stats: {
             cpu_cores: 12,
@@ -272,6 +273,14 @@ test("metal-live-parity: adapts live metal channel nodes, dialtone-shell plugin,
   assert.equal(metalNet.slug, "metal");
   assert.equal(metalNet.hostname, "metal.dialtone.earth");
   assert.equal(metalNet.hosts.length, 5);
+  const mac = metalNet.hosts.find((h) => h.name === "mac-metal");
+  assert.ok(mac, "expected mac-metal peer");
+  assert.equal(mac.path_mode, "lan", "expected LAN path classification from 192.168.1.220");
+  assert.equal(
+    mac.rtt_ms,
+    14.2,
+    "expected direct RTT from legion-metal (14.2ms), not average including 180ms WAN peer",
+  );
   assert.equal(metalNet.plugins.length, 1);
   assert.equal(metalNet.plugins[0].name, "shell");
   assert.equal(metalNet.plugins[0].runtime, "stdio-rpc-blob");
@@ -279,6 +288,7 @@ test("metal-live-parity: adapts live metal channel nodes, dialtone-shell plugin,
 
   const legion = metalNet.hosts.find((h) => h.name === "legion-metal");
   assert.ok(legion, "legion-metal missing");
+  assert.equal(legion.path_mode, "self");
   assert.equal(legion.sessions.length, 1);
   assert.ok(
     !legion.sessions[0].lastCommand.includes("secret_metal_token_999"),
@@ -364,7 +374,7 @@ test("metal-globe-h3-arcs: globe overlays are 100% query-driven with zero cloud 
     onlyMeasuredLinks: true,
     focusHostName: singleHostLayers.focusHostName,
   });
-  assert.equal(focusedArcs.length, 2, "mac-metal has measured peer_rtt_ms to legion-metal and vm-us-metal only");
+  assert.equal(focusedArcs.length, 3, "mac-metal has measured peer_rtt_ms to legion-metal, vm-us-metal, and vm-asia-metal");
 
   // Users & probes queries -> violet / green tiles driven strictly by real data
   const usersLayers = buildQueryDrivenGlobeLayers([metalNet], [usersQ], "legion-metal", false);

@@ -45,6 +45,8 @@ export type NetworkNode = {
   online: boolean;
   rtt_ms?: number | null;
   peer_rtt_ms?: Record<string, number>;
+  /** Observed transport path from local origin ("self" | "lan" | "direct" | "relay") */
+  path_mode?: "self" | "lan" | "direct" | "relay" | null;
   rtt_ms_from_grok_bot_metal?: number | null;
   stats: NodeStats;
   resources?: NodeResources;
