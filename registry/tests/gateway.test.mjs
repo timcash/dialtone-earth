@@ -705,6 +705,70 @@ test("multi-location user presence and redacted dialtone-shell audit log per pri
   assert.equal(afterLogoutBody.users[0].locations[0].location, "Seattle, WA, US (SEA)");
 });
 
+test("MAGIC_LINK_DELIVERY_MAP routes test@dialtone.earth to verified mailbox while preserving test@dialtone.earth identity", async () => {
+  const kv = createMemoryKv();
+  const sentEmails = [];
+  const env = {
+    DIALTONE_AUTH_TOKENS: kv,
+    SESSION_SIGNING_KEY: "0123456789abcdef0123456789abcdef",
+    MAGIC_LINK_ALLOWLIST: JSON.stringify({
+      "metal.dialtone.earth": ["test@dialtone.earth"],
+    }),
+    MAGIC_LINK_DELIVERY_MAP: JSON.stringify({
+      "test@dialtone.earth": "verified-qa-inbox@example.test",
+    }),
+    MESH_ORIGINS_MAP: JSON.stringify({
+      "metal.dialtone.earth": ["https://origin-metal.example.test"],
+    }),
+  };
+  const deps = {
+    nowSec: () => 1_800_000_000,
+    sendEmail: async (payload) => {
+      sentEmails.push(payload);
+    },
+  };
+
+  const reqResp = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/auth/request-link", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "email=test%40dialtone.earth",
+    }),
+    env,
+    deps,
+  );
+  assert.equal(reqResp.status, 303);
+  assert.equal(sentEmails.length, 1);
+  assert.equal(sentEmails[0].to, "verified-qa-inbox@example.test");
+  assert.ok(sentEmails[0].subject.includes("test@dialtone.earth"));
+
+  const token = decodeURIComponent(
+    sentEmails[0].text.match(/\/auth\/verify\?token=([^\s]+)/)[1],
+  );
+  const verifyResp = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/auth/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: `token=${encodeURIComponent(token)}`,
+    }),
+    env,
+    deps,
+  );
+  assert.equal(verifyResp.status, 303);
+  const cookie = (verifyResp.headers.get("Set-Cookie") ?? "").split(";")[0];
+
+  const sessionResp = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/session", {
+      headers: { Cookie: cookie },
+    }),
+    env,
+    deps,
+  );
+  const sessionBody = await sessionResp.json();
+  assert.equal(sessionBody.authenticated, true);
+  assert.equal(sessionBody.subject, "test@dialtone.earth");
+});
+
 async function signJwt(privateKey, header, payload) {
   const enc = (obj) =>
     Buffer.from(JSON.stringify(obj))
