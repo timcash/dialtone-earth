@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "test": "node --test tests/networks.test.mjs tests/security-headers.test.mjs tests/simulation.test.mjs tests/gateway.test.mjs",
+    "test": "node --test tests/networks.test.mjs tests/security-headers.test.mjs tests/simulation.test.mjs tests/gateway.test.mjs tests/origin-bridge.test.mjs",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "deploy": "wrangler deploy"
