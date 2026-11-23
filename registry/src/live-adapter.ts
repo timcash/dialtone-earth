@@ -1,0 +1,382 @@
+import type {
+  MeshHost,
+  MeshNetwork,
+  SimBlobStoreStats,
+  SimPluginDeployment,
+  SimRecoveryEvent,
+  SimShellSession,
+  SimTestRun,
+} from "./simulation";
+
+export interface LiveMeshPayloads {
+  hostname: string;
+  networkName?: string;
+  mesh: Record<string, unknown>;
+  plugins?: Record<string, unknown> | null;
+  sessions?: Record<string, unknown> | null;
+  processes?: Record<string, unknown> | null;
+  probe?: Record<string, unknown> | null;
+  fullState?: Record<string, unknown> | null;
+  tests?: Record<string, unknown> | null;
+}
+
+/**
+ * Adapts real Dialtone v0.5.5 + timcash/template JSON payloads into the exact
+ * same MeshNetwork model rendered by the simulated system tour so signed-in
+ * and signed-out views display identical structure, metrics, and screens.
+ */
+export function adaptLiveMeshToNetwork(input: LiveMeshPayloads): MeshNetwork {
+  const mesh = asRecord(input.mesh);
+  const meshConfig = asRecord(mesh.mesh_config);
+  const channel =
+    asString(meshConfig.channel) ||
+    asString(input.networkName) ||
+    "metal";
+  const channelFingerprint =
+    asString(meshConfig.channel_fingerprint) || "live-channel";
+  const selfNode = asString(mesh.self_node) || asString(meshConfig.node_name);
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  const plugins = adaptPlugins(input.plugins);
+  const topProcesses = adaptProcesses(input.processes ?? mesh);
+  const topSessions = adaptSessions(input.sessions);
+  const blobStore = adaptBlobStore(mesh.blob_stats, plugins.length);
+  const recoveryEvents = adaptRecoveryEvents(input.fullState, input.probe, selfNode);
+  const tests = adaptTests(input.tests);
+
+  const rawNodes = Array.isArray(mesh.nodes) ? mesh.nodes : [];
+  const hosts: MeshHost[] = rawNodes.map((raw) => {
+    const n = asRecord(raw);
+    const name = asString(n.node) || asString(n.name) || "unknown-node";
+    const isSelf = selfNode !== "" && name === selfNode;
+    const geo = asRecord(n.geo_location);
+    const rawStats = asRecord(n.stats);
+    const probe = asRecord(n.probe);
+    const probeSummary = formatProbeSummary(probe);
+    const updatedAt = asNumber(n.updated_at_unix);
+    const online =
+      typeof n.online === "boolean"
+        ? n.online
+        : isSelf || (updatedAt !== null && nowSec - updatedAt < 120);
+
+    const peerRttMap = asRecord(n.peer_rtt_ms);
+    const rttValues = Object.values(peerRttMap).filter(
+      (v): v is number => typeof v === "number" && Number.isFinite(v),
+    );
+    const rttMs =
+      isSelf
+        ? 0
+        : rttValues.length > 0
+          ? Math.round((rttValues.reduce((a, b) => a + b, 0) / rttValues.length) * 10) / 10
+          : null;
+
+    const nodeProcesses =
+      Array.isArray(n.processes) && n.processes.length > 0
+        ? adaptProcesses({ processes: n.processes })
+        : isSelf
+          ? topProcesses
+          : [];
+
+    const relayUrls = Array.isArray(asRecord(n.iroh_transport).advertised_relay_urls)
+      ? (asRecord(n.iroh_transport).advertised_relay_urls as unknown[])
+      : [];
+    const relayRegion =
+      asString(geo.label) ||
+      extractRelayLabel(asString(relayUrls[0])) ||
+      "iroh-relay";
+
+    return {
+      name,
+      role: isSelf
+        ? "Gateway Origin & Mesh Peer"
+        : asString(n.role) || "mesh-peer-node",
+      os: asString(n.os) || "unknown",
+      arch: asString(n.arch) || "unknown",
+      version: asString(n.version) || "0.5.5",
+      relay_region: relayRegion,
+      lat: Math.round(asNumber(geo.lat) ?? 0),
+      lng: Math.round(asNumber(geo.lng) ?? 0),
+      heard: asNumber(n.heard) ?? 0,
+      online,
+      rtt_ms: rttMs,
+      gpuName: null,
+      gpuLoadPercent: null,
+      probeSummary,
+      stats: {
+        cpu_cores: asNumber(rawStats.cpu_cores),
+        cpu_percent: asNumber(rawStats.cpu_percent),
+        mem_percent: asNumber(rawStats.mem_percent),
+        mem_total_bytes: asNumber(rawStats.mem_total_bytes),
+        mem_used_bytes: asNumber(rawStats.mem_used_bytes),
+        disk_percent: asNumber(rawStats.disk_percent),
+        disk_total_bytes: asNumber(rawStats.disk_total_bytes),
+        disk_used_bytes: asNumber(rawStats.disk_used_bytes),
+        gpu_mem_total_bytes: asNumber(rawStats.gpu_mem_total_bytes),
+        gpu_mem_used_bytes: asNumber(rawStats.gpu_mem_used_bytes),
+        load_avg_1m: asNumber(rawStats.load_avg_1m),
+      },
+      processes: nodeProcesses,
+      plugins: isSelf ? plugins : [],
+      sessions: isSelf ? topSessions : [],
+      blobStore: isSelf
+        ? blobStore
+        : {
+            objects: 0,
+            totalBytes: 0,
+            pinnedPlugins: 0,
+            peerPulls24h: 0,
+            cacheHitPercent: 100,
+            verifiedSha256Percent: 100,
+            recentTransfer: "Peer blob metrics available via /api/details",
+          },
+    };
+  });
+
+  const latestVersion =
+    hosts.find((h) => h.version)?.version || "0.5.5";
+  const regionLabels = [
+    ...new Set(hosts.map((h) => h.relay_region).filter(Boolean)),
+  ].slice(0, 3);
+
+  return {
+    slug: channel,
+    name: channel,
+    hostname: input.hostname,
+    channelFingerprint,
+    regionSummary: regionLabels.join(" · ") || "Dialtone Iroh Mesh",
+    simulated: false,
+    snapshot: {
+      network: channel,
+      generated_at: new Date().toISOString(),
+      latest_release: latestVersion,
+      node_count: hosts.length,
+      nodes: hosts,
+    },
+    hosts,
+    plugins,
+    blobStore,
+    recoveryEvents,
+    tests,
+  };
+}
+
+function adaptPlugins(
+  raw: Record<string, unknown> | null | undefined,
+): SimPluginDeployment[] {
+  const list = Array.isArray(asRecord(raw).plugins)
+    ? (asRecord(raw).plugins as unknown[])
+    : [];
+  return list.map((entry) => {
+    const item = asRecord(entry);
+    const manifest = asRecord(item.manifest);
+    const protocols = Array.isArray(manifest.protocols)
+      ? (manifest.protocols as unknown[]).map(asString).filter(Boolean)
+      : [];
+    const installedUnix = asNumber(manifest.installed_at_unix);
+    return {
+      name: asString(manifest.name) || "plugin",
+      version: asString(manifest.version) || "0.5.5",
+      protocol: protocols.join(", ") || "stdio-rpc/v1",
+      runtime:
+        asString(manifest.kind) === "blob-binary"
+          ? "stdio-rpc-blob"
+          : "builtin-quic",
+      repo: asString(manifest.source_repo) || "timcash/dialtone",
+      digest: shortenDigest(asString(manifest.blob_digest)),
+      sizeBytes: asNumber(manifest.bytes) ?? 0,
+      status: item.verified === false ? "verifying" : "deployed",
+      deployedAt: installedUnix
+        ? new Date(installedUnix * 1000).toISOString()
+        : new Date().toISOString(),
+    };
+  });
+}
+
+function adaptProcesses(
+  raw: Record<string, unknown> | null | undefined,
+): MeshHost["processes"] {
+  const list = Array.isArray(asRecord(raw).processes)
+    ? (asRecord(raw).processes as unknown[])
+    : [];
+  return list.map((entry) => {
+    const p = asRecord(entry);
+    const restarts = asNumber(p.restart_count) ?? 0;
+    return {
+      name: asString(p.name) || "process",
+      pid: asNumber(p.pid) ?? 0,
+      digest: shortenDigest(asString(p.digest)),
+      restarts,
+      status: restarts > 0 ? "recovered" : "running",
+    };
+  });
+}
+
+function adaptSessions(
+  raw: Record<string, unknown> | null | undefined,
+): SimShellSession[] {
+  const list = Array.isArray(asRecord(raw).sessions)
+    ? (asRecord(raw).sessions as unknown[])
+    : [];
+  return list.map((entry) => {
+    const s = asRecord(entry);
+    const shell = asString(s.shell).toLowerCase().includes("power")
+      ? "powershell"
+      : "bash";
+    return {
+      name: asString(s.name) || "session",
+      shell,
+      cwd: asString(s.cwd) || "~",
+      status: asString(s.status) === "idle" ? "idle" : "active",
+      interrupts: asNumber(s.interrupt_count) ?? 0,
+      lastCommand: asString(s.last_command) || "(interactive shell)",
+      lastOutput: asString(s.last_output) || "(connected over dialtone/shell/1)",
+    };
+  });
+}
+
+function adaptBlobStore(
+  raw: unknown,
+  pinnedPlugins: number,
+): SimBlobStoreStats {
+  const b = asRecord(raw);
+  const objects = asNumber(b.blob_keys) ?? 0;
+  const totalBytes = asNumber(b.blob_bytes) ?? 0;
+  const fetches = asNumber(b.blob_fetches) ?? 0;
+  const programs = asNumber(b.installed_programs) ?? 0;
+  return {
+    objects,
+    totalBytes,
+    pinnedPlugins: Math.max(pinnedPlugins, programs),
+    peerPulls24h: fetches,
+    cacheHitPercent: objects > 0 ? 100 : 0,
+    verifiedSha256Percent: 100,
+    recentTransfer: `${objects} local iroh-blobs keys (${(totalBytes / 1e6).toFixed(2)} MB), ${programs} staged program(s)`,
+  };
+}
+
+function adaptRecoveryEvents(
+  fullState: Record<string, unknown> | null | undefined,
+  probeResp: Record<string, unknown> | null | undefined,
+  selfNode: string,
+): SimRecoveryEvent[] {
+  const events = Array.isArray(asRecord(fullState).events)
+    ? (asRecord(fullState).events as unknown[])
+    : [];
+  const mapped: SimRecoveryEvent[] = events.slice(-8).reverse().map((raw, idx) => {
+    const ev = asRecord(raw);
+    const ts = asNumber(ev.timestamp_unix);
+    const kind = asString(ev.kind) || "mesh.event";
+    const severity = asString(ev.severity);
+    return {
+      id: asString(ev.id) || `live-evt-${idx}`,
+      timestamp: ts ? new Date(ts * 1000).toISOString() : new Date().toISOString(),
+      host: asString(ev.source) || selfNode || "origin",
+      stage:
+        severity === "error" || severity === "warn"
+          ? "detected"
+          : kind.includes("join")
+            ? "rejoined"
+            : "verified",
+      trigger: kind,
+      action: asString(ev.message) || "Live mesh event recorded",
+      recoveryMs: 0,
+      probeAfter: formatProbeSummary(asRecord(asRecord(probeResp).probe)),
+    };
+  });
+
+  if (mapped.length > 0) return mapped;
+
+  const probe = asRecord(asRecord(probeResp).probe);
+  return [
+    {
+      id: "live-probe-latest",
+      timestamp: new Date().toISOString(),
+      host: selfNode || "origin",
+      stage: "verified",
+      trigger: `Live Dialtone probe cycle #${asNumber(probe.cycle) ?? 0}`,
+      action: formatProbeSummary(probe),
+      recoveryMs: 0,
+      probeAfter: formatProbeSummary(probe),
+    },
+  ];
+}
+
+function adaptTests(
+  raw: Record<string, unknown> | null | undefined,
+): SimTestRun[] {
+  const list = Array.isArray(asRecord(raw).tests)
+    ? (asRecord(raw).tests as unknown[])
+    : [];
+  return list.map((entry) => {
+    const t = asRecord(entry);
+    const name = asString(t.name) || "TestUnknown";
+    const statusRaw = asString(t.status);
+    const status: SimTestRun["status"] =
+      statusRaw === "pass" ||
+      statusRaw === "fail" ||
+      statusRaw === "running" ||
+      statusRaw === "skip"
+        ? statusRaw
+        : "pass";
+    const testId = asString(t["test-id"]);
+    return {
+      testId,
+      name,
+      title: asString(t.title) || name,
+      status,
+      elapsed: asString(t.elapsed) || "0.00",
+      timestamp: asString(t.timestamp) || "none",
+      completedAt: asString(t.completed_at) || "",
+      command: `go run . test --filter "^${name}$"`,
+      artifact: testId ? `logs/${testId}.log` : "",
+      log: "Select Log ↗ to load immutable execution transcript from the gateway.",
+    };
+  });
+}
+
+function formatProbeSummary(probe: Record<string, unknown>): string {
+  const passed = asNumber(probe.passed_count);
+  const total = asNumber(probe.total_count);
+  const checks = Array.isArray(probe.checks)
+    ? (probe.checks as unknown[]).map((c) => {
+        const item = asRecord(c);
+        const code = asString(item.code);
+        const ok = item.ok === true;
+        const detail = asString(item.detail);
+        return ok ? code : `${code}! (${detail || "fail"})`;
+      })
+    : [];
+  if (passed !== null && total !== null) {
+    return `${passed}/${total} PASS (${checks.join(" ")})`;
+  }
+  return checks.length > 0 ? checks.join(" ") : "probe nominal";
+}
+
+function extractRelayLabel(url: string): string {
+  if (!url) return "";
+  try {
+    const host = new URL(url).hostname;
+    return host.split(".")[0] || host;
+  } catch {
+    return "";
+  }
+}
+
+function shortenDigest(digest: string): string {
+  if (digest.length <= 28) return digest;
+  return `${digest.slice(0, 20)}...${digest.slice(-4)}`;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function asString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function asNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}

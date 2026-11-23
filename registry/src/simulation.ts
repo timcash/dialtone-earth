@@ -79,7 +79,7 @@ export type SimNetwork = {
   hostname: string;
   channelFingerprint: string;
   regionSummary: string;
-  simulated: true;
+  simulated: boolean;
   snapshot: NetworkSnapshot;
   hosts: SimHost[];
   plugins: SimPluginDeployment[];
@@ -87,6 +87,9 @@ export type SimNetwork = {
   recoveryEvents: SimRecoveryEvent[];
   tests: SimTestRun[];
 };
+
+export type MeshNetwork = SimNetwork;
+export type MeshHost = SimHost;
 
 export type SystemResourceSummary = {
   networks: number;

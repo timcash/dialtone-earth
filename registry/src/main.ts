@@ -1,17 +1,15 @@
 import "./hud.css";
 import { aggregateNetwork } from "./aggregates";
+import { adaptLiveMeshToNetwork } from "./live-adapter";
 import {
-  findSimulatedHost,
-  findSimulatedNetwork,
-  findSimulatedTest,
   SIMULATED_NETWORKS,
-  SIMULATED_OVERVIEW_NETWORKS,
   SIMULATED_TOUR_STEPS,
   summarizeSystemResources,
+  type MeshHost,
+  type MeshNetwork,
   type NetworkFocusTab,
-  type SimHost,
-  type SimNetwork,
   type SimTestRun,
+  type TourStep,
   type TourView,
 } from "./simulation";
 import type { OverviewGlobeController } from "./overview-globe";
@@ -20,13 +18,18 @@ type SessionInfo = {
   authenticated: boolean;
   mode: "live" | "simulated";
   network: string | null;
+  hostname?: string;
   subject?: string;
   origin_count?: number;
   gateway?: string;
+  login_url?: string | null;
+  logout_url?: string | null;
 };
 
 type AppState = {
   session: SessionInfo;
+  networks: MeshNetwork[];
+  tourSteps: TourStep[];
   view: TourView;
   networkSlug: string;
   hostName: string;
@@ -34,7 +37,8 @@ type AppState = {
   testId: string;
   tourPlaying: boolean;
   tourStepIndex: number;
-  liveSummary: string | null;
+  liveError: string | null;
+  loadedLogCache: Record<string, SimTestRun>;
 };
 
 const TOUR_INTERVAL_MS = 6_500;
@@ -43,7 +47,6 @@ const appElement = document.querySelector<HTMLDivElement>("#app");
 if (!appElement) throw new Error("Missing app root");
 const app: HTMLDivElement = appElement;
 
-const initialNet = SIMULATED_NETWORKS[0];
 const state: AppState = {
   session: {
     authenticated: false,
@@ -51,14 +54,19 @@ const state: AppState = {
     network: null,
     gateway: "cloudflare-access",
   },
+  networks: SIMULATED_NETWORKS,
+  tourSteps: SIMULATED_TOUR_STEPS,
   view: "overview",
-  networkSlug: initialNet.slug,
-  hostName: initialNet.hosts[0].name,
+  networkSlug: SIMULATED_NETWORKS[0].slug,
+  hostName: SIMULATED_NETWORKS[0].hosts[0].name,
   networkTab: "hosts",
-  testId: initialNet.tests[4]?.testId ?? initialNet.tests[0].testId,
+  testId:
+    SIMULATED_NETWORKS[0].tests[4]?.testId ??
+    SIMULATED_NETWORKS[0].tests[0].testId,
   tourPlaying: true,
   tourStepIndex: 0,
-  liveSummary: null,
+  liveError: null,
+  loadedLogCache: {},
 };
 
 let globeController: OverviewGlobeController | null = null;
@@ -75,7 +83,15 @@ async function boot(): Promise<void> {
   state.session = await detectSession();
   if (state.session.authenticated && state.session.mode === "live") {
     state.tourPlaying = false;
-    state.liveSummary = await fetchLiveSummary();
+    const liveNetwork = await loadLiveNetwork(state.session);
+    if (liveNetwork) {
+      state.networks = [liveNetwork];
+      state.networkSlug = liveNetwork.slug;
+      state.hostName = liveNetwork.hosts[0]?.name ?? "";
+      state.testId = liveNetwork.tests[0]?.testId ?? "";
+      state.tourSteps = buildLiveTourSteps(liveNetwork);
+      state.tourStepIndex = 0;
+    }
   }
 
   mountShell();
@@ -86,7 +102,7 @@ async function boot(): Promise<void> {
     const { mountOverviewGlobe } = await import("./overview-globe");
     globeController = await mountOverviewGlobe(
       stage,
-      SIMULATED_OVERVIEW_NETWORKS,
+      state.networks.map((net) => ({ slug: net.slug, snapshot: net.snapshot })),
       () => {},
     );
     syncGlobeFocus();
@@ -108,9 +124,12 @@ async function detectSession(): Promise<SessionInfo> {
           authenticated: payload.authenticated,
           mode: payload.authenticated ? "live" : "simulated",
           network: payload.network ?? null,
+          hostname: payload.hostname,
           subject: payload.subject,
           origin_count: payload.origin_count,
           gateway: payload.gateway ?? "cloudflare-access",
+          login_url: payload.login_url ?? null,
+          logout_url: payload.logout_url ?? "/cdn-cgi/access/logout",
         };
       }
     }
@@ -125,24 +144,161 @@ async function detectSession(): Promise<SessionInfo> {
   };
 }
 
-async function fetchLiveSummary(): Promise<string | null> {
+async function loadLiveNetwork(
+  session: SessionInfo,
+): Promise<MeshNetwork | null> {
   try {
-    const response = await fetch("/api/mesh/state", {
-      cache: "no-store",
-      signal: AbortSignal.timeout(5_000),
+    const [mesh, plugins, sessions, processes, probe, fullState, tests] =
+      await Promise.all([
+        fetchOptionalJson("/api/mesh/state"),
+        fetchOptionalJson("/api/mesh/plugins"),
+        fetchOptionalJson("/api/mesh/shell/sessions"),
+        fetchOptionalJson("/api/mesh/processes"),
+        fetchOptionalJson("/api/mesh/probe"),
+        fetchOptionalJson("/api/mesh/full-state"),
+        fetchOptionalJson("/api/mesh/tests"),
+      ]);
+    if (!mesh) {
+      state.liveError =
+        "Authenticated via Cloudflare Access, but enrolled Dialtone origin did not return /api/mesh/state.";
+      return null;
+    }
+    return adaptLiveMeshToNetwork({
+      hostname: session.hostname || window.location.hostname,
+      networkName: session.network ?? undefined,
+      mesh,
+      plugins,
+      sessions,
+      processes,
+      probe,
+      fullState,
+      tests,
     });
-    if (!response.ok) return `Gateway returned HTTP ${response.status}`;
-    const payload = (await response.json()) as Record<string, unknown>;
-    const node = typeof payload.node === "string" ? payload.node : "origin";
-    const peers = Array.isArray(payload.nodes) ? payload.nodes.length : 0;
-    return `Connected to live mesh via Cloudflare Access (${node}, ${peers} peers)`;
-  } catch {
-    return "Authenticated via Cloudflare Access; awaiting enrolled origin response.";
+  } catch (error) {
+    state.liveError =
+      error instanceof Error ? error.message : "Failed to load live mesh data.";
+    return null;
   }
 }
 
+async function fetchOptionalJson(
+  path: string,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const response = await fetch(path, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(6_000),
+    });
+    if (!response.ok) return null;
+    const parsed: unknown = await response.json();
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function loadLiveTestRunLog(testId: string): Promise<void> {
+  if (!state.session.authenticated || !/^[a-f0-9]{32}$/.test(testId)) return;
+  if (state.loadedLogCache[testId]) return;
+  const payload = await fetchOptionalJson(`/api/mesh/test-runs/${testId}`);
+  const run =
+    payload?.run && typeof payload.run === "object"
+      ? (payload.run as Record<string, unknown>)
+      : null;
+  if (!run) return;
+  state.loadedLogCache[testId] = {
+    testId,
+    name: typeof run.name === "string" ? run.name : testId,
+    title: typeof run.title === "string" ? run.title : testId,
+    status:
+      run.status === "pass" ||
+      run.status === "fail" ||
+      run.status === "running" ||
+      run.status === "skip"
+        ? run.status
+        : "pass",
+    elapsed: typeof run.elapsed === "string" ? run.elapsed : "0.00",
+    timestamp: typeof run.timestamp === "string" ? run.timestamp : "none",
+    completedAt:
+      typeof run.completed_at === "string" ? run.completed_at : "",
+    command:
+      typeof run.command === "string"
+        ? run.command
+        : `go run . test --filter "^${String(run.name ?? "")}$"`,
+    artifact:
+      typeof run.artifact === "string" ? run.artifact : `logs/${testId}.log`,
+    log: typeof run.log === "string" ? run.log : "(empty log)",
+  };
+  renderPanels();
+}
+
+function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
+  const firstHost = net.hosts[0]?.name ?? null;
+  const firstTestId = net.tests[0]?.testId;
+  return [
+    {
+      id: "live-overview",
+      label: "LIVE OVERVIEW",
+      view: "overview",
+      networkSlug: net.slug,
+      hostName: null,
+      headline: `Live Authenticated Mesh: ${net.slug} (${net.hosts.length} peers)`,
+      caption: `Signed in as ${state.session.subject ?? "verified user"} via Cloudflare Access. Displaying real live Dialtone v${net.snapshot.latest_release} telemetry using the exact same UI model as the signed-out simulated tour.`,
+    },
+    {
+      id: "live-network",
+      label: "LIVE NETWORK",
+      view: "network",
+      networkSlug: net.slug,
+      hostName: null,
+      networkTab: "hosts",
+      headline: `Live Network: ${net.slug} (${net.channelFingerprint})`,
+      caption: `Real allowlisted Dialtone peers, OS/arch versions, neighbor RTTs, and continuous probe status across ${net.hosts.length} live nodes.`,
+    },
+    {
+      id: "live-host",
+      label: "LIVE HOST",
+      view: "host",
+      networkSlug: net.slug,
+      hostName: firstHost,
+      headline: `Live Host: ${firstHost ?? "origin"}`,
+      caption:
+        "Live CPU, RAM, Disk, supervised blob processes, iroh-blobs store, and persistent dialtone/shell/1 sessions.",
+    },
+    {
+      id: "live-tests",
+      label: "LIVE TESTS",
+      view: "tests",
+      networkSlug: net.slug,
+      hostName: null,
+      headline: `Live Recorded Test Suite (${net.tests.length} runs)`,
+      caption:
+        "Immutable per-execution test records served through the authenticated Cloudflare gateway.",
+    },
+    ...(firstTestId
+      ? [
+          {
+            id: "live-log",
+            label: "LIVE LOG",
+            view: "log" as const,
+            networkSlug: net.slug,
+            hostName: null,
+            testId: firstTestId,
+            headline: `Live Immutable Execution Log (${firstTestId.slice(0, 12)}…)`,
+            caption:
+              "Per-run immutable log artifact fetched live through /api/mesh/test-runs/<test-id>.",
+          },
+        ]
+      : []),
+  ];
+}
+
 function mountShell(): void {
-  document.title = "dialtone.earth — simulated system tour";
+  document.title = state.session.authenticated
+    ? `dialtone.earth — live ${state.networkSlug} mesh`
+    : "dialtone.earth — simulated system tour";
   app.innerHTML = `
     <main class="hud-shell overview-page sim-shell">
       <div class="globe-stage"></div>
@@ -154,20 +310,46 @@ function mountShell(): void {
   `;
 }
 
+function activeNetwork(): MeshNetwork {
+  return (
+    state.networks.find((n) => n.slug === state.networkSlug) ??
+    state.networks[0]
+  );
+}
+
+function activeHost(net: MeshNetwork): MeshHost | null {
+  return net.hosts.find((h) => h.name === state.hostName) ?? net.hosts[0] ?? null;
+}
+
+function activeTestRun(net: MeshNetwork): SimTestRun | null {
+  const fromCache = state.loadedLogCache[state.testId];
+  if (fromCache) return fromCache;
+  return (
+    net.tests.find((t) => t.testId === state.testId) ?? net.tests[0] ?? null
+  );
+}
+
 function renderPanels(): void {
   const topEl = app.querySelector<HTMLElement>("#sim-top-chrome");
   const drawerEl = app.querySelector<HTMLElement>("#sim-drawer");
   const tourEl = app.querySelector<HTMLElement>("#sim-tour-bar");
   if (!topEl || !drawerEl || !tourEl) return;
 
-  const summary = summarizeSystemResources(SIMULATED_NETWORKS);
-  const net = findSimulatedNetwork(state.networkSlug);
-  const host = findSimulatedHost(net, state.hostName);
-  const testRun = findSimulatedTest(net, state.testId);
+  const summary = summarizeSystemResources(state.networks);
+  const net = activeNetwork();
+  const host = activeHost(net);
+  const testRun = activeTestRun(net);
 
-  const modeBadge = state.session.authenticated
-    ? `<span class="sim-badge is-live">LIVE MESH · ${escapeHtml(state.session.network ?? "CLOUDFLARE ACCESS")}</span>`
+  const isLive = state.session.authenticated && !net.simulated;
+  const modeBadge = isLive
+    ? `<span class="sim-badge is-live" data-testid="live-badge">LIVE MESH · ${escapeHtml(net.slug.toUpperCase())} (${escapeHtml(state.session.subject ?? "CLOUDFLARE ACCESS")})</span>`
     : `<span class="sim-badge is-sim" data-testid="simulated-badge">SIMULATED TOUR · NOT SIGNED IN</span>`;
+
+  const authAction = isLive
+    ? `<a class="sim-nav-btn" data-testid="auth-logout" href="${escapeHtml(state.session.logout_url || "/cdn-cgi/access/logout")}">Sign out</a>`
+    : state.session.login_url
+      ? `<a class="sim-nav-btn is-active" data-testid="auth-login" href="${escapeHtml(state.session.login_url)}">Sign in</a>`
+      : "";
 
   topEl.innerHTML = `
     <header class="sim-header">
@@ -178,9 +360,10 @@ function renderPanels(): void {
       <nav class="sim-nav" aria-label="System tour views">
         ${navButton("overview", "Overview")}
         ${navButton("network", `Network: ${net.slug}`)}
-        ${navButton("host", `Host: ${host.name}`)}
+        ${navButton("host", `Host: ${host?.name ?? "none"}`)}
         ${navButton("tests", `Tests (${net.tests.length})`)}
         ${navButton("log", "Log")}
+        ${authAction}
       </nav>
     </header>
     <section class="sim-resource-strip" aria-label="System-wide resource statistics">
@@ -198,22 +381,24 @@ function renderPanels(): void {
   `;
 
   if (state.view === "overview") {
-    drawerEl.innerHTML = renderOverviewView(summary);
+    drawerEl.innerHTML = renderOverviewView(summary, isLive);
   } else if (state.view === "network") {
     drawerEl.innerHTML = renderNetworkView(net);
-  } else if (state.view === "host") {
+  } else if (state.view === "host" && host) {
     drawerEl.innerHTML = renderHostView(net, host);
   } else if (state.view === "tests") {
     drawerEl.innerHTML = renderTestsView(net);
-  } else {
+  } else if (testRun) {
     drawerEl.innerHTML = renderLogView(net, testRun);
+  } else {
+    drawerEl.innerHTML = `<p class="sim-dim">No test run selected.</p>`;
   }
 
-  const currentStep = SIMULATED_TOUR_STEPS[state.tourStepIndex];
+  const currentStep = state.tourSteps[state.tourStepIndex] ?? state.tourSteps[0];
   tourEl.innerHTML = `
     <div class="sim-tour-copy">
       <div class="sim-tour-meta">
-        <span class="sim-step-tag">STEP ${state.tourStepIndex + 1}/${SIMULATED_TOUR_STEPS.length} · ${escapeHtml(currentStep.label)}</span>
+        <span class="sim-step-tag">STEP ${state.tourStepIndex + 1}/${state.tourSteps.length} · ${escapeHtml(currentStep.label)}</span>
         <strong class="sim-tour-headline">${escapeHtml(currentStep.headline)}</strong>
       </div>
       <p class="sim-tour-caption">${escapeHtml(currentStep.caption)}</p>
@@ -237,32 +422,38 @@ function navButton(view: TourView, label: string): string {
 
 function renderOverviewView(
   summary: ReturnType<typeof summarizeSystemResources>,
+  isLive: boolean,
 ): string {
-  const liveBanner = state.liveSummary
-    ? `<p class="sim-callout is-live">${escapeHtml(state.liveSummary)}</p>`
-    : `<p class="sim-callout">You are viewing <strong>simulated Dialtone v0.5.5 telemetry</strong> (zero private data). Select any network below to inspect hosts, blob-backed plugins, error recovery, and test logs—or authenticate on an enrolled <code>&lt;network&gt;.dialtone.earth</code> hostname via Cloudflare Access.</p>`;
+  const banner = state.liveError
+    ? `<p class="sim-callout">${escapeHtml(state.liveError)}</p>`
+    : isLive
+      ? `<p class="sim-callout is-live">Authenticated via <strong>Cloudflare Access</strong> as <code>${escapeHtml(state.session.subject ?? "user")}</code>. Showing <strong>live real-time telemetry</strong> from your enrolled Dialtone v0.5.5 mesh (identical data model and screens to the signed-out simulated tour).</p>`
+      : `<p class="sim-callout">You are viewing <strong>simulated Dialtone v0.5.5 telemetry</strong> (zero private data). Select any network below to inspect hosts, blob-backed plugins, error recovery, and test logs—or sign in via Cloudflare Access to inspect your live mesh.</p>`;
 
-  const rows = SIMULATED_NETWORKS.map((net) => {
-    const agg = aggregateNetwork(net.snapshot);
-    const active = net.slug === state.networkSlug ? "is-selected" : "";
-    return `
+  const rows = state.networks
+    .map((net) => {
+      const agg = aggregateNetwork(net.snapshot);
+      const active = net.slug === state.networkSlug ? "is-selected" : "";
+      const online = net.hosts.filter((h) => h.online).length;
+      return `
       <button type="button" class="sim-table-row sim-net-row ${active}" data-select-network="${escapeHtml(net.slug)}">
         <span class="sim-strong">${escapeHtml(net.slug)}</span>
-        <span>${net.hosts.length}/${net.hosts.length}</span>
+        <span>${online}/${net.hosts.length}</span>
         <span>${escapeHtml(agg.cpu)}</span>
         <span>${escapeHtml(agg.memory)}</span>
         <span>${escapeHtml(agg.gpuMemory)}</span>
         <span>${net.blobStore.objects} blobs</span>
-        <span>${net.tests.length}/${net.tests.length} pass</span>
+        <span>${net.tests.filter((t) => t.status === "pass").length}/${net.tests.length} pass</span>
       </button>
     `;
-  }).join("");
+    })
+    .join("");
 
   return `
     <div class="sim-panel-head">
       <div>
-        <h2>SYSTEM-WIDE OVERVIEW (SIMULATED)</h2>
-        <p class="sim-sub">Click any simulated network to inspect its hosts, plugin rollouts, iroh-blobs store, error recovery, and tests.</p>
+        <h2>SYSTEM-WIDE OVERVIEW (${isLive ? "LIVE MESH" : "SIMULATED"})</h2>
+        <p class="sim-sub">Click any network to inspect its hosts, plugin rollouts, iroh-blobs store, error recovery, and tests.</p>
       </div>
       <div class="node-load-legend">
         <span class="node-load-legend-title">LOAD</span>
@@ -271,8 +462,8 @@ function renderOverviewView(
         <span><i class="load-high"></i>HIGH</span>
       </div>
     </div>
-    ${liveBanner}
-    <div class="sim-table" role="table" aria-label="Simulated Dialtone networks">
+    ${banner}
+    <div class="sim-table" role="table" aria-label="Dialtone networks">
       <div class="sim-table-row sim-table-head" role="row">
         <span>NETWORK</span>
         <span>NODES</span>
@@ -287,21 +478,21 @@ function renderOverviewView(
     <div class="sim-mini-grid">
       <article class="sim-mini-card">
         <h3>CLOUDFLARE ACCESS GATEWAY</h3>
-        <p>Exact-hostname JWT verification (<code>Cf-Access-Jwt-Assertion</code>) fronts enrolled Dialtone v0.5.5 Tunnel origins with fail-closed <code>401</code> denial and <code>Cache-Control: private, no-store</code>.</p>
+        <p>Exact-hostname RS256 JWT verification (<code>Cf-Access-Jwt-Assertion</code>) fronts enrolled Dialtone v0.5.5 Tunnel origins with fail-closed <code>401</code> denial and <code>Cache-Control: private, no-store</code>.</p>
       </article>
       <article class="sim-mini-card">
         <h3>BLOB-BACKED PLUGINS &amp; SHELLS</h3>
-        <p>${summary.activePlugins} verified plugins (<code>dialtone/shell/1</code>, <code>dialtone/exec/1</code>, stdio-RPC binaries) and ${summary.activeShellSessions} persistent cross-OS sessions across ${summary.totalNodes} simulated hosts.</p>
+        <p>${summary.activePlugins} verified plugin(s) (<code>dialtone/shell/1</code>, <code>dialtone/exec/1</code>, stdio-RPC binaries) and ${summary.activeShellSessions} persistent cross-OS session(s) across ${summary.totalNodes} host(s).</p>
       </article>
       <article class="sim-mini-card">
-        <h3>SELF-HEALING RECOVERY</h3>
-        <p>${summary.recoveryEventsCount} recorded watchdog/failover events demonstrating <code>EXIT_RESTART</code>, daemon relaunch, QUIC blob re-pull, and Cloudflare origin pool failover.</p>
+        <h3>SELF-HEALING &amp; EVENTS</h3>
+        <p>${summary.recoveryEventsCount} recorded mesh/recovery event(s) tracking peer discovery, watchdog <code>EXIT_RESTART</code>, blob verification, and probe status.</p>
       </article>
     </div>
   `;
 }
 
-function renderNetworkView(net: SimNetwork): string {
+function renderNetworkView(net: MeshNetwork): string {
   const tabBtn = (tab: NetworkFocusTab, label: string) =>
     `<button type="button" class="sim-subtab ${state.networkTab === tab ? "is-active" : ""}" data-net-tab="${tab}">${escapeHtml(label)}</button>`;
 
@@ -323,9 +514,9 @@ function renderNetworkView(net: SimNetwork): string {
           <button type="button" class="sim-table-row sim-host-row" data-select-host="${escapeHtml(h.name)}">
             <span class="sim-strong"><i class="sim-dot"></i> ${escapeHtml(h.name)}</span>
             <span>${escapeHtml(h.os)}/${escapeHtml(h.arch)} · v${escapeHtml(h.version)}</span>
-            <span>${h.stats.cpu_percent ?? "n/a"}% (${h.stats.cpu_cores ?? "?"}c)</span>
-            <span>${h.stats.mem_percent ?? "n/a"}%</span>
-            <span>${h.rtt_ms !== null && h.rtt_ms !== undefined ? `${h.rtt_ms.toFixed(1)} ms` : "origin"}</span>
+            <span>${h.stats.cpu_percent !== null ? `${h.stats.cpu_percent}%` : "n/a"}${h.stats.cpu_cores !== null ? ` (${h.stats.cpu_cores}c)` : ""}</span>
+            <span>${h.stats.mem_percent !== null ? `${h.stats.mem_percent}%` : "n/a"}</span>
+            <span>${h.rtt_ms !== null && h.rtt_ms !== undefined ? (h.rtt_ms === 0 ? "origin" : `${h.rtt_ms.toFixed(1)} ms`) : "n/a"}</span>
             <span>${escapeHtml(h.probeSummary)}</span>
           </button>
         `,
@@ -352,7 +543,7 @@ function renderNetworkView(net: SimNetwork): string {
             <span>${escapeHtml(p.runtime)} (${escapeHtml(p.protocol)})</span>
             <span>${escapeHtml(p.repo)}</span>
             <code>${escapeHtml(p.digest)}</code>
-            <span>${(p.sizeBytes / 1e6).toFixed(1)} MB</span>
+            <span>${(p.sizeBytes / 1e6).toFixed(2)} MB</span>
             <span class="sim-pill is-ok">${escapeHtml(p.status.toUpperCase())}</span>
           </div>
         `,
@@ -366,14 +557,14 @@ function renderNetworkView(net: SimNetwork): string {
       <div class="sim-mini-grid">
         <article class="sim-mini-card">
           <h3>IROH-BLOBS STORE</h3>
-          <p><strong>${b.objects}</strong> content-addressed objects · <strong>${(b.totalBytes / 1e6).toFixed(1)} MB</strong> total · <strong>${b.pinnedPlugins}</strong> pinned plugin binaries.</p>
+          <p><strong>${b.objects}</strong> content-addressed objects · <strong>${(b.totalBytes / 1e6).toFixed(2)} MB</strong> total · <strong>${b.pinnedPlugins}</strong> pinned plugin/program(s).</p>
         </article>
         <article class="sim-mini-card">
           <h3>QUIC TRANSFER &amp; INTEGRITY</h3>
-          <p><strong>${b.peerPulls24h}</strong> peer pulls (24h) · <strong>${b.cacheHitPercent}%</strong> local cache hit · <strong>${b.verifiedSha256Percent}%</strong> SHA-256 verified.</p>
+          <p><strong>${b.peerPulls24h}</strong> peer fetch(es) · <strong>${b.cacheHitPercent}%</strong> local cache hit · <strong>${b.verifiedSha256Percent}%</strong> SHA-256 verified.</p>
         </article>
         <article class="sim-mini-card">
-          <h3>LATEST BLOB PULL</h3>
+          <h3>LATEST BLOB STATUS</h3>
           <p><code>${escapeHtml(b.recentTransfer)}</code></p>
         </article>
       </div>
@@ -389,7 +580,7 @@ function renderNetworkView(net: SimNetwork): string {
               <span class="sim-pill is-${ev.stage === "detected" ? "warn" : "ok"}">${escapeHtml(ev.stage.toUpperCase())}</span>
               <strong>${escapeHtml(ev.host)}</strong>
               <span>${escapeHtml(ev.timestamp)}</span>
-              <span>+${ev.recoveryMs} ms</span>
+              ${ev.recoveryMs > 0 ? `<span>+${ev.recoveryMs} ms</span>` : ""}
             </div>
             <p><b>Trigger:</b> ${escapeHtml(ev.trigger)}</p>
             <p><b>Action:</b> ${escapeHtml(ev.action)} · <code>${escapeHtml(ev.probeAfter)}</code></p>
@@ -421,7 +612,7 @@ function renderNetworkView(net: SimNetwork): string {
   `;
 }
 
-function renderHostView(net: SimNetwork, host: SimHost): string {
+function renderHostView(net: MeshNetwork, host: MeshHost): string {
   const ramUsed =
     host.stats.mem_used_bytes !== null
       ? (host.stats.mem_used_bytes / 1e9).toFixed(1)
@@ -431,10 +622,9 @@ function renderHostView(net: SimNetwork, host: SimHost): string {
       ? (host.stats.mem_total_bytes / 1e9).toFixed(1)
       : "n/a";
   const gpuLine =
-    host.gpuName &&
     host.stats.gpu_mem_used_bytes !== null &&
     host.stats.gpu_mem_total_bytes !== null
-      ? `${host.gpuName} · ${(host.stats.gpu_mem_used_bytes / 1e9).toFixed(1)}/${(host.stats.gpu_mem_total_bytes / 1e9).toFixed(1)} GB (${host.gpuLoadPercent ?? 0}%)`
+      ? `${host.gpuName ?? "GPU"} · ${(host.stats.gpu_mem_used_bytes / 1e9).toFixed(1)}/${(host.stats.gpu_mem_total_bytes / 1e9).toFixed(1)} GB${host.gpuLoadPercent !== null ? ` (${host.gpuLoadPercent}%)` : ""}`
       : "No GPU sensor reported (distinct from 0)";
 
   const sessionsHtml =
@@ -455,6 +645,16 @@ function renderHostView(net: SimNetwork, host: SimHost): string {
           .join("")
       : `<p class="sim-dim">No active shell sessions on this host right now.</p>`;
 
+  const procHtml =
+    host.processes.length > 0
+      ? host.processes
+          .map(
+            (p) =>
+              `<p><strong>${escapeHtml(p.name)}</strong> pid=${p.pid} · <code>${escapeHtml(p.digest)}</code> · restarts=${p.restarts} · <span class="sim-pill is-ok">${escapeHtml(p.status)}</span></p>`,
+          )
+          .join("")
+      : `<p class="sim-dim">No supervised blob processes reported on this host.</p>`;
+
   return `
     <div class="sim-panel-head">
       <div>
@@ -469,22 +669,17 @@ function renderHostView(net: SimNetwork, host: SimHost): string {
     <div class="sim-mini-grid">
       <article class="sim-mini-card">
         <h3>COMPUTE &amp; MEMORY</h3>
-        <p>CPU: <strong>${host.stats.cpu_percent ?? "n/a"}%</strong> (${host.stats.cpu_cores ?? "?"} cores, load ${host.stats.load_avg_1m ?? "n/a"})</p>
+        <p>CPU: <strong>${host.stats.cpu_percent ?? "n/a"}%</strong> (${host.stats.cpu_cores ?? "n/a"} cores, load ${host.stats.load_avg_1m ?? "n/a"})</p>
         <p>RAM: <strong>${ramUsed}/${ramTotal} GB</strong> (${host.stats.mem_percent ?? "n/a"}%) · Disk: <strong>${host.stats.disk_percent ?? "n/a"}%</strong></p>
         <p>GPU: <strong>${escapeHtml(gpuLine)}</strong></p>
       </article>
       <article class="sim-mini-card">
         <h3>SUPERVISED BLOB PROCESSES</h3>
-        ${host.processes
-          .map(
-            (p) =>
-              `<p><strong>${escapeHtml(p.name)}</strong> pid=${p.pid} · <code>${escapeHtml(p.digest)}</code> · restarts=${p.restarts} · <span class="sim-pill is-ok">${escapeHtml(p.status)}</span></p>`,
-          )
-          .join("")}
+        ${procHtml}
       </article>
       <article class="sim-mini-card">
         <h3>HOST BLOB STORE</h3>
-        <p><strong>${host.blobStore.objects}</strong> blobs · <strong>${(host.blobStore.totalBytes / 1e6).toFixed(1)} MB</strong> · ${host.blobStore.cacheHitPercent}% cache hit</p>
+        <p><strong>${host.blobStore.objects}</strong> blobs · <strong>${(host.blobStore.totalBytes / 1e6).toFixed(2)} MB</strong> · ${host.blobStore.cacheHitPercent}% cache hit</p>
         <p><code>${escapeHtml(host.blobStore.recentTransfer)}</code></p>
       </article>
     </div>
@@ -495,7 +690,7 @@ function renderHostView(net: SimNetwork, host: SimHost): string {
   `;
 }
 
-function renderTestsView(net: SimNetwork): string {
+function renderTestsView(net: MeshNetwork): string {
   const passed = net.tests.filter((t) => t.status === "pass").length;
   return `
     <div class="sim-panel-head">
@@ -527,7 +722,7 @@ function renderTestsView(net: SimNetwork): string {
   `;
 }
 
-function renderLogView(net: SimNetwork, run: SimTestRun): string {
+function renderLogView(net: MeshNetwork, run: SimTestRun): string {
   return `
     <div class="sim-panel-head">
       <div>
@@ -556,6 +751,9 @@ function bindInteractions(): void {
       state.view = target;
       renderPanels();
       syncGlobeFocus();
+      if (target === "log" && state.testId) {
+        void loadLiveTestRunLog(state.testId);
+      }
     });
   });
 
@@ -565,11 +763,12 @@ function bindInteractions(): void {
       btn.addEventListener("click", () => {
         const slug = btn.dataset.selectNetwork;
         if (!slug) return;
-        const net = findSimulatedNetwork(slug);
+        const net =
+          state.networks.find((n) => n.slug === slug) ?? state.networks[0];
         pauseTour();
         state.networkSlug = net.slug;
-        state.hostName = net.hosts[0].name;
-        state.testId = net.tests[0].testId;
+        state.hostName = net.hosts[0]?.name ?? "";
+        state.testId = net.tests[0]?.testId ?? "";
         state.networkTab = "hosts";
         state.view = "network";
         renderPanels();
@@ -609,6 +808,7 @@ function bindInteractions(): void {
       state.testId = id;
       state.view = "log";
       renderPanels();
+      void loadLiveTestRunLog(id);
     });
   });
 
@@ -616,15 +816,15 @@ function bindInteractions(): void {
     .querySelector<HTMLButtonElement>('[data-action="prev-step"]')
     ?.addEventListener("click", () => {
       const nextIdx =
-        (state.tourStepIndex - 1 + SIMULATED_TOUR_STEPS.length) %
-        SIMULATED_TOUR_STEPS.length;
+        (state.tourStepIndex - 1 + state.tourSteps.length) %
+        state.tourSteps.length;
       applyTourStep(nextIdx, false);
     });
 
   app
     .querySelector<HTMLButtonElement>('[data-action="next-step"]')
     ?.addEventListener("click", () => {
-      const nextIdx = (state.tourStepIndex + 1) % SIMULATED_TOUR_STEPS.length;
+      const nextIdx = (state.tourStepIndex + 1) % state.tourSteps.length;
       applyTourStep(nextIdx, false);
     });
 
@@ -639,20 +839,23 @@ function bindInteractions(): void {
 }
 
 function applyTourStep(index: number, keepPlaying: boolean): void {
-  const step = SIMULATED_TOUR_STEPS[index];
+  const step = state.tourSteps[index];
   if (!step) return;
   state.tourStepIndex = index;
   state.view = step.view;
   if (step.networkSlug) {
     state.networkSlug = step.networkSlug;
-    const net = findSimulatedNetwork(step.networkSlug);
-    state.hostName = step.hostName ?? net.hosts[0].name;
-    state.testId = step.testId ?? net.tests[0].testId;
+    const net = activeNetwork();
+    state.hostName = step.hostName ?? net.hosts[0]?.name ?? "";
+    state.testId = step.testId ?? net.tests[0]?.testId ?? "";
   }
   if (step.networkTab) state.networkTab = step.networkTab;
   if (!keepPlaying) pauseTour();
   renderPanels();
   syncGlobeFocus();
+  if (state.view === "log" && state.testId) {
+    void loadLiveTestRunLog(state.testId);
+  }
 }
 
 function syncGlobeFocus(): void {
@@ -671,7 +874,7 @@ function startTourTimer(): void {
   if (!state.tourPlaying) return;
   tourTimer = window.setInterval(() => {
     if (!state.tourPlaying || document.hidden) return;
-    const nextIdx = (state.tourStepIndex + 1) % SIMULATED_TOUR_STEPS.length;
+    const nextIdx = (state.tourStepIndex + 1) % state.tourSteps.length;
     applyTourStep(nextIdx, true);
   }, TOUR_INTERVAL_MS);
 }
