@@ -1,5 +1,11 @@
 import "./hud.css";
 import { aggregateNetwork } from "./aggregates";
+import {
+  buildCameraContext,
+  CAMERA_PRESETS,
+  evaluateCameraPolicy,
+  type PolicyEvalResult,
+} from "./camera-policy";
 import { adaptLiveMeshToNetwork } from "./live-adapter";
 import {
   computeAdaptivePollMs,
@@ -71,6 +77,9 @@ type AppState = {
   paneQueryIds: string[];
   activePaneIndex: number;
   configOpen: boolean;
+  cameraPolicyCode: string;
+  cameraDraftCode: string;
+  cameraResult: PolicyEvalResult;
   networkSlug: string;
   hostName: string;
   testId: string;
@@ -91,12 +100,24 @@ type AppState = {
 const TOUR_INTERVAL_MS = 6_500;
 const PRESENCE_INTERVAL_MS = 30_000;
 const QUERY_SCHEDULER_TICK_MS = 1_000;
+const CAMERA_POLICY_STORAGE_KEY = "dialtone.cameraPolicy.v1";
+
+function loadSavedCameraPolicy(): string {
+  try {
+    const saved = window.localStorage.getItem(CAMERA_POLICY_STORAGE_KEY);
+    if (saved && saved.trim().length > 0) return saved;
+  } catch {
+    // ignore storage errors
+  }
+  return CAMERA_PRESETS[0].code;
+}
 
 const appElement = document.querySelector<HTMLDivElement>("#app");
 if (!appElement) throw new Error("Missing app root");
 const app: HTMLDivElement = appElement;
 
 const initialQueries = createDefaultQuerySet(SIMULATED_NETWORKS);
+const initialCameraPolicy = loadSavedCameraPolicy();
 
 const state: AppState = {
   session: {
@@ -114,6 +135,9 @@ const state: AppState = {
   paneQueryIds: [initialQueries[0].id],
   activePaneIndex: 0,
   configOpen: false,
+  cameraPolicyCode: initialCameraPolicy,
+  cameraDraftCode: initialCameraPolicy,
+  cameraResult: { ok: true, target: null },
   networkSlug: SIMULATED_NETWORKS[0].slug,
   hostName: SIMULATED_NETWORKS[0].hosts[0].name,
   testId:
@@ -173,10 +197,10 @@ async function boot(): Promise<void> {
     globeController = await mountOverviewGlobe(
       stage,
       state.networks.map((net) => ({ slug: net.slug, snapshot: net.snapshot })),
-      () => {},
       { includeSimulatedGeodata: !state.session.authenticated },
     );
     syncGlobeFocus();
+    renderAll();
   }
 
   document.addEventListener("visibilitychange", () => {
@@ -324,6 +348,7 @@ function startBestEffortQueryScheduler(): void {
     }
 
     if (anyTouched && !state.configOpen) {
+      syncGlobeFocus();
       renderAll();
     }
   }, QUERY_SCHEDULER_TICK_MS);
@@ -993,13 +1018,24 @@ function renderConfigPage(): void {
   const modeDock = !state.tableFullscreen && !state.tableMinimized ? "is-active" : "";
   const modeFull = state.tableFullscreen ? "is-active" : "";
 
+  const presetButtons = CAMERA_PRESETS.map((p) => {
+    const isCurrent = state.cameraPolicyCode.trim() === p.code.trim();
+    return `<button type="button" class="tbl-chip ${isCurrent ? "is-active" : ""}" data-cam-preset="${escapeHtml(p.id)}" data-testid="cam-preset-${escapeHtml(p.id)}">${escapeHtml(p.label)}</button>`;
+  }).join("");
+
+  const camStatusHtml = !state.cameraResult.ok
+    ? `<span class="cfg-cam-err" data-testid="cam-status">ERROR: ${escapeHtml(state.cameraResult.error ?? "Invalid TypeScript policy")}</span>`
+    : state.cameraResult.target
+      ? `<span class="cfg-cam-ok" data-testid="cam-status">TARGET: ${escapeHtml(state.cameraResult.target.node ?? "custom")} (${state.cameraResult.target.lat.toFixed(2)}°, ${state.cameraResult.target.lng.toFixed(2)}°)${state.cameraResult.target.reason ? ` · ${escapeHtml(state.cameraResult.target.reason)}` : ""}</span>`
+      : `<span class="c-dim" data-testid="cam-status">TARGET: null (free orbit)</span>`;
+
   cfgEl.hidden = false;
   cfgEl.innerHTML = `
     <div class="cfg-frame">
       <header class="cfg-header">
         <div class="earth-bar-left">
-          <span class="tbl-brand">TABLE &amp; QUERY CONFIG</span>
-          <span class="tbl-cadence">SINGLE-BUTTON VISUAL SETUP · BEST-EFFORT DATA RATES</span>
+          <span class="tbl-brand">CONFIG // TABLES, QUERIES &amp; CAMERA</span>
+          <span class="tbl-cadence">SINGLE-BUTTON SETUP + TYPESCRIPT CAMERA POLICY</span>
         </div>
         <div class="earth-bar-right">
           <button type="button" class="tbl-chip ${modeMin}" data-cfg-mode="min" data-testid="cfg-mode-min">minimized</button>
@@ -1012,18 +1048,33 @@ function renderConfigPage(): void {
 
       <div class="cfg-body">
         <section class="cfg-section">
-          <div class="cfg-section-title">1. LAYOUT — PICK A SPLIT SHAPE</div>
+          <div class="cfg-section-head">
+            <span class="cfg-section-title">1. CAMERA — TYPESCRIPT GEOLOCATION SELECTOR (NO AUTO-TOUR CAMERA)</span>
+            <span class="cfg-btn-row">${presetButtons}</span>
+          </div>
+          <div class="cfg-cam-meta">
+            <span class="c-dim">ctx.nodes: { name, network, lat, lng, online, cpu, mem, disk, gpu, load1m, rttMs, rttP95, cores, blobs } · helpers: maxBy, minBy, p95, avg, centroid, Math</span>
+          </div>
+          <textarea class="cfg-ts-editor" id="camera-ts-editor" data-testid="camera-ts-editor" spellcheck="false" rows="8">${escapeHtml(state.cameraDraftCode)}</textarea>
+          <div class="cfg-section-head">
+            ${camStatusHtml}
+            <button type="button" class="tbl-chip is-active" data-action="apply-camera-ts" data-testid="apply-camera-ts">apply typescript policy (Ctrl+Enter)</button>
+          </div>
+        </section>
+
+        <section class="cfg-section">
+          <div class="cfg-section-title">2. LAYOUT — PICK A SPLIT SHAPE</div>
           <div class="cfg-layout-row">${layoutCards}</div>
         </section>
 
         <section class="cfg-section">
-          <div class="cfg-section-title">2. PANE MAP — CLICK A PANE (#${state.activePaneIndex + 1} SELECTED), THEN ASSIGN A QUERY BELOW</div>
+          <div class="cfg-section-title">3. PANE MAP — CLICK A PANE (#${state.activePaneIndex + 1} SELECTED), THEN ASSIGN A QUERY BELOW</div>
           <div class="cfg-pane-map" data-layout="${state.layout}" data-testid="cfg-pane-map">${paneSlots}</div>
         </section>
 
         <section class="cfg-section">
           <div class="cfg-section-head">
-            <span class="cfg-section-title">3. QUERY SET &amp; BEST-EFFORT RATES</span>
+            <span class="cfg-section-title">4. QUERY SET &amp; BEST-EFFORT RATES</span>
             <span class="cfg-btn-row">${addButtons}</span>
           </div>
           <div class="cfg-table-wrap">
@@ -1106,6 +1157,11 @@ function renderBottomWorkspace(): void {
     .map((qId, paneIndex) => renderQueryPane(getQueryById(qId), paneIndex))
     .join("");
 
+  const camBadge =
+    state.cameraResult.ok && state.cameraResult.target
+      ? `CAM: ${state.cameraResult.target.node ?? `${state.cameraResult.target.lat.toFixed(1)}°,${state.cameraResult.target.lng.toFixed(1)}°`}${state.cameraResult.target.reason ? ` (${state.cameraResult.target.reason})` : ""}`
+      : "CAM: free";
+
   dockEl.innerHTML = `
     <div class="earth-table-frame">
       <div class="earth-table-bar">
@@ -1113,6 +1169,7 @@ function renderBottomWorkspace(): void {
           <a class="tbl-brand" href="/">${escapeHtml(brand)}</a>
           ${statusPill}
           <span class="tbl-cadence" data-testid="mesh-cadence">${escapeHtml(trafficSummary)}</span>
+          <span class="tbl-cadence" data-testid="camera-readout">${escapeHtml(camBadge)}</span>
         </div>
         <div class="earth-bar-tabs" role="tablist" aria-label="Query set">
           ${queryChips}
@@ -1566,6 +1623,42 @@ function bindInteractions(): void {
     });
   });
 
+  // Config Page: 1-click TypeScript camera policy presets
+  app.querySelectorAll<HTMLButtonElement>("[data-cam-preset]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const preset = CAMERA_PRESETS.find((p) => p.id === btn.dataset.camPreset);
+      if (!preset) return;
+      state.cameraDraftCode = preset.code;
+      applyCameraPolicyCode(preset.code);
+      renderAll();
+    });
+  });
+
+  // Config Page: TypeScript camera editor typing + Ctrl+Enter apply
+  const tsEditor = app.querySelector<HTMLTextAreaElement>("#camera-ts-editor");
+  if (tsEditor) {
+    tsEditor.addEventListener("input", () => {
+      state.cameraDraftCode = tsEditor.value;
+    });
+    tsEditor.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        state.cameraDraftCode = tsEditor.value;
+        applyCameraPolicyCode(tsEditor.value);
+        renderAll();
+      }
+    });
+  }
+
+  app
+    .querySelector<HTMLButtonElement>('[data-action="apply-camera-ts"]')
+    ?.addEventListener("click", () => {
+      const code = tsEditor ? tsEditor.value : state.cameraDraftCode;
+      state.cameraDraftCode = code;
+      applyCameraPolicyCode(code);
+      renderAll();
+    });
+
   // Config Page: reset defaults
   app
     .querySelector<HTMLButtonElement>("[data-cfg-reset]")
@@ -1576,6 +1669,8 @@ function bindInteractions(): void {
       state.activePaneIndex = 0;
       state.tableFullscreen = false;
       state.tableMinimized = true;
+      state.cameraDraftCode = CAMERA_PRESETS[0].code;
+      applyCameraPolicyCode(CAMERA_PRESETS[0].code);
       renderAll();
     });
 
@@ -1724,15 +1819,35 @@ function applyTourStep(index: number, keepPlaying: boolean): void {
   syncGlobeFocus();
 }
 
+function applyCameraPolicyCode(code: string): void {
+  const ctx = buildCameraContext(
+    state.networks,
+    state.networkSlug,
+    performance.now() / 1000,
+  );
+  const result = evaluateCameraPolicy(code, ctx);
+  state.cameraResult = result;
+  if (result.ok) {
+    state.cameraPolicyCode = code;
+    try {
+      window.localStorage.setItem(CAMERA_POLICY_STORAGE_KEY, code);
+    } catch {
+      // ignore storage errors
+    }
+    globeController?.setCameraTarget(result.target);
+  }
+}
+
 function syncGlobeFocus(): void {
-  if (!globeController) return;
-  const activeQ = activePaneQuery();
-  if (activeQ.kind === "networks") {
-    globeController.focusTarget(null, null);
-  } else if (activeQ.kind === "host") {
-    globeController.focusTarget(activeQ.networkSlug, state.hostName);
-  } else {
-    globeController.focusTarget(activeQ.networkSlug, null);
+  const ctx = buildCameraContext(
+    state.networks,
+    state.networkSlug,
+    performance.now() / 1000,
+  );
+  const result = evaluateCameraPolicy(state.cameraPolicyCode, ctx);
+  state.cameraResult = result;
+  if (result.ok) {
+    globeController?.setCameraTarget(result.target);
   }
 }
 

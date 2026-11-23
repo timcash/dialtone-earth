@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { adaptLiveMeshToNetwork } from "../src/live-adapter.ts";
+import {
+  buildCameraContext,
+  CAMERA_PRESETS,
+  evaluateCameraPolicy,
+} from "../src/camera-policy.ts";
 import { buildBundledPingArcs } from "../src/edge-bundling.ts";
 import { buildSimulatedH3DataCells } from "../src/h3-geodata.ts";
 import {
@@ -284,4 +289,47 @@ test("query workspace supports custom queries, best-effort rate tiers, and 1 / 1
   assert.equal(changed, true);
   assert.equal(custom.ticks, 1);
   assert.ok(custom.estBytesPerSec > 0);
+});
+
+test("CSP-safe TypeScript camera policy evaluates highest CPU, lowest MEM, highest p95 latency, and custom compositions", () => {
+  const ctx = buildCameraContext(SIMULATED_NETWORKS, "sim-atlas", 12);
+  assert.ok(ctx.nodes.length >= 8);
+
+  // Every built-in TypeScript preset resolves to a valid geolocation target
+  for (const preset of CAMERA_PRESETS) {
+    const res = evaluateCameraPolicy(preset.code, ctx);
+    assert.equal(res.ok, true, `preset ${preset.id} failed: ${res.error}`);
+    assert.ok(res.target, `preset ${preset.id} returned null`);
+    assert.ok(res.target.lat >= -90 && res.target.lat <= 90);
+    assert.ok(res.target.lng >= -180 && res.target.lng <= 180);
+  }
+
+  // Verify highest CPU selects the exact max CPU node
+  const maxCpuNode = [...ctx.nodes].sort((a, b) => b.cpu - a.cpu)[0];
+  const cpuRes = evaluateCameraPolicy(CAMERA_PRESETS[0].code, ctx);
+  assert.equal(cpuRes.target.node, maxCpuNode.name);
+
+  // Verify lowest MEM selects the exact min MEM node
+  const minMemNode = [...ctx.nodes].sort((a, b) => a.mem - b.mem)[0];
+  const memRes = evaluateCameraPolicy(CAMERA_PRESETS[1].code, ctx);
+  assert.equal(memRes.target.node, minMemNode.name);
+
+  // Verify highest p95 latency selects the exact max rttP95 node
+  const maxP95Node = [...ctx.nodes].sort((a, b) => b.rttP95 - a.rttP95)[0];
+  const p95Res = evaluateCameraPolicy(CAMERA_PRESETS[2].code, ctx);
+  assert.equal(p95Res.target.node, maxP95Node.name);
+
+  // Custom user TypeScript composition + syntax error safety + prototype protection
+  const customRes = evaluateCameraPolicy(
+    `export function selectTarget(ctx: CameraContext): CameraTarget | null {
+       const pick = maxBy(ctx.nodes, (n: CameraNodeMetric) => n.rttP95 * 2 + n.cpu);
+       return pick ? { lat: pick.lat, lng: pick.lng, node: pick.name, reason: "custom" } : null;
+     }`,
+    ctx,
+  );
+  assert.equal(customRes.ok, true);
+  assert.equal(customRes.target.reason, "custom");
+
+  const blocked = evaluateCameraPolicy(`return ctx.constructor`, ctx);
+  assert.equal(blocked.ok, false);
 });

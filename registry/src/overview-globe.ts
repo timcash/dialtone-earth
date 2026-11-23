@@ -1,6 +1,7 @@
 import { latLngToCell } from "h3-js";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import type { CameraTarget } from "./camera-policy";
 import {
   buildBundledPingArcs,
   type GeoNodePoint,
@@ -24,27 +25,18 @@ import type { NetworkNode, OverviewNetwork } from "./types";
 
 const EARTH_RADIUS = 50;
 const DEG_TO_RAD = Math.PI / 180;
-const HUD_GLOBE_DISTANCE = EARTH_RADIUS * (9.2 / 2.8);
-const NETWORK_DISTANCE = HUD_GLOBE_DISTANCE;
-const NODE_DISTANCE = HUD_GLOBE_DISTANCE;
-const TRANSITION_MS = 1_800;
-const DWELL_MS = 2_600;
-const RESUME_DELAY_MS = 5_000;
+const DEFAULT_CAMERA_DISTANCE = EARTH_RADIUS * (9.2 / 2.8);
+const TRANSITION_MS = 1_400;
 const NODE_DOT_RADIUS = EARTH_RADIUS * NODE_DOT_RADIUS_RATIO;
-const NODE_RING_RADIUS = EARTH_RADIUS * (0.1 / 2.8);
+const NODE_RING_RADIUS = EARTH_RADIUS * (0.12 / 2.8);
 
 type LandPayload = {
   cells: string[];
 };
 
-type TourStop = {
-  networkIndex: number;
-  nodeIndex: number | null;
-  rotation: THREE.Quaternion;
-  distance: number;
-};
-
 type MarkerVisual = {
+  networkSlug: string;
+  nodeName: string;
   networkIndex: number;
   nodeIndex: number;
   mesh: THREE.Mesh<THREE.CircleGeometry, THREE.MeshBasicMaterial>;
@@ -56,7 +48,6 @@ type MarkerVisual = {
 type ArcVisual = {
   networkIndex: number;
   material: THREE.ShaderMaterial;
-  baseOpacity: number;
 };
 
 export type OverviewGlobeOptions = {
@@ -65,13 +56,12 @@ export type OverviewGlobeOptions = {
 
 export type OverviewGlobeController = {
   dispose: () => void;
-  focusTarget: (networkSlug: string | null, nodeName?: string | null) => void;
+  setCameraTarget: (target: CameraTarget | null) => void;
 };
 
 export async function mountOverviewGlobe(
   container: HTMLElement,
   networks: OverviewNetwork[],
-  onFocus: (networkSlug: string) => void,
   options: OverviewGlobeOptions = {},
 ): Promise<OverviewGlobeController> {
   const landCells = await loadLandCells();
@@ -79,13 +69,11 @@ export async function mountOverviewGlobe(
     container,
     networks,
     landCells,
-    onFocus,
     options.includeSimulatedGeodata ?? true,
   );
   return {
     dispose: () => globe.dispose(),
-    focusTarget: (networkSlug, nodeName) =>
-      globe.focusTarget(networkSlug, nodeName ?? null),
+    setCameraTarget: (target) => globe.setCameraTarget(target),
   };
 }
 
@@ -126,30 +114,32 @@ class OverviewGlobe {
   private readonly geoOverlay: GeospatialH3Overlay;
   private readonly markers: MarkerVisual[] = [];
   private readonly arcs: ArcVisual[] = [];
-  private readonly stops: TourStop[] = [];
+  private readonly targetReticle: THREE.LineLoop<
+    THREE.BufferGeometry,
+    THREE.LineBasicMaterial
+  >;
   private readonly resizeObserver: ResizeObserver;
   private limbMaterial!: THREE.ShaderMaterial;
   private cloudMaterial!: THREE.ShaderMaterial;
   private readonly reducedMotion = window.matchMedia(
     "(prefers-reduced-motion: reduce)",
   ).matches;
+
   private frameId = 0;
-  private currentStopIndex = 0;
-  private targetStopIndex = 0;
-  private resumeStopIndex = 0;
-  private phase: "dwell" | "transition" = "dwell";
-  private phaseStarted = performance.now();
-  private transitionFromDirection = new THREE.Vector3(0, 0, 1);
-  private transitionFromDistance = NETWORK_DISTANCE;
-  private transitionFromGlobeRotation = new THREE.Quaternion();
-  private interrupted = false;
-  private resumeAt = Number.POSITIVE_INFINITY;
+  private userDragging = false;
+  private transitioning = false;
+  private transitionStart = 0;
+  private fromCameraDir = new THREE.Vector3(0, 0, 1);
+  private fromDistance = DEFAULT_CAMERA_DISTANCE;
+  private targetDistance = DEFAULT_CAMERA_DISTANCE;
+  private fromRotation = new THREE.Quaternion();
+  private targetRotation = new THREE.Quaternion();
+  private lastTargetKey = "";
 
   constructor(
     private readonly container: HTMLElement,
     private readonly networks: OverviewNetwork[],
     landCells: string[],
-    private readonly onFocus: (networkSlug: string) => void,
     includeSimulatedGeodata: boolean,
   ) {
     this.renderer.setClearColor(0x000000, 0);
@@ -180,7 +170,7 @@ class OverviewGlobe {
     const allGeoPoints: GeoNodePoint[] = [];
     networks.forEach((network, networkIndex) => {
       network.snapshot.nodes.forEach((node, nodeIndex) => {
-        this.addNode(node, networkIndex, nodeIndex);
+        this.addNode(node, network.slug, networkIndex, nodeIndex);
         allGeoPoints.push({
           id: `${network.slug}:${node.name}`,
           networkIndex,
@@ -207,18 +197,24 @@ class OverviewGlobe {
     const h3Cells = buildSimulatedH3DataCells(allGeoPoints, 3);
     this.geoOverlay = new GeospatialH3Overlay(h3Cells, EARTH_RADIUS);
     this.globe.add(this.geoOverlay.group);
-
     this.addBundledPingArcs(allGeoPoints);
-    this.buildTour();
 
-    if (this.stops.length > 0) {
-      const first = this.stops[0];
-      this.camera.position.set(0, 0, first.distance);
-      this.globe.quaternion.copy(first.rotation);
-      this.applyFocus(first);
-    } else {
-      this.camera.position.set(0, 0, NETWORK_DISTANCE);
-    }
+    // Reticle ring highlighting any custom geolocation returned by the TS camera policy
+    this.targetReticle = new THREE.LineLoop(
+      new THREE.BufferGeometry().setFromPoints(
+        circlePoints(NODE_RING_RADIUS * 1.35, 36),
+      ),
+      new THREE.LineBasicMaterial({
+        color: 0x36d66b,
+        transparent: true,
+        opacity: 0.85,
+      }),
+    );
+    this.targetReticle.visible = false;
+    this.targetReticle.renderOrder = 7;
+    this.globe.add(this.targetReticle);
+
+    this.camera.position.set(0, 0, DEFAULT_CAMERA_DISTANCE);
     this.camera.lookAt(0, 0, 0);
     this.controls.target.set(0, 0, 0);
     this.controls.update();
@@ -229,31 +225,84 @@ class OverviewGlobe {
     this.animate();
   }
 
-  focusTarget(networkSlug: string | null, nodeName: string | null): void {
-    if (this.stops.length === 0) return;
-    if (!networkSlug) {
-      this.interrupted = false;
-      this.beginTransition(0, performance.now());
+  /**
+   * Direct policy-driven geolocation camera target: smoothly slerps the globe
+   * to center (target.lat, target.lng) and highlights the target node/network.
+   */
+  setCameraTarget(target: CameraTarget | null): void {
+    if (!target) {
+      this.targetReticle.visible = false;
+      this.markers.forEach((m) => {
+        m.active = false;
+        m.ring.visible = false;
+      });
+      this.arcs.forEach((a) => {
+        a.material.uniforms.uFocusGain.value = 0.85;
+      });
+      this.renderer.domElement.dataset.cameraTarget = "free";
       return;
     }
-    const networkIndex = this.networks.findIndex(
-      (item) => item.slug === networkSlug,
+
+    const key = `${target.lat.toFixed(2)},${target.lng.toFixed(2)},${target.node ?? ""},${target.network ?? ""}`;
+    this.renderer.domElement.dataset.cameraTarget = target.node
+      ? `${target.node} (${target.lat.toFixed(2)},${target.lng.toFixed(2)})`
+      : `${target.lat.toFixed(2)},${target.lng.toFixed(2)}`;
+
+    const direction = latLngToVector(target.lat, target.lng, 1);
+    this.targetReticle.position.copy(
+      direction.clone().multiplyScalar(EARTH_RADIUS * 1.015),
     );
-    if (networkIndex < 0) return;
-    const nodeIndex = nodeName
-      ? this.networks[networkIndex].snapshot.nodes.findIndex(
-          (node) => node.name === nodeName,
-        )
+    this.targetReticle.quaternion.setFromUnitVectors(
+      new THREE.Vector3(0, 0, 1),
+      direction,
+    );
+    this.targetReticle.visible = true;
+
+    const focusNetIdx = target.network
+      ? this.networks.findIndex((n) => n.slug === target.network)
       : -1;
-    const stopIndex = this.stops.findIndex(
-      (stop) =>
-        stop.networkIndex === networkIndex &&
-        stop.nodeIndex === (nodeIndex >= 0 ? nodeIndex : null),
-    );
-    if (stopIndex >= 0) {
-      this.interrupted = false;
-      this.beginTransition(stopIndex, performance.now());
+
+    this.markers.forEach((marker) => {
+      const isMatch =
+        Boolean(target.node) &&
+        marker.nodeName === target.node &&
+        (!target.network || marker.networkSlug === target.network);
+      marker.active = isMatch;
+      marker.ring.visible = isMatch;
+      marker.mesh.material.color.copy(marker.baseColor);
+    });
+
+    this.arcs.forEach((arc) => {
+      arc.material.uniforms.uFocusGain.value =
+        focusNetIdx < 0 || arc.networkIndex === focusNetIdx ? 1.0 : 0.42;
+    });
+
+    if (key === this.lastTargetKey || this.userDragging) {
+      return;
     }
+    this.lastTargetKey = key;
+
+    const desiredRot = targetQuaternionForDirection(direction);
+    const desiredDist =
+      typeof target.distance === "number"
+        ? THREE.MathUtils.clamp(target.distance, 120, 240)
+        : DEFAULT_CAMERA_DISTANCE;
+
+    if (this.reducedMotion) {
+      this.globe.quaternion.copy(desiredRot);
+      this.camera.position.set(0, 0, desiredDist);
+      this.camera.lookAt(0, 0, 0);
+      this.transitioning = false;
+      return;
+    }
+
+    this.fromCameraDir.copy(this.camera.position).normalize();
+    this.fromDistance = this.camera.position.length();
+    this.targetDistance = desiredDist;
+    this.fromRotation.copy(this.globe.quaternion);
+    this.targetRotation.copy(desiredRot);
+    this.transitionStart = performance.now();
+    this.transitioning = true;
   }
 
   dispose(): void {
@@ -388,7 +437,6 @@ class OverviewGlobe {
       this.arcs.push({
         networkIndex: edge.networkIndex,
         material,
-        baseOpacity: 0.9,
       });
       this.globe.add(line);
     });
@@ -396,6 +444,7 @@ class OverviewGlobe {
 
   private addNode(
     node: NetworkNode,
+    networkSlug: string,
     networkIndex: number,
     nodeIndex: number,
   ): void {
@@ -424,7 +473,7 @@ class OverviewGlobe {
     const ringMaterial = new THREE.LineBasicMaterial({
       color: 0xffffff,
       transparent: true,
-      opacity: 0.35,
+      opacity: 0.45,
     });
     const ring = new THREE.LineLoop(
       new THREE.BufferGeometry().setFromPoints(
@@ -443,6 +492,8 @@ class OverviewGlobe {
     ring.renderOrder = 6;
 
     this.markers.push({
+      networkSlug,
+      nodeName: node.name,
       networkIndex,
       nodeIndex,
       mesh,
@@ -453,150 +504,45 @@ class OverviewGlobe {
     this.globe.add(mesh, ring);
   }
 
-  private buildTour(): void {
-    this.networks.forEach((network, networkIndex) => {
-      const directions = network.snapshot.nodes.map((node) =>
-        latLngToVector(node.lat, node.lng, 1),
-      );
-      const networkDirection = directions
-        .reduce(
-          (result, direction) => result.add(direction),
-          new THREE.Vector3(),
-        )
-        .normalize();
-      this.stops.push({
-        networkIndex,
-        nodeIndex: null,
-        rotation: targetQuaternionForDirection(
-          networkDirection.lengthSq() > 0
-            ? networkDirection
-            : new THREE.Vector3(0, 0, 1),
-        ),
-        distance: NETWORK_DISTANCE,
-      });
-      directions.forEach((direction, nodeIndex) => {
-        this.stops.push({
-          networkIndex,
-          nodeIndex,
-          rotation: targetQuaternionForDirection(direction),
-          distance: NODE_DISTANCE,
-        });
-      });
-    });
-  }
-
-  private applyFocus(stop: TourStop): void {
-    const network = this.networks[stop.networkIndex];
-    if (!network) return;
-    const activeNode =
-      stop.nodeIndex === null
-        ? null
-        : network.snapshot.nodes[stop.nodeIndex];
-    this.renderer.domElement.dataset.tourStop = activeNode
-      ? `${network.slug}/${activeNode.name}`
-      : `${network.slug}/overview`;
-    this.onFocus(network.slug);
-
-    this.markers.forEach((marker) => {
-      marker.active =
-        marker.networkIndex === stop.networkIndex &&
-        marker.nodeIndex === stop.nodeIndex;
-      marker.ring.visible = marker.active;
-      marker.mesh.material.color.copy(
-        marker.baseColor,
-      );
-    });
-    this.arcs.forEach((arc) => {
-      arc.material.uniforms.uFocusGain.value =
-        arc.networkIndex === stop.networkIndex ? 1.0 : 0.42;
-    });
-  }
-
-  private beginTransition(stopIndex: number, now: number): void {
-    if (this.stops.length === 0) return;
-    this.targetStopIndex = stopIndex % this.stops.length;
-    this.transitionFromDirection
-      .copy(this.camera.position)
-      .normalize();
-    this.transitionFromDistance = this.camera.position.length();
-    this.transitionFromGlobeRotation.copy(this.globe.quaternion);
-    this.phase = "transition";
-    this.phaseStarted = now;
-    this.applyFocus(this.stops[this.targetStopIndex]);
-  }
-
-  private updateTour(now: number): void {
-    if (this.stops.length < 2 || this.reducedMotion) return;
-
-    if (this.interrupted) {
-      if (now < this.resumeAt) return;
-      this.interrupted = false;
-      this.beginTransition(this.resumeStopIndex, now);
-      return;
-    }
-
-    if (this.phase === "dwell") {
-      if (now - this.phaseStarted >= DWELL_MS) {
-        this.beginTransition(
-          (this.currentStopIndex + 1) % this.stops.length,
-          now,
-        );
-      }
-      return;
-    }
-
-    const progress = Math.min(
-      1,
-      (now - this.phaseStarted) / TRANSITION_MS,
-    );
+  private updateCameraTransition(now: number): void {
+    if (!this.transitioning || this.userDragging) return;
+    const progress = Math.min(1, (now - this.transitionStart) / TRANSITION_MS);
     const eased = easeInOutCubic(progress);
-    const target = this.stops[this.targetStopIndex];
-    const cameraRotation = new THREE.Quaternion().setFromUnitVectors(
-      this.transitionFromDirection,
+
+    const cameraRot = new THREE.Quaternion().setFromUnitVectors(
+      this.fromCameraDir,
       new THREE.Vector3(0, 0, 1),
     );
     const partial = new THREE.Quaternion().slerpQuaternions(
       new THREE.Quaternion(),
-      cameraRotation,
+      cameraRot,
       eased,
     );
-    const direction = this.transitionFromDirection
-      .clone()
-      .applyQuaternion(partial)
-      .normalize();
-    const distance = THREE.MathUtils.lerp(
-      this.transitionFromDistance,
-      target.distance,
+    const dir = this.fromCameraDir.clone().applyQuaternion(partial).normalize();
+    const dist = THREE.MathUtils.lerp(
+      this.fromDistance,
+      this.targetDistance,
       eased,
     );
-    this.camera.position.copy(direction).multiplyScalar(distance);
+    this.camera.position.copy(dir).multiplyScalar(dist);
     this.camera.lookAt(0, 0, 0);
     this.globe.quaternion.slerpQuaternions(
-      this.transitionFromGlobeRotation,
-      target.rotation,
+      this.fromRotation,
+      this.targetRotation,
       eased,
     );
-
     if (progress >= 1) {
-      this.currentStopIndex = this.targetStopIndex;
-      this.phase = "dwell";
-      this.phaseStarted = now;
+      this.transitioning = false;
     }
   }
 
   private handleControlStart = (): void => {
-    if (this.reducedMotion || this.stops.length < 2) return;
-    this.interrupted = true;
-    this.resumeAt = Number.POSITIVE_INFINITY;
-    this.resumeStopIndex =
-      this.phase === "transition"
-        ? this.targetStopIndex
-        : (this.currentStopIndex + 1) % this.stops.length;
+    this.userDragging = true;
+    this.transitioning = false;
   };
 
   private handleControlEnd = (): void => {
-    if (!this.interrupted) return;
-    this.resumeAt = performance.now() + RESUME_DELAY_MS;
+    this.userDragging = false;
   };
 
   private resize(): void {
@@ -611,10 +557,7 @@ class OverviewGlobe {
   private animate = (): void => {
     this.frameId = requestAnimationFrame(this.animate);
     const now = performance.now();
-    this.updateTour(now);
-    if (this.stops.length === 0 && !this.reducedMotion && !this.interrupted) {
-      this.globe.rotation.y += 0.0007;
-    }
+    this.updateCameraTransition(now);
     const timeSec = now / 1000;
     this.cloudMaterial.uniforms.uTime.value = timeSec;
     this.geoOverlay.updatePulse(timeSec);
@@ -623,18 +566,17 @@ class OverviewGlobe {
         this.arcs[i].material.uniforms.uTime.value = timeSec;
       }
     }
-    const pulse = 1.3 + Math.sin(now * 0.006) * 0.04;
+    const pulse = 1.25 + Math.sin(now * 0.006) * 0.05;
+    if (this.targetReticle.visible) {
+      this.targetReticle.scale.setScalar(1 + Math.sin(now * 0.004) * 0.14);
+    }
     this.markers.forEach((marker) => {
       marker.mesh.scale.setScalar(marker.active ? pulse : 1);
       const progress = this.reducedMotion
         ? 0.5
         : (now * 0.00055 + marker.nodeIndex * 0.33) % 1;
-      const scale = marker.active
-        ? 0.75 + progress * 0.65
-        : 0.75 + progress * 0.4;
-      marker.ring.scale.setScalar(scale);
-      marker.ring.material.opacity =
-        (1 - progress) * (marker.active ? 0.75 : 0.35);
+      marker.ring.scale.setScalar(0.75 + progress * 0.65);
+      marker.ring.material.opacity = (1 - progress) * 0.8;
     });
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
@@ -674,16 +616,13 @@ function createBundledPingArcMaterial(
       varying float vProgress;
 
       void main() {
-        // Soft atmospheric fade at both ground endpoints
         float envelope = sin(clamp(vProgress, 0.0, 1.0) * 3.14159265);
         envelope = pow(max(envelope, 0.0), 0.7);
 
-        // Forward ping comet with smooth fading tail
         float headFwd = fract(uTime * uSpeed + uPhase);
         float distFwd = mod(headFwd - vProgress + 1.0, 1.0);
         float pingFwd = exp(-distFwd * 8.0);
 
-        // Subtle return pong echo
         float headBack = fract(uTime * uSpeed * 0.85 + uPhase + 0.5);
         float distBack = mod(vProgress - headBack + 1.0, 1.0);
         float pingBack = 0.55 * exp(-distBack * 10.5);
@@ -692,7 +631,6 @@ function createBundledPingArcMaterial(
         float pulse = (pingFwd + pingBack) * envelope;
         float alpha = clamp((strand + pulse * 0.92) * uFocusGain, 0.0, 0.95);
 
-        // Brighten ping head subtly toward white for crisp atmospheric sparkle
         vec3 col = mix(uColor, vec3(1.0), clamp(pingFwd * 0.65, 0.0, 0.7));
         gl_FragColor = vec4(col, alpha);
       }
@@ -714,7 +652,6 @@ function latLngToVector(
   ).multiplyScalar(radius);
 }
 
-// Ported from the HUD's north-up overhead geospatial orientation.
 function targetQuaternionForDirection(
   siteDirection: THREE.Vector3,
 ): THREE.Quaternion {

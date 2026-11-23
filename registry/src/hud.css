@@ -650,6 +650,41 @@ a {
   overflow: auto;
 }
 
+.cfg-cam-meta {
+  font-size: 12px;
+}
+
+.cfg-ts-editor {
+  width: 100%;
+  min-height: 170px;
+  padding: 12px 14px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.5;
+  resize: vertical;
+  tab-size: 2;
+}
+
+.cfg-ts-editor:focus {
+  outline: none;
+  border-color: var(--fg);
+}
+
+.cfg-cam-ok {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ok);
+}
+
+.cfg-cam-err {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--err);
+}
+
 .terminal-overlay {
   padding: 24px;
 }
