@@ -8,6 +8,19 @@ import {
   type TableQuery,
 } from "./mesh-cadence";
 import {
+  bestEffortIntervalMs,
+  createCustomQuery,
+  createDefaultQuerySet,
+  defaultSourceForKind,
+  normalizePaneAssignments,
+  SPLIT_LAYOUTS,
+  tickSimulatedQuery,
+  type QuerySource,
+  type RateTier,
+  type SavedQuery,
+  type SplitLayout,
+} from "./query-workspace";
+import {
   SIMULATED_NETWORKS,
   SIMULATED_TOUR_STEPS,
   summarizeSystemResources,
@@ -53,7 +66,11 @@ type AppState = {
   liveEtag: string | null;
   networks: MeshNetwork[];
   tourSteps: TourStep[];
-  query: TableQuery;
+  queries: SavedQuery[];
+  layout: SplitLayout;
+  paneQueryIds: string[];
+  activePaneIndex: number;
+  composerOpen: boolean;
   networkSlug: string;
   hostName: string;
   testId: string;
@@ -73,20 +90,13 @@ type AppState = {
 
 const TOUR_INTERVAL_MS = 6_500;
 const PRESENCE_INTERVAL_MS = 30_000;
-
-const QUERY_TABS: Array<{ id: TableQuery; label: string }> = [
-  { id: "networks", label: "networks" },
-  { id: "hosts", label: "hosts" },
-  { id: "plugins", label: "plugins" },
-  { id: "users", label: "users" },
-  { id: "recovery", label: "recovery" },
-  { id: "tests", label: "tests" },
-  { id: "log", label: "log" },
-];
+const QUERY_SCHEDULER_TICK_MS = 1_000;
 
 const appElement = document.querySelector<HTMLDivElement>("#app");
 if (!appElement) throw new Error("Missing app root");
 const app: HTMLDivElement = appElement;
+
+const initialQueries = createDefaultQuerySet(SIMULATED_NETWORKS);
 
 const state: AppState = {
   session: {
@@ -99,7 +109,11 @@ const state: AppState = {
   liveEtag: null,
   networks: SIMULATED_NETWORKS,
   tourSteps: SIMULATED_TOUR_STEPS,
-  query: "networks",
+  queries: initialQueries,
+  layout: "1",
+  paneQueryIds: [initialQueries[0].id],
+  activePaneIndex: 0,
+  composerOpen: false,
   networkSlug: SIMULATED_NETWORKS[0].slug,
   hostName: SIMULATED_NETWORKS[0].hosts[0].name,
   testId:
@@ -123,6 +137,8 @@ let globeController: OverviewGlobeController | null = null;
 let tourTimer: number | null = null;
 let presenceTimer: number | null = null;
 let adaptivePollTimer: number | null = null;
+let querySchedulerTimer: number | null = null;
+let schedulerTickSeq = 0;
 
 void boot();
 
@@ -138,6 +154,12 @@ async function boot(): Promise<void> {
     state.tourCaptionsVisible = false;
     state.tableMinimized = false;
     await syncActiveLiveQuery(true);
+    state.queries = createDefaultQuerySet(state.networks);
+    state.paneQueryIds = normalizePaneAssignments(
+      [],
+      state.queries,
+      state.layout,
+    );
   } else {
     await syncPublicLiveControl(true);
   }
@@ -178,6 +200,128 @@ async function boot(): Promise<void> {
   startTourTimer();
   startPresenceHeartbeat();
   scheduleNextAdaptivePoll();
+  startBestEffortQueryScheduler();
+}
+
+function getQueryById(id: string | undefined): SavedQuery {
+  return (
+    state.queries.find((q) => q.id === id) ??
+    state.queries[0]
+  );
+}
+
+function activePaneQuery(): SavedQuery {
+  const id = state.paneQueryIds[state.activePaneIndex] ?? state.paneQueryIds[0];
+  return getQueryById(id);
+}
+
+function visiblePaneQueries(): SavedQuery[] {
+  if (state.tableMinimized && !state.tableFullscreen) {
+    return [];
+  }
+  return state.paneQueryIds.map((id) => getQueryById(id));
+}
+
+function isQueryVisible(queryId: string): boolean {
+  if (state.tableMinimized && !state.tableFullscreen) return false;
+  return state.paneQueryIds.includes(queryId);
+}
+
+function ensureQueryForKind(kind: TableQuery, networkSlug?: string): SavedQuery {
+  const targetNet = networkSlug || state.networkSlug;
+  const exact = state.queries.find(
+    (q) => q.kind === kind && (kind === "networks" || q.networkSlug === targetNet),
+  );
+  if (exact) return exact;
+  const byKind = state.queries.find((q) => q.kind === kind);
+  if (byKind) {
+    if (networkSlug) byKind.networkSlug = networkSlug;
+    return byKind;
+  }
+  const created = createCustomQuery(state.queries, {
+    kind,
+    source: defaultSourceForKind(kind),
+    networkSlug: targetNet,
+    rate: "med",
+  });
+  state.queries.push(created);
+  return created;
+}
+
+function assignQueryToActivePane(queryId: string): void {
+  state.paneQueryIds = normalizePaneAssignments(
+    state.paneQueryIds,
+    state.queries,
+    state.layout,
+  );
+  const idx = Math.min(
+    Math.max(0, state.activePaneIndex),
+    Math.max(0, state.paneQueryIds.length - 1),
+  );
+  state.paneQueryIds[idx] = queryId;
+  const q = getQueryById(queryId);
+  state.networkSlug = q.networkSlug;
+  const net = networkBySlug(q.networkSlug);
+  if (!net.hosts.some((h) => h.name === state.hostName)) {
+    state.hostName = net.hosts[0]?.name ?? "";
+  }
+  if (!net.tests.some((t) => t.testId === state.testId)) {
+    state.testId = net.tests[0]?.testId ?? "";
+  }
+  q.nextDueAtMs = Date.now();
+}
+
+function startBestEffortQueryScheduler(): void {
+  if (querySchedulerTimer !== null) {
+    window.clearInterval(querySchedulerTimer);
+    querySchedulerTimer = null;
+  }
+  querySchedulerTimer = window.setInterval(() => {
+    if (document.hidden) return;
+    const visible = visiblePaneQueries();
+    if (visible.length === 0) {
+      // Minimized: zero query-plane traffic (only mesh-formation base plane runs)
+      for (const q of state.queries) {
+        q.estBytesPerSec = 0;
+      }
+      return;
+    }
+
+    const visibleIds = new Set(visible.map((q) => q.id));
+    for (const q of state.queries) {
+      if (!visibleIds.has(q.id)) {
+        q.estBytesPerSec = 0;
+      }
+    }
+
+    const nowMs = Date.now();
+    let anyTouched = false;
+    const deduped = new Map<string, SavedQuery>();
+    for (const q of visible) {
+      deduped.set(q.id, q);
+    }
+
+    for (const q of deduped.values()) {
+      if (nowMs < q.nextDueAtMs) continue;
+      schedulerTickSeq += 1;
+      if (state.session.authenticated) {
+        void syncSingleLiveQuery(q).then((changed) => {
+          if (changed) renderAll();
+        });
+      } else {
+        tickSimulatedQuery(q, state.networks, nowMs, schedulerTickSeq);
+      }
+      const nextMs =
+        bestEffortIntervalMs(q.rate, q.unchangedStreak, document.hidden) ??
+        30_000;
+      q.nextDueAtMs = nowMs + nextMs;
+      anyTouched = true;
+    }
+
+    if (anyTouched && !state.composerOpen) {
+      renderAll();
+    }
+  }, QUERY_SCHEDULER_TICK_MS);
 }
 
 async function detectSession(): Promise<SessionInfo> {
@@ -213,7 +357,7 @@ async function detectSession(): Promise<SessionInfo> {
   };
 }
 
-function viewToQuery(view: TourView, networkTab?: string): TableQuery {
+function viewToQueryKind(view: TourView, networkTab?: string): TableQuery {
   switch (view) {
     case "overview":
       return "networks";
@@ -251,18 +395,40 @@ function queryToPresenceView(query: TableQuery): TourView {
   }
 }
 
-/**
- * Single-query-only live mesh sync: fetches ONLY the endpoint backing the
- * currently displayed table query instead of fanning out to all endpoints.
- */
+async function syncSingleLiveQuery(q: SavedQuery): Promise<boolean> {
+  if (!state.session.authenticated || state.session.mode !== "live") {
+    return false;
+  }
+  q.ticks += 1;
+  const changed = await syncLiveEndpointForKind(q.kind, false);
+  if (changed) {
+    q.deltas += 1;
+    q.unchangedStreak = 0;
+    q.lastUpdatedAt = new Date().toISOString().slice(11, 19) + "Z";
+    q.estBytesPerSec = 140;
+  } else {
+    q.notModified += 1;
+    q.unchangedStreak += 1;
+    q.estBytesPerSec = 8;
+  }
+  return changed;
+}
+
 async function syncActiveLiveQuery(initial = false): Promise<boolean> {
+  return syncLiveEndpointForKind(activePaneQuery().kind, initial);
+}
+
+async function syncLiveEndpointForKind(
+  kind: TableQuery,
+  initial: boolean,
+): Promise<boolean> {
   if (!state.session.authenticated || state.session.mode !== "live") {
     return false;
   }
 
-  if (state.query === "log" && state.testId && /^[a-f0-9]{32}$/.test(state.testId)) {
+  if (kind === "log" && state.testId && /^[a-f0-9]{32}$/.test(state.testId)) {
     if (state.loadedLogCache[state.testId]) {
-      return false; // Immutable log already cached: zero network traffic.
+      return false;
     }
     const payload = await fetchOptionalJson(`/api/mesh/test-runs/${state.testId}`);
     const run =
@@ -298,7 +464,7 @@ async function syncActiveLiveQuery(initial = false): Promise<boolean> {
     return true;
   }
 
-  const endpoint = liveEndpointForQuery(state.query, state.testId);
+  const endpoint = liveEndpointForQuery(kind, state.testId);
   if (!endpoint) return false;
 
   const payload = await fetchOptionalJson(endpoint);
@@ -350,9 +516,6 @@ async function syncActiveLiveQuery(initial = false): Promise<boolean> {
   return changed;
 }
 
-/**
- * Public dialtone.earth live-control sync using ETag / If-None-Match (304 = 0 bytes).
- */
 async function syncPublicLiveControl(initial = false): Promise<boolean> {
   if (state.session.authenticated) return false;
   try {
@@ -434,7 +597,11 @@ function applyLiveSiteState(live: LiveSiteState, initial: boolean): void {
     }
   }
   if (live.view) {
-    state.query = viewToQuery(live.view);
+    const q = ensureQueryForKind(
+      viewToQueryKind(live.view),
+      live.network ?? undefined,
+    );
+    assignQueryToActivePane(q.id);
   }
   if (typeof live.tour_playing === "boolean") {
     state.tourPlaying = live.tour_playing;
@@ -492,31 +659,22 @@ async function runAdaptiveMeshTick(): Promise<void> {
     state.unchangedStreak += 1;
   }
   scheduleNextAdaptivePoll();
-  renderAll();
-}
-
-function triggerImmediateQuerySync(): void {
-  state.unchangedStreak = 0;
-  if (state.session.authenticated) {
-    void syncActiveLiveQuery(false).then(() => {
-      scheduleNextAdaptivePoll();
-      renderAll();
-    });
-  } else {
-    scheduleNextAdaptivePoll();
+  if (!state.composerOpen) {
+    renderAll();
   }
 }
 
 async function reportLivePresence(): Promise<void> {
   if (!state.session.authenticated || state.session.mode !== "live") return;
+  const activeQ = activePaneQuery();
   try {
     await fetch("/api/mesh/presence", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       cache: "no-store",
       body: JSON.stringify({
-        view: queryToPresenceView(state.query),
-        node: state.query === "networks" ? null : state.hostName || null,
+        view: queryToPresenceView(activeQ.kind),
+        node: activeQ.kind === "networks" ? null : state.hostName || null,
       }),
     });
   } catch {
@@ -566,7 +724,7 @@ function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
       networkSlug: net.slug,
       hostName: null,
       headline: `Live mesh ${net.slug} (${net.hosts.length} peers)`,
-      caption: `Single-query gossip telemetry for ${net.slug} at minimal adaptive base traffic.`,
+      caption: `Open tables subscribe on a best-effort basis; minimized tables drop back to base mesh-formation metadata only.`,
     },
     {
       id: "live-hosts",
@@ -576,7 +734,7 @@ function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
       hostName: null,
       networkTab: "hosts",
       headline: `Live peers on ${net.slug}`,
-      caption: `Active Dialtone peers, OS/arch versions, CPU/RAM load, RTTs, and probes.`,
+      caption: `Active Dialtone channel query for peer OS/arch, CPU/RAM, RTTs, and probes.`,
     },
     {
       id: "live-host",
@@ -585,7 +743,7 @@ function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
       networkSlug: net.slug,
       hostName: firstHost,
       headline: `Inspecting host ${firstHost ?? "origin"}`,
-      caption: `Per-host compute telemetry, blob store, and persistent dialtone/shell/1 sessions.`,
+      caption: `Single-host telemetry, blob store, and dialtone/shell/1 sessions.`,
     },
     {
       id: "live-users",
@@ -593,8 +751,8 @@ function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
       view: "users",
       networkSlug: net.slug,
       hostName: null,
-      headline: `Active members on ${net.slug}`,
-      caption: `Signed-in network presence and redacted dialtone-shell audit log.`,
+      headline: `Cloudflare Gateway Users (${net.slug})`,
+      caption: `Cloudflare edge presence and redacted dialtone-shell audit log.`,
     },
     {
       id: "live-tests",
@@ -603,7 +761,7 @@ function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
       networkSlug: net.slug,
       hostName: null,
       headline: `Recorded tests (${net.tests.length})`,
-      caption: `Immutable per-run test results fetched on demand.`,
+      caption: `Immutable per-run test results queried on demand.`,
     },
     ...(firstTestId
       ? [
@@ -615,7 +773,7 @@ function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
             hostName: null,
             testId: firstTestId,
             headline: `Immutable log ${firstTestId.slice(0, 10)}`,
-            caption: `Cached once per test-id so repeat reads send zero network traffic.`,
+            caption: `Cached once per test-id for zero repeat bandwidth.`,
           },
         ]
       : []),
@@ -633,14 +791,14 @@ function mountShell(): void {
       <div class="globe-stage"></div>
       <div class="scene-shade" aria-hidden="true"></div>
       <aside class="tour-captions" id="tour-captions" aria-live="polite" data-testid="tour-captions"></aside>
-      <section class="bottom-table-dock" id="bottom-table-dock" aria-label="Live mesh query table"></section>
+      <section class="bottom-table-dock" id="bottom-table-dock" aria-label="Live mesh query workspace"></section>
     </main>
   `;
 }
 
-function activeNetwork(): MeshNetwork {
+function networkBySlug(slug: string): MeshNetwork {
   return (
-    state.networks.find((n) => n.slug === state.networkSlug) ??
+    state.networks.find((n) => n.slug === slug) ??
     state.networks[0]
   );
 }
@@ -658,6 +816,14 @@ function activeTestRun(net: MeshNetwork): SimTestRun | null {
 }
 
 function renderAll(): void {
+  state.paneQueryIds = normalizePaneAssignments(
+    state.paneQueryIds,
+    state.queries,
+    state.layout,
+  );
+  if (state.activePaneIndex >= state.paneQueryIds.length) {
+    state.activePaneIndex = 0;
+  }
   const shell = app.querySelector<HTMLElement>(".hud-shell");
   if (shell) {
     shell.classList.toggle("is-table-fullscreen", state.tableFullscreen);
@@ -667,25 +833,21 @@ function renderAll(): void {
     );
   }
   renderTourCaptions();
-  renderBottomTable();
+  renderBottomWorkspace();
   bindInteractions();
 }
 
-/**
- * The ONLY text outside the bottom table: closed-caption text in the top-left
- * strictly when a tour is active.
- */
 function renderTourCaptions(): void {
   const ccEl = app.querySelector<HTMLElement>("#tour-captions");
   if (!ccEl) return;
 
-  if (!state.tourCaptionsVisible) {
+  if (!state.tourCaptionsVisible || state.tableFullscreen) {
     ccEl.innerHTML = "";
     ccEl.hidden = true;
     return;
   }
 
-  const net = activeNetwork();
+  const net = networkBySlug(state.networkSlug);
   const isLive = state.session.authenticated && !net.simulated;
   const liveCtrl = !isLive ? state.liveSite : null;
   const step = state.tourSteps[state.tourStepIndex] ?? state.tourSteps[0];
@@ -706,29 +868,33 @@ function renderTourCaptions(): void {
   `;
 }
 
-function renderBottomTable(): void {
+function renderBottomWorkspace(): void {
   const dockEl = app.querySelector<HTMLElement>("#bottom-table-dock");
   if (!dockEl) return;
 
-  const net = activeNetwork();
-  const host = activeHost(net);
-  const testRun = activeTestRun(net);
   const summary = summarizeSystemResources(state.networks);
-  const isLive = state.session.authenticated && !net.simulated;
+  const primaryNet = networkBySlug(state.networkSlug);
+  const isLive = state.session.authenticated && !primaryNet.simulated;
   const liveCtrl = !isLive ? state.liveSite : null;
 
   const brand = liveCtrl?.title || "dialtone // earth";
   const statusPill = isLive
-    ? `<span class="tbl-pill is-live" data-testid="live-badge">● LIVE · ${escapeHtml(net.slug)}</span>`
+    ? `<span class="tbl-pill is-live" data-testid="live-badge">LIVE · ${escapeHtml(primaryNet.slug)}</span>`
     : liveCtrl?.badge
-      ? `<span class="tbl-pill is-live" data-testid="live-cli-badge">● ${escapeHtml(liveCtrl.badge)}</span>`
-      : `<span class="tbl-pill is-sim" data-testid="simulated-badge">○ SIM · ${summary.onlineNodes}/${summary.totalNodes}</span>`;
+      ? `<span class="tbl-pill is-live" data-testid="live-cli-badge">${escapeHtml(liveCtrl.badge)}</span>`
+      : `<span class="tbl-pill is-sim" data-testid="simulated-badge">SIM · ${summary.onlineNodes}/${summary.totalNodes}</span>`;
 
-  const cadenceText = formatCadenceLabel(
+  const visible = visiblePaneQueries();
+  const totalBps = visible.reduce((acc, q) => acc + q.estBytesPerSec, 0);
+  const baseCadence = formatCadenceLabel(
     state.currentPollMs,
     state.unchangedStreak,
     state.notModifiedCount,
   );
+  const trafficSummary =
+    visible.length === 0
+      ? `BASE ONLY · 0 B/s · ${baseCadence}`
+      : `${visible.length} ACTIVE · ${totalBps} B/s · ${baseCadence}`;
 
   const authAction = isLive
     ? `<a class="tbl-chip" data-testid="auth-logout" href="${escapeHtml(state.session.logout_url || "/cdn-cgi/access/logout")}">sign out</a>`
@@ -736,37 +902,70 @@ function renderBottomTable(): void {
       ? `<a class="tbl-chip" data-testid="auth-login" href="${escapeHtml(state.session.login_url)}">sign in</a>`
       : "";
 
-  const networkPicker =
-    state.query !== "networks" && state.networks.length > 1
-      ? `<span class="tbl-net-group">${state.networks
-          .map(
-            (n) =>
-              `<button type="button" class="tbl-chip ${n.slug === net.slug ? "is-active" : ""}" data-switch-network="${escapeHtml(n.slug)}">${escapeHtml(n.slug)}</button>`,
-          )
-          .join("")}</span>`
-      : "";
-
-  const queryButtons = QUERY_TABS.map((tab) => {
-    const active =
-      state.query === tab.id || (state.query === "host" && tab.id === "hosts")
+  const activeQ = activePaneQuery();
+  const queryChips = state.queries
+    .map((q) => {
+      const isFocused = !state.tableMinimized && q.id === activeQ.id;
+      const isShown = isQueryVisible(q.id);
+      const cls = isFocused
         ? "is-active"
-        : "";
-    return `<button type="button" class="tbl-tab ${active}" data-query="${tab.id}">${tab.label}</button>`;
+        : isShown
+          ? "is-shown"
+          : "";
+      const rmBtn =
+        state.queries.length > 1 && q.id.startsWith("q-custom-")
+          ? `<span class="tbl-rm" data-remove-query="${escapeHtml(q.id)}" title="Remove query">×</span>`
+          : "";
+      return `<button type="button" class="tbl-tab ${cls}" data-pick-query="${escapeHtml(q.id)}" title="${escapeHtml(q.source)} · rate=${escapeHtml(q.rate)}">${escapeHtml(q.label)}${rmBtn}</button>`;
+    })
+    .join("");
+
+  const layoutButtons = SPLIT_LAYOUTS.map((item) => {
+    const active = state.layout === item.id ? "is-active" : "";
+    return `<button type="button" class="tbl-chip ${active}" data-layout-btn="${item.id}" data-testid="layout-${item.id.replace(/[^a-z0-9]/gi, "_")}" title="${escapeHtml(item.title)}">${escapeHtml(item.label)}</button>`;
   }).join("");
 
-  const inlineNotice = state.liveError
-    ? `<tr class="tbl-notice-row is-warn"><td colspan="8">${escapeHtml(state.liveError)}</td></tr>`
-    : liveCtrl?.banner
-      ? `<tr class="tbl-notice-row is-live" data-testid="live-cli-banner"><td colspan="8"><span class="tbl-dot is-low"></span><strong>REV #${liveCtrl.revision}</strong> ${escapeHtml(liveCtrl.banner)}${!state.tourCaptionsVisible && liveCtrl.headline ? ` — <em>${escapeHtml(liveCtrl.headline)}</em>` : ""}</td></tr>`
-      : !state.tourCaptionsVisible && liveCtrl?.headline
-        ? `<tr class="tbl-notice-row is-live"><td colspan="8"><span class="tbl-dot is-low"></span><strong>${escapeHtml(liveCtrl.headline)}</strong>${liveCtrl.subline ? ` — ${escapeHtml(liveCtrl.subline)}` : ""}</td></tr>`
-        : "";
+  const composerHtml = state.composerOpen
+    ? `<form class="query-composer" id="query-composer" data-testid="query-composer">
+        <span class="c-dim">NEW QUERY</span>
+        <select name="kind" aria-label="Query kind">
+          <option value="networks">networks</option>
+          <option value="hosts" selected>hosts</option>
+          <option value="host">host</option>
+          <option value="plugins">plugins</option>
+          <option value="users">users</option>
+          <option value="recovery">recovery</option>
+          <option value="tests">tests</option>
+          <option value="log">log</option>
+        </select>
+        <select name="network" aria-label="Network">
+          ${state.networks.map((n) => `<option value="${escapeHtml(n.slug)}" ${n.slug === state.networkSlug ? "selected" : ""}>${escapeHtml(n.slug)}</option>`).join("")}
+        </select>
+        <select name="source" aria-label="Source plane">
+          <option value="channel">dialtone channel</option>
+          <option value="cloudflare">cloudflare gateway</option>
+        </select>
+        <select name="rate" aria-label="Best-effort data rate">
+          <option value="base">base (30s)</option>
+          <option value="slow">slow (10s)</option>
+          <option value="med" selected>med (4s)</option>
+          <option value="fast">fast (1.5s)</option>
+        </select>
+        <input type="text" name="label" placeholder="label (optional)" maxlength="32" />
+        <button type="submit" class="tbl-chip is-active" data-testid="composer-add">add</button>
+        <button type="button" class="tbl-chip" data-action="close-composer">cancel</button>
+      </form>`
+    : "";
 
-  const { columns, rowsHtml, queryDescriptor } = buildSingleQueryTable(
-    net,
-    host,
-    testRun,
-  );
+  const liveBannerBar = state.liveError
+    ? `<div class="tbl-banner-bar is-warn">${escapeHtml(state.liveError)}</div>`
+    : liveCtrl?.banner
+      ? `<div class="tbl-banner-bar is-live" data-testid="live-cli-banner"><strong>REV #${liveCtrl.revision}</strong> ${escapeHtml(liveCtrl.banner)}</div>`
+      : "";
+
+  const panesHtml = state.paneQueryIds
+    .map((qId, paneIndex) => renderQueryPane(getQueryById(qId), paneIndex))
+    .join("");
 
   dockEl.innerHTML = `
     <div class="earth-table-frame">
@@ -774,14 +973,14 @@ function renderBottomTable(): void {
         <div class="earth-bar-left">
           <a class="tbl-brand" href="/">${escapeHtml(brand)}</a>
           ${statusPill}
-          <span class="tbl-query-id" data-testid="active-query">QUERY: ${escapeHtml(queryDescriptor)}</span>
-          ${networkPicker}
+          <span class="tbl-cadence" data-testid="mesh-cadence">${escapeHtml(trafficSummary)}</span>
         </div>
-        <div class="earth-bar-tabs" role="tablist" aria-label="Single active table query">
-          ${queryButtons}
+        <div class="earth-bar-tabs" role="tablist" aria-label="Query set">
+          ${queryChips}
+          <button type="button" class="tbl-chip ${state.composerOpen ? "is-active" : ""}" data-action="toggle-composer" data-testid="toggle-composer">+ query</button>
         </div>
         <div class="earth-bar-right">
-          <span class="tbl-cadence" data-testid="mesh-cadence" title="Adaptive gossip sync interval with ETag/304 backoff">${escapeHtml(cadenceText)}</span>
+          <span class="tbl-split-group" aria-label="Split table layout">${layoutButtons}</span>
           <button type="button" class="tbl-chip ${!state.tableMinimized && !state.tableFullscreen ? "is-active" : ""}" data-action="toggle-minimize" data-testid="toggle-minimize" aria-pressed="${state.tableMinimized}">${state.tableMinimized ? "table" : "min"}</button>
           <button type="button" class="tbl-chip ${state.tableFullscreen ? "is-active" : ""}" data-action="toggle-fullscreen" data-testid="toggle-fullscreen" aria-pressed="${state.tableFullscreen}">${state.tableFullscreen ? "dock" : "full"}</button>
           <button type="button" class="tbl-chip" data-action="prev-step" title="Previous tour step">◀</button>
@@ -790,10 +989,63 @@ function renderBottomTable(): void {
           ${authAction}
         </div>
       </div>
+      ${liveBannerBar}
+      ${composerHtml}
+      <div class="earth-split-grid" data-layout="${state.layout}" data-testid="split-grid">
+        ${panesHtml}
+      </div>
+    </div>
+  `;
+}
+
+function renderQueryPane(query: SavedQuery, paneIndex: number): string {
+  const net = networkBySlug(query.networkSlug);
+  const host = activeHost(net);
+  const testRun = activeTestRun(net);
+  const { columns, rowsHtml } = buildSingleQueryTable(query, net, host, testRun);
+  const focused = paneIndex === state.activePaneIndex ? "is-focused" : "";
+  const sourceTag = query.source === "cloudflare" ? "CF GATEWAY" : "DIALTONE CH";
+
+  const queryOptions = state.queries
+    .map(
+      (q) =>
+        `<option value="${escapeHtml(q.id)}" ${q.id === query.id ? "selected" : ""}>${escapeHtml(q.label)}</option>`,
+    )
+    .join("");
+
+  const rateOptions: RateTier[] = ["base", "slow", "med", "fast"];
+  const rateSelect = rateOptions
+    .map((r) => {
+      const lbl =
+        r === "base"
+          ? "base 30s"
+          : r === "slow"
+            ? "slow 10s"
+            : r === "med"
+              ? "med 4s"
+              : "fast 1.5s";
+      return `<option value="${r}" ${r === query.rate ? "selected" : ""}>${lbl}</option>`;
+    })
+    .join("");
+
+  const statsText = `${query.estBytesPerSec} B/s · Δ${query.deltas} · ${query.notModified}×304${query.lastUpdatedAt ? ` · ${query.lastUpdatedAt}` : ""}`;
+
+  return `
+    <div class="earth-pane ${focused}" data-pane-index="${paneIndex}" data-testid="query-pane-${paneIndex}">
+      <div class="earth-pane-head">
+        <div class="pane-head-left">
+          <span class="pane-num">#${paneIndex + 1}</span>
+          <select class="pane-select" data-pane-query="${paneIndex}" aria-label="Pane ${paneIndex + 1} query">${queryOptions}</select>
+          <span class="pane-source ${query.source === "cloudflare" ? "is-cf" : "is-ch"}">${sourceTag}</span>
+        </div>
+        <div class="pane-head-right">
+          <select class="pane-select" data-pane-rate="${escapeHtml(query.id)}" aria-label="Best-effort data rate">${rateSelect}</select>
+          <span class="pane-stats">${escapeHtml(statsText)}</span>
+        </div>
+      </div>
       <div class="earth-table-scroll">
-        <table class="earth-table" data-testid="earth-table">
+        <table class="earth-table" data-testid="${paneIndex === 0 ? "earth-table" : `earth-table-${paneIndex}`}">
           <thead>
-            ${inlineNotice}
             <tr>${columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("")}</tr>
           </thead>
           <tbody>
@@ -806,11 +1058,12 @@ function renderBottomTable(): void {
 }
 
 function buildSingleQueryTable(
+  query: SavedQuery,
   net: MeshNetwork,
   host: MeshHost | null,
   testRun: SimTestRun | null,
-): { columns: string[]; rowsHtml: string; queryDescriptor: string } {
-  if (state.query === "networks") {
+): { columns: string[]; rowsHtml: string } {
+  if (query.kind === "networks") {
     const rowsHtml = state.networks
       .map((n) => {
         const agg = aggregateNetwork(n.snapshot);
@@ -831,11 +1084,10 @@ function buildSingleQueryTable(
     return {
       columns: ["NETWORK", "NODES", "CPU", "RAM", "GPU", "BLOBS", "TESTS"],
       rowsHtml,
-      queryDescriptor: "networks",
     };
   }
 
-  if (state.query === "hosts") {
+  if (query.kind === "hosts") {
     const rowsHtml =
       net.hosts
         .map((h) => {
@@ -854,7 +1106,7 @@ function buildSingleQueryTable(
               : "local";
           const memUsed = ((h.stats.mem_used_bytes ?? 0) / 1e9).toFixed(1);
           const memTotal = ((h.stats.mem_total_bytes ?? 0) / 1e9).toFixed(0);
-          return `<tr class="is-clickable ${selected}" data-select-host="${escapeHtml(h.name)}">
+          return `<tr class="is-clickable ${selected}" data-select-host="${escapeHtml(h.name)}" data-host-net="${escapeHtml(net.slug)}">
             <td class="c-strong"><span class="tbl-dot ${loadClass}"></span>${escapeHtml(h.name)}</td>
             <td>${escapeHtml(h.os)}/${escapeHtml(h.arch)}</td>
             <td>${cpuPct.toFixed(0)}% (${h.stats.cpu_cores ?? 0}c)</td>
@@ -869,11 +1121,10 @@ function buildSingleQueryTable(
     return {
       columns: ["HOST", "OS/ARCH", "CPU", "RAM", "RTT", "BLOBS", "PROBES"],
       rowsHtml,
-      queryDescriptor: `hosts · ${net.slug}`,
     };
   }
 
-  if (state.query === "host" && host) {
+  if (query.kind === "host" && host) {
     const cpuPct = (host.stats.cpu_percent ?? 0).toFixed(1);
     const load1m = (host.stats.load_avg_1m ?? 0).toFixed(2);
     const memUsed = ((host.stats.mem_used_bytes ?? 0) / 1e9).toFixed(1);
@@ -914,23 +1165,21 @@ function buildSingleQueryTable(
         ],
       ),
     ];
-    const rowsHtml = rows
-      .map(
-        ([k, v, detail]) => `<tr>
-          <td class="c-strong">${escapeHtml(k)}</td>
-          <td>${escapeHtml(v)}</td>
-          <td class="c-dim">${escapeHtml(detail)}</td>
-        </tr>`,
-      )
-      .join("");
     return {
       columns: ["RESOURCE", "STATE", "DETAIL"],
-      rowsHtml,
-      queryDescriptor: `host · ${host.name}`,
+      rowsHtml: rows
+        .map(
+          ([k, v, detail]) => `<tr>
+            <td class="c-strong">${escapeHtml(k)}</td>
+            <td>${escapeHtml(v)}</td>
+            <td class="c-dim">${escapeHtml(detail)}</td>
+          </tr>`,
+        )
+        .join(""),
     };
   }
 
-  if (state.query === "plugins") {
+  if (query.kind === "plugins") {
     const rowsHtml =
       net.plugins
         .map(
@@ -948,11 +1197,10 @@ function buildSingleQueryTable(
     return {
       columns: ["PLUGIN", "VER", "PROTOCOL", "RUNTIME", "SIZE", "STATUS"],
       rowsHtml,
-      queryDescriptor: `plugins · ${net.slug}`,
     };
   }
 
-  if (state.query === "recovery") {
+  if (query.kind === "recovery") {
     const rowsHtml =
       net.recoveryEvents
         .map(
@@ -970,11 +1218,10 @@ function buildSingleQueryTable(
     return {
       columns: ["HOST", "STAGE", "TRIGGER", "ACTION", "RECOVERY", "PROBE"],
       rowsHtml,
-      queryDescriptor: `recovery · ${net.slug}`,
     };
   }
 
-  if (state.query === "users") {
+  if (query.kind === "users") {
     const rowsHtml =
       net.users
         .map((u) => {
@@ -994,11 +1241,10 @@ function buildSingleQueryTable(
     return {
       columns: ["USER", "ROLE", "STATUS", "LOCATIONS / VIEW", "SHELL NODES"],
       rowsHtml,
-      queryDescriptor: `users · ${net.slug}`,
     };
   }
 
-  if (state.query === "tests") {
+  if (query.kind === "tests") {
     const rowsHtml =
       net.tests
         .map((t) => {
@@ -1009,7 +1255,7 @@ function buildSingleQueryTable(
                 ? "is-high"
                 : "is-med";
           const selected = t.testId === state.testId ? "is-selected" : "";
-          return `<tr class="is-clickable ${selected}" data-open-log="${escapeHtml(t.testId)}">
+          return `<tr class="is-clickable ${selected}" data-open-log="${escapeHtml(t.testId)}" data-log-net="${escapeHtml(net.slug)}">
             <td class="c-strong"><span class="tbl-dot ${dot}"></span>${escapeHtml(t.title)}</td>
             <td>${escapeHtml(t.status.toUpperCase())}</td>
             <td>${escapeHtml(t.elapsed)}s</td>
@@ -1022,95 +1268,191 @@ function buildSingleQueryTable(
     return {
       columns: ["TEST", "STATUS", "ELAPSED", "TIMESTAMP", "ID"],
       rowsHtml,
-      queryDescriptor: `tests · ${net.slug}`,
     };
   }
 
-  // query === "log"
   if (!testRun) {
     return {
-      columns: ["LINE", "OUTPUT"],
+      columns: ["#", "OUTPUT"],
       rowsHtml: `<tr><td colspan="2" class="c-dim">Select a test run to inspect its immutable log.</td></tr>`,
-      queryDescriptor: `log · none`,
     };
   }
   const lines = [
     `$ ${testRun.command}   [${testRun.status.toUpperCase()} · ${testRun.elapsed}s · ${testRun.artifact}]`,
     ...testRun.log.split(/\r?\n/),
   ];
-  const rowsHtml = lines
-    .map(
-      (line, idx) => `<tr>
-        <td class="c-dim">${idx + 1}</td>
-        <td class="c-mono-line">${escapeHtml(line)}</td>
-      </tr>`,
-    )
-    .join("");
   return {
     columns: ["#", `LOG · ${testRun.title}`],
-    rowsHtml,
-    queryDescriptor: `log · ${testRun.testId.slice(0, 10)}`,
+    rowsHtml: lines
+      .map(
+        (line, idx) => `<tr>
+          <td class="c-dim">${idx + 1}</td>
+          <td class="c-mono-line">${escapeHtml(line)}</td>
+        </tr>`,
+      )
+      .join(""),
   };
 }
 
 function bindInteractions(): void {
-  app.querySelectorAll<HTMLButtonElement>("[data-query]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const q = btn.dataset.query as TableQuery | undefined;
-      if (!q) return;
+  // Query set chip clicks
+  app.querySelectorAll<HTMLButtonElement>("[data-pick-query]").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.dataset.removeQuery) {
+        event.stopPropagation();
+        const removeId = target.dataset.removeQuery;
+        state.queries = state.queries.filter((q) => q.id !== removeId);
+        state.paneQueryIds = normalizePaneAssignments(
+          state.paneQueryIds,
+          state.queries,
+          state.layout,
+        );
+        renderAll();
+        syncGlobeFocus();
+        return;
+      }
+      const id = btn.dataset.pickQuery;
+      if (!id) return;
       exitTour();
-      state.query = q;
       state.tableMinimized = false;
+      assignQueryToActivePane(id);
       renderAll();
       syncGlobeFocus();
-      triggerImmediateQuerySync();
       void reportLivePresence();
     });
   });
 
-  app
-    .querySelectorAll<HTMLButtonElement>("[data-switch-network]")
-    .forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const slug = btn.dataset.switchNetwork;
-        if (!slug) return;
-        const net =
-          state.networks.find((n) => n.slug === slug) ?? state.networks[0];
-        exitTour();
-        state.networkSlug = net.slug;
-        state.hostName = net.hosts[0]?.name ?? "";
-        state.testId = net.tests[0]?.testId ?? "";
+  // Split layout buttons (1, 1|1, 1/1, 1|2, 2x2)
+  app.querySelectorAll<HTMLButtonElement>("[data-layout-btn]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const nextLayout = btn.dataset.layoutBtn as SplitLayout | undefined;
+      if (!nextLayout) return;
+      exitTour();
+      state.layout = nextLayout;
+      state.tableMinimized = false;
+      state.paneQueryIds = normalizePaneAssignments(
+        state.paneQueryIds,
+        state.queries,
+        state.layout,
+      );
+      if (state.activePaneIndex >= state.paneQueryIds.length) {
+        state.activePaneIndex = 0;
+      }
+      for (const q of visiblePaneQueries()) {
+        q.nextDueAtMs = Date.now();
+      }
+      renderAll();
+      syncGlobeFocus();
+    });
+  });
+
+  // Focus pane on click
+  app.querySelectorAll<HTMLElement>("[data-pane-index]").forEach((pane) => {
+    pane.addEventListener("mousedown", () => {
+      const idx = Number(pane.dataset.paneIndex ?? 0);
+      if (idx !== state.activePaneIndex) {
+        state.activePaneIndex = idx;
+        const q = activePaneQuery();
+        state.networkSlug = q.networkSlug;
         renderAll();
         syncGlobeFocus();
-      });
+      }
+    });
+  });
+
+  // Per-pane query selector
+  app.querySelectorAll<HTMLSelectElement>("[data-pane-query]").forEach((sel) => {
+    sel.addEventListener("change", () => {
+      const paneIdx = Number(sel.dataset.paneQuery ?? 0);
+      state.activePaneIndex = paneIdx;
+      exitTour();
+      assignQueryToActivePane(sel.value);
+      renderAll();
+      syncGlobeFocus();
+    });
+  });
+
+  // Per-query best-effort rate selector
+  app.querySelectorAll<HTMLSelectElement>("[data-pane-rate]").forEach((sel) => {
+    sel.addEventListener("change", () => {
+      const q = getQueryById(sel.dataset.paneRate);
+      const nextRate = sel.value as RateTier;
+      q.rate = nextRate;
+      q.unchangedStreak = 0;
+      q.nextDueAtMs = Date.now();
+      renderAll();
+    });
+  });
+
+  // New query composer
+  app
+    .querySelector<HTMLButtonElement>('[data-action="toggle-composer"]')
+    ?.addEventListener("click", () => {
+      state.composerOpen = !state.composerOpen;
+      renderAll();
     });
 
+  app
+    .querySelector<HTMLButtonElement>('[data-action="close-composer"]')
+    ?.addEventListener("click", () => {
+      state.composerOpen = false;
+      renderAll();
+    });
+
+  app
+    .querySelector<HTMLFormElement>("#query-composer")
+    ?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const form = event.currentTarget as HTMLFormElement;
+      const fd = new FormData(form);
+      const kind = String(fd.get("kind") || "hosts") as TableQuery;
+      const networkSlug = String(fd.get("network") || state.networkSlug);
+      const source = String(fd.get("source") || "channel") as QuerySource;
+      const rate = String(fd.get("rate") || "med") as RateTier;
+      const label = String(fd.get("label") || "");
+      const created = createCustomQuery(state.queries, {
+        label,
+        kind,
+        source,
+        networkSlug,
+        rate,
+      });
+      state.queries.push(created);
+      state.composerOpen = false;
+      state.tableMinimized = false;
+      exitTour();
+      assignQueryToActivePane(created.id);
+      renderAll();
+      syncGlobeFocus();
+    });
+
+  // Row drill-downs (sync globe + active pane)
   app
     .querySelectorAll<HTMLElement>("[data-select-network]")
     .forEach((row) => {
       row.addEventListener("click", () => {
         const slug = row.dataset.selectNetwork;
         if (!slug) return;
-        const net =
-          state.networks.find((n) => n.slug === slug) ?? state.networks[0];
         exitTour();
-        state.networkSlug = net.slug;
-        state.hostName = net.hosts[0]?.name ?? "";
-        state.testId = net.tests[0]?.testId ?? "";
-        state.query = "hosts";
+        state.networkSlug = slug;
+        const q = ensureQueryForKind("hosts", slug);
+        assignQueryToActivePane(q.id);
         renderAll();
         syncGlobeFocus();
-        triggerImmediateQuerySync();
       });
     });
 
   app.querySelectorAll<HTMLElement>("[data-select-host]").forEach((row) => {
     row.addEventListener("click", () => {
       const hostName = row.dataset.selectHost;
+      const netSlug = row.dataset.hostNet || state.networkSlug;
       if (!hostName) return;
       exitTour();
+      state.networkSlug = netSlug;
       state.hostName = hostName;
-      state.query = "host";
+      const q = ensureQueryForKind("host", netSlug);
+      assignQueryToActivePane(q.id);
       renderAll();
       syncGlobeFocus();
       void reportLivePresence();
@@ -1120,14 +1462,48 @@ function bindInteractions(): void {
   app.querySelectorAll<HTMLElement>("[data-open-log]").forEach((row) => {
     row.addEventListener("click", () => {
       const id = row.dataset.openLog;
+      const netSlug = row.dataset.logNet || state.networkSlug;
       if (!id) return;
       exitTour();
+      state.networkSlug = netSlug;
       state.testId = id;
-      state.query = "log";
+      const q = ensureQueryForKind("log", netSlug);
+      assignQueryToActivePane(q.id);
       renderAll();
-      triggerImmediateQuerySync();
     });
   });
+
+  // Minimize / Fullscreen / Tour controls
+  app
+    .querySelector<HTMLButtonElement>('[data-action="toggle-minimize"]')
+    ?.addEventListener("click", () => {
+      if (state.tableFullscreen) {
+        state.tableFullscreen = false;
+        state.tableMinimized = true;
+      } else {
+        state.tableMinimized = !state.tableMinimized;
+      }
+      if (!state.tableMinimized) {
+        for (const q of visiblePaneQueries()) {
+          q.nextDueAtMs = Date.now();
+        }
+      }
+      renderAll();
+    });
+
+  app
+    .querySelector<HTMLButtonElement>('[data-action="toggle-fullscreen"]')
+    ?.addEventListener("click", () => {
+      state.tableFullscreen = !state.tableFullscreen;
+      if (state.tableFullscreen) {
+        state.tableMinimized = false;
+        exitTour();
+        for (const q of visiblePaneQueries()) {
+          q.nextDueAtMs = Date.now();
+        }
+      }
+      renderAll();
+    });
 
   app
     .querySelector<HTMLButtonElement>('[data-action="prev-step"]')
@@ -1146,35 +1522,16 @@ function bindInteractions(): void {
     });
 
   app
-    .querySelector<HTMLButtonElement>('[data-action="toggle-minimize"]')
-    ?.addEventListener("click", () => {
-      if (state.tableFullscreen) {
-        state.tableFullscreen = false;
-        state.tableMinimized = true;
-      } else {
-        state.tableMinimized = !state.tableMinimized;
-      }
-      renderAll();
-    });
-
-  app
-    .querySelector<HTMLButtonElement>('[data-action="toggle-fullscreen"]')
-    ?.addEventListener("click", () => {
-      state.tableFullscreen = !state.tableFullscreen;
-      if (state.tableFullscreen) {
-        state.tableMinimized = false;
-        exitTour();
-      }
-      renderAll();
-    });
-
-  app
     .querySelector<HTMLButtonElement>('[data-action="toggle-tour"]')
     ?.addEventListener("click", () => {
       state.tourPlaying = !state.tourPlaying;
       state.tourCaptionsVisible = state.tourPlaying;
-      if (state.tourPlaying) startTourTimer();
-      else clearTourTimer();
+      if (state.tourPlaying) {
+        state.tableFullscreen = false;
+        startTourTimer();
+      } else {
+        clearTourTimer();
+      }
       renderAll();
     });
 }
@@ -1184,32 +1541,32 @@ function applyTourStep(index: number, keepPlaying: boolean): void {
   if (!step) return;
   state.tourStepIndex = index;
   state.tourCaptionsVisible = true;
-  state.query = viewToQuery(step.view, step.networkTab);
+  const kind = viewToQueryKind(step.view, step.networkTab);
   if (step.networkSlug) {
     state.networkSlug = step.networkSlug;
-    const net = activeNetwork();
+    const net = networkBySlug(step.networkSlug);
     state.hostName = step.hostName ?? net.hosts[0]?.name ?? "";
     state.testId = step.testId ?? net.tests[0]?.testId ?? "";
   }
+  const q = ensureQueryForKind(kind, step.networkSlug ?? undefined);
+  assignQueryToActivePane(q.id);
   if (!keepPlaying) {
     state.tourPlaying = false;
     clearTourTimer();
   }
   renderAll();
   syncGlobeFocus();
-  if (state.session.authenticated) {
-    triggerImmediateQuerySync();
-  }
 }
 
 function syncGlobeFocus(): void {
   if (!globeController) return;
-  if (state.query === "networks") {
+  const activeQ = activePaneQuery();
+  if (activeQ.kind === "networks") {
     globeController.focusTarget(null, null);
-  } else if (state.query === "host") {
-    globeController.focusTarget(state.networkSlug, state.hostName);
+  } else if (activeQ.kind === "host") {
+    globeController.focusTarget(activeQ.networkSlug, state.hostName);
   } else {
-    globeController.focusTarget(state.networkSlug, null);
+    globeController.focusTarget(activeQ.networkSlug, null);
   }
 }
 

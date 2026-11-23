@@ -9,6 +9,14 @@ import {
   liveEndpointForQuery,
 } from "../src/mesh-cadence.ts";
 import {
+  bestEffortIntervalMs,
+  createCustomQuery,
+  createDefaultQuerySet,
+  normalizePaneAssignments,
+  paneCountForLayout,
+  tickSimulatedQuery,
+} from "../src/query-workspace.ts";
+import {
   SIMULATED_NETWORKS,
   SIMULATED_TOUR_STEPS,
   summarizeSystemResources,
@@ -227,4 +235,53 @@ test("edge bundling lifts ping curves into atmosphere and bundles parallel corri
   const cells = buildSimulatedH3DataCells(nodes, 3);
   assert.ok(cells.length >= 20, `expected simulated H3 geospatial clusters, got ${cells.length}`);
   assert.ok(cells.every((c) => c.intensity > 0 && c.intensity <= 1));
+});
+
+test("query workspace supports custom queries, best-effort rate tiers, and 1 / 1|1 / 1/1 / 1|2 / 2x2 splits", () => {
+  const queries = createDefaultQuerySet(SIMULATED_NETWORKS, 1000);
+  assert.ok(queries.length >= 6);
+  const custom = createCustomQuery(
+    queries,
+    {
+      label: "orbit-fast-hosts",
+      kind: "hosts",
+      source: "channel",
+      networkSlug: "sim-orbit",
+      rate: "fast",
+    },
+    2000,
+  );
+  queries.push(custom);
+  assert.equal(custom.label, "orbit-fast-hosts");
+  assert.equal(custom.rate, "fast");
+
+  // Layout pane counts: 1, 1|1 (2), 1/1 (2), 1|2 (3: left half + right split in 2), 2x2 (4)
+  assert.equal(paneCountForLayout("1"), 1);
+  assert.equal(paneCountForLayout("1|1"), 2);
+  assert.equal(paneCountForLayout("1/1"), 2);
+  assert.equal(paneCountForLayout("1|2"), 3);
+  assert.equal(paneCountForLayout("2x2"), 4);
+
+  const panes3 = normalizePaneAssignments([queries[0].id], queries, "1|2");
+  assert.equal(panes3.length, 3);
+  assert.equal(new Set(panes3).size, 3, "split panes default to distinct queries");
+
+  const panes4 = normalizePaneAssignments(panes3, queries, "2x2");
+  assert.equal(panes4.length, 4);
+  assert.equal(new Set(panes4).size, 4);
+
+  // Best-effort rate ordering & hidden pause
+  assert.equal(bestEffortIntervalMs("fast", 0, true), null);
+  const fastMs = bestEffortIntervalMs("fast", 0, false, 0.5);
+  const medMs = bestEffortIntervalMs("med", 0, false, 0.5);
+  const baseMs = bestEffortIntervalMs("base", 0, false, 0.5);
+  assert.ok(fastMs < medMs && medMs < baseMs);
+  const fastDecayed = bestEffortIntervalMs("fast", 4, false, 0.5);
+  assert.ok(fastDecayed > fastMs, "unchanged fast query backs off best-effort");
+
+  // Simulated tick produces delta + non-zero estimated B/s
+  const changed = tickSimulatedQuery(custom, SIMULATED_NETWORKS, 3000, 1);
+  assert.equal(changed, true);
+  assert.equal(custom.ticks, 1);
+  assert.ok(custom.estBytesPerSec > 0);
 });
