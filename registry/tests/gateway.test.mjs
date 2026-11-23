@@ -904,6 +904,104 @@ test("public /api/live supports Bearer-authenticated PATCH/DELETE on dialtone.ea
   assert.equal(deleted.state.theme, null);
 });
 
+test("authenticated /api/user/ui-config persists per-user window layout & camera policy in Cloudflare KV", async () => {
+  const store = new Map();
+  const kv = {
+    async get(k) {
+      return store.get(k) ?? null;
+    },
+    async put(k, v) {
+      store.set(k, v);
+    },
+    async delete(k) {
+      store.delete(k);
+    },
+  };
+  const env = {
+    DIALTONE_AUTH_TOKENS: kv,
+    ACCESS_TEAM_DOMAIN: "https://team.cloudflareaccess.com",
+    ACCESS_AUD_MAP: JSON.stringify({ "metal.dialtone.earth": "aud-metal" }),
+  };
+
+  // Unauthenticated GET/PUT -> 401
+  const unauthGet = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/user/ui-config"),
+    env,
+    { verifyJwt: async () => ({ valid: false, reason: "unauthenticated" }) },
+  );
+  assert.equal(unauthGet.status, 401);
+
+  const unauthPut = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/user/ui-config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ version: 2, layout: "1|2" }),
+    }),
+    env,
+    { verifyJwt: async () => ({ valid: false, reason: "unauthenticated" }) },
+  );
+  assert.equal(unauthPut.status, 401);
+
+  // Authenticated User A saves 1|2 layout with globe + 2 query panes
+  const depsA = {
+    nowSec: () => 1_795_430_000,
+    verifyJwt: async () => ({ valid: true, subject: "tim@example.com" }),
+  };
+  const putResp = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/user/ui-config", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "Cf-Access-Jwt-Assertion": "valid-a",
+      },
+      body: JSON.stringify({
+        version: 2,
+        layout: "1|2",
+        paneContents: ["globe", "q-hosts", "q-tests"],
+        queries: [
+          { id: "q-hosts", label: "metal:hosts", kind: "hosts", source: "channel", networkSlug: "metal", rate: "fast" },
+          { id: "q-tests", label: "metal:tests", kind: "tests", source: "channel", networkSlug: "metal", rate: "base" },
+        ],
+        cameraPolicyCode: "export function selectTarget(ctx) { return null; }",
+      }),
+    }),
+    env,
+    depsA,
+  );
+  assert.equal(putResp.status, 200);
+  const saved = await putResp.json();
+  assert.equal(saved.ok, true);
+  assert.equal(saved.config.layout, "1|2");
+  assert.deepEqual(saved.config.paneContents, ["globe", "q-hosts", "q-tests"]);
+
+  // User A reloads and restores exact config
+  const getA = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/user/ui-config", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-a" },
+    }),
+    env,
+    depsA,
+  );
+  assert.equal(getA.status, 200);
+  const bodyA = await getA.json();
+  assert.equal(bodyA.saved, true);
+  assert.equal(bodyA.config.layout, "1|2");
+  assert.equal(bodyA.config.queries.length, 2);
+
+  // User B is strictly isolated (sees saved: false)
+  const getB = await handleGatewayRequest(
+    new Request("https://metal.dialtone.earth/api/user/ui-config", {
+      headers: { "Cf-Access-Jwt-Assertion": "valid-b" },
+    }),
+    env,
+    { verifyJwt: async () => ({ valid: true, subject: "other@example.com" }) },
+  );
+  assert.equal(getB.status, 200);
+  const bodyB = await getB.json();
+  assert.equal(bodyB.saved, false);
+  assert.equal(bodyB.config, null);
+});
+
 async function signJwt(privateKey, header, payload) {
   const enc = (obj) =>
     Buffer.from(JSON.stringify(obj))

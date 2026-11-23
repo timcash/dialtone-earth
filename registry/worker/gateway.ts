@@ -6,6 +6,7 @@ import {
   type MagicLinkEnv,
 } from "./auth.ts";
 import { handleLiveRoute, type LiveControlEnv } from "./live.ts";
+import { handleUserUiConfigRoute } from "./user-config.ts";
 import {
   buildRedactedShellAuditLog,
   listNetworkPresence,
@@ -130,9 +131,13 @@ export async function handleGatewayRequest(
 
   const isPresenceUpdate =
     url.pathname === "/api/mesh/presence" && request.method === "POST";
+  const isUserUiConfigMutation =
+    url.pathname === "/api/user/ui-config" &&
+    (request.method === "PUT" || request.method === "DELETE");
 
   if (
     !isPresenceUpdate &&
+    !isUserUiConfigMutation &&
     request.method !== "GET" &&
     request.method !== "HEAD"
   ) {
@@ -226,6 +231,28 @@ export async function handleGatewayRequest(
       },
       200,
     );
+  }
+
+  if (url.pathname === "/api/user/ui-config") {
+    if (!auth.valid) {
+      return jsonResponse(
+        {
+          error: magicLinkEnabled
+            ? "Sign-in required"
+            : "Cloudflare Access sign-in required",
+          reason: auth.reason ?? "unauthenticated",
+        },
+        401,
+      );
+    }
+    return handleUserUiConfigRoute({
+      request,
+      kv: env.DIALTONE_AUTH_TOKENS,
+      host,
+      subject: auth.subject ?? "verified-user",
+      nowSec,
+      securityHeaders: SECURITY_HEADERS,
+    });
   }
 
   if (url.pathname === "/api/mesh/presence") {

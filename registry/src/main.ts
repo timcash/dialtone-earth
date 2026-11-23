@@ -18,9 +18,12 @@ import {
   createCustomQuery,
   createDefaultQuerySet,
   defaultSourceForKind,
+  GLOBE_PANE_ID,
   normalizePaneAssignments,
+  resolveEffectiveLayout,
   SPLIT_LAYOUTS,
   tickSimulatedQuery,
+  type LayoutPreference,
   type QuerySource,
   type RateTier,
   type SavedQuery,
@@ -66,6 +69,22 @@ type LiveSiteState = {
   fullscreen: boolean | null;
 };
 
+type PersistedConfigPayload = {
+  version: 2;
+  layout: LayoutPreference;
+  paneContents: string[];
+  queries: Array<{
+    id: string;
+    label: string;
+    kind: TableQuery;
+    source: QuerySource;
+    networkSlug: string;
+    rate: RateTier;
+  }>;
+  cameraPolicyCode: string;
+  theme?: "dark" | "light";
+};
+
 type AppState = {
   session: SessionInfo;
   liveSite: LiveSiteState | null;
@@ -73,20 +92,21 @@ type AppState = {
   networks: MeshNetwork[];
   tourSteps: TourStep[];
   queries: SavedQuery[];
-  layout: SplitLayout;
-  paneQueryIds: string[];
+  layoutPref: LayoutPreference;
+  /** Each entry is "globe" or a SavedQuery.id */
+  paneContents: string[];
   activePaneIndex: number;
+  maximizedPaneIndex: number | null;
   configOpen: boolean;
   cameraPolicyCode: string;
   cameraDraftCode: string;
   cameraResult: PolicyEvalResult;
+  configSyncLabel: string;
   networkSlug: string;
   hostName: string;
   testId: string;
   tourPlaying: boolean;
   tourCaptionsVisible: boolean;
-  tableMinimized: boolean;
-  tableFullscreen: boolean;
   tourStepIndex: number;
   liveError: string | null;
   loadedLogCache: Record<string, SimTestRun>;
@@ -100,24 +120,13 @@ type AppState = {
 const TOUR_INTERVAL_MS = 6_500;
 const PRESENCE_INTERVAL_MS = 30_000;
 const QUERY_SCHEDULER_TICK_MS = 1_000;
-const CAMERA_POLICY_STORAGE_KEY = "dialtone.cameraPolicy.v1";
-
-function loadSavedCameraPolicy(): string {
-  try {
-    const saved = window.localStorage.getItem(CAMERA_POLICY_STORAGE_KEY);
-    if (saved && saved.trim().length > 0) return saved;
-  } catch {
-    // ignore storage errors
-  }
-  return CAMERA_PRESETS[0].code;
-}
+const LOCAL_UI_CONFIG_KEY = "dialtone.uiConfig.v2";
 
 const appElement = document.querySelector<HTMLDivElement>("#app");
 if (!appElement) throw new Error("Missing app root");
 const app: HTMLDivElement = appElement;
 
 const initialQueries = createDefaultQuerySet(SIMULATED_NETWORKS);
-const initialCameraPolicy = loadSavedCameraPolicy();
 
 const state: AppState = {
   session: {
@@ -131,13 +140,15 @@ const state: AppState = {
   networks: SIMULATED_NETWORKS,
   tourSteps: SIMULATED_TOUR_STEPS,
   queries: initialQueries,
-  layout: "1",
-  paneQueryIds: [initialQueries[0].id],
+  layoutPref: "auto",
+  paneContents: [GLOBE_PANE_ID, initialQueries[0].id],
   activePaneIndex: 0,
+  maximizedPaneIndex: null,
   configOpen: false,
-  cameraPolicyCode: initialCameraPolicy,
-  cameraDraftCode: initialCameraPolicy,
+  cameraPolicyCode: CAMERA_PRESETS[0].code,
+  cameraDraftCode: CAMERA_PRESETS[0].code,
   cameraResult: { ok: true, target: null },
+  configSyncLabel: "LOCAL",
   networkSlug: SIMULATED_NETWORKS[0].slug,
   hostName: SIMULATED_NETWORKS[0].hosts[0].name,
   testId:
@@ -145,8 +156,6 @@ const state: AppState = {
     SIMULATED_NETWORKS[0].tests[0].testId,
   tourPlaying: true,
   tourCaptionsVisible: true,
-  tableMinimized: true,
-  tableFullscreen: false,
   tourStepIndex: 0,
   liveError: null,
   loadedLogCache: {},
@@ -157,14 +166,22 @@ const state: AppState = {
   liveRawCache: {},
 };
 
+let globeStageEl: HTMLDivElement | null = null;
 let globeController: OverviewGlobeController | null = null;
 let tourTimer: number | null = null;
 let presenceTimer: number | null = null;
 let adaptivePollTimer: number | null = null;
 let querySchedulerTimer: number | null = null;
+let saveConfigTimer: number | null = null;
 let schedulerTickSeq = 0;
+let lastEffectiveLayout: SplitLayout = currentEffectiveLayout();
 
 void boot();
+
+function currentEffectiveLayout(): SplitLayout {
+  if (state.maximizedPaneIndex !== null) return "1";
+  return resolveEffectiveLayout(state.layoutPref, window.innerWidth);
+}
 
 async function boot(): Promise<void> {
   if (window.location.pathname !== "/") {
@@ -176,32 +193,40 @@ async function boot(): Promise<void> {
   if (state.session.authenticated && state.session.mode === "live") {
     state.tourPlaying = false;
     state.tourCaptionsVisible = false;
-    state.tableMinimized = false;
-    await syncActiveLiveQuery(true);
+    await syncLiveEndpointForKind("networks", true);
     state.queries = createDefaultQuerySet(state.networks);
-    state.paneQueryIds = normalizePaneAssignments(
-      [],
-      state.queries,
-      state.layout,
-    );
+    state.paneContents = [GLOBE_PANE_ID, state.queries[0].id];
+    const restoredCloud = await loadUserConfigFromCloudflare();
+    if (!restoredCloud) {
+      loadUserConfigFromLocalStorage();
+      state.configSyncLabel = "CF READY";
+    }
   } else {
+    loadUserConfigFromLocalStorage();
     await syncPublicLiveControl(true);
   }
 
   mountShell();
   renderAll();
 
-  const stage = app.querySelector<HTMLElement>(".globe-stage");
-  if (stage) {
+  if (globeStageEl) {
     const { mountOverviewGlobe } = await import("./overview-globe");
     globeController = await mountOverviewGlobe(
-      stage,
+      globeStageEl,
       state.networks.map((net) => ({ slug: net.slug, snapshot: net.snapshot })),
       { includeSimulatedGeodata: !state.session.authenticated },
     );
     syncGlobeFocus();
     renderAll();
   }
+
+  window.addEventListener("resize", () => {
+    const next = currentEffectiveLayout();
+    if (next !== lastEffectiveLayout) {
+      lastEffectiveLayout = next;
+      renderAll();
+    }
+  });
 
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
@@ -219,8 +244,8 @@ async function boot(): Promise<void> {
       if (state.configOpen) {
         state.configOpen = false;
         renderAll();
-      } else if (state.tableFullscreen) {
-        state.tableFullscreen = false;
+      } else if (state.maximizedPaneIndex !== null) {
+        state.maximizedPaneIndex = null;
         renderAll();
       }
     }
@@ -232,28 +257,199 @@ async function boot(): Promise<void> {
   startBestEffortQueryScheduler();
 }
 
-function getQueryById(id: string | undefined): SavedQuery {
-  return (
-    state.queries.find((q) => q.id === id) ??
-    state.queries[0]
-  );
+/* ===== Cloudflare KV + localStorage UI Config Persistence ===== */
+
+function buildPersistedConfig(): PersistedConfigPayload {
+  const theme =
+    document.documentElement.dataset.theme === "light" ? "light" : "dark";
+  return {
+    version: 2,
+    layout: state.layoutPref,
+    paneContents: [...state.paneContents],
+    queries: state.queries.map((q) => ({
+      id: q.id,
+      label: q.label,
+      kind: q.kind,
+      source: q.source,
+      networkSlug: q.networkSlug,
+      rate: q.rate,
+    })),
+    cameraPolicyCode: state.cameraPolicyCode,
+    theme,
+  };
 }
 
-function activePaneQuery(): SavedQuery {
-  const id = state.paneQueryIds[state.activePaneIndex] ?? state.paneQueryIds[0];
-  return getQueryById(id);
-}
+function hydrateFromPersistedConfig(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const obj = raw as Partial<PersistedConfigPayload>;
+  if (obj.version !== 2) return false;
 
-function visiblePaneQueries(): SavedQuery[] {
-  if (state.tableMinimized && !state.tableFullscreen) {
-    return [];
+  const validLayouts = new Set<LayoutPreference>([
+    "auto",
+    "1",
+    "1|1",
+    "1/1",
+    "1|2",
+    "2x2",
+  ]);
+  if (typeof obj.layout === "string" && validLayouts.has(obj.layout as LayoutPreference)) {
+    state.layoutPref = obj.layout as LayoutPreference;
   }
-  return state.paneQueryIds.map((id) => getQueryById(id));
+
+  if (Array.isArray(obj.queries) && obj.queries.length > 0) {
+    const now = Date.now();
+    const restored: SavedQuery[] = [];
+    for (const q of obj.queries) {
+      if (!q || typeof q !== "object" || !q.id || !q.kind) continue;
+      restored.push({
+        id: String(q.id),
+        label: String(q.label || `${q.networkSlug}:${q.kind}`),
+        kind: q.kind,
+        source: q.source === "cloudflare" ? "cloudflare" : "channel",
+        networkSlug: String(q.networkSlug || state.networks[0]?.slug || "sim-atlas"),
+        rate:
+          q.rate === "base" || q.rate === "slow" || q.rate === "med" || q.rate === "fast"
+            ? q.rate
+            : "med",
+        ticks: 0,
+        deltas: 0,
+        notModified: 0,
+        unchangedStreak: 0,
+        lastUpdatedAt: null,
+        estBytesPerSec: 0,
+        nextDueAtMs: now,
+      });
+    }
+    if (restored.length > 0) {
+      state.queries = restored;
+    }
+  }
+
+  if (Array.isArray(obj.paneContents) && obj.paneContents.length > 0) {
+    state.paneContents = obj.paneContents.map(String);
+  }
+
+  if (typeof obj.cameraPolicyCode === "string" && obj.cameraPolicyCode.trim()) {
+    state.cameraPolicyCode = obj.cameraPolicyCode;
+    state.cameraDraftCode = obj.cameraPolicyCode;
+  }
+
+  if (obj.theme === "light" || obj.theme === "dark") {
+    document.documentElement.dataset.theme = obj.theme;
+  }
+
+  return true;
 }
 
-function isQueryVisible(queryId: string): boolean {
-  if (state.tableMinimized && !state.tableFullscreen) return false;
-  return state.paneQueryIds.includes(queryId);
+function loadUserConfigFromLocalStorage(): boolean {
+  try {
+    const raw = window.localStorage.getItem(LOCAL_UI_CONFIG_KEY);
+    if (!raw) return false;
+    return hydrateFromPersistedConfig(JSON.parse(raw));
+  } catch {
+    return false;
+  }
+}
+
+async function loadUserConfigFromCloudflare(): Promise<boolean> {
+  if (!state.session.authenticated) return false;
+  try {
+    const resp = await fetch("/api/user/ui-config", {
+      cache: "no-store",
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!resp.ok) return false;
+    const payload = (await resp.json()) as {
+      saved?: boolean;
+      config?: unknown;
+    };
+    if (payload.saved && payload.config) {
+      const ok = hydrateFromPersistedConfig(payload.config);
+      if (ok) {
+        state.configSyncLabel = "CF RESTORED";
+        return true;
+      }
+    }
+  } catch {
+    // non-fatal fallback
+  }
+  return false;
+}
+
+function persistUserConfig(): void {
+  const payload = buildPersistedConfig();
+  try {
+    window.localStorage.setItem(LOCAL_UI_CONFIG_KEY, JSON.stringify(payload));
+  } catch {
+    // ignore localStorage quota errors
+  }
+
+  if (!state.session.authenticated) {
+    state.configSyncLabel = "LOCAL SAVED";
+    return;
+  }
+
+  state.configSyncLabel = "CF SAVING…";
+  if (saveConfigTimer !== null) {
+    window.clearTimeout(saveConfigTimer);
+  }
+  saveConfigTimer = window.setTimeout(() => {
+    void fetch("/api/user/ui-config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      body: JSON.stringify(payload),
+    })
+      .then((res) => {
+        state.configSyncLabel = res.ok ? "CF SAVED" : "CF SAVE ERR";
+        if (!state.configOpen) renderAll();
+      })
+      .catch(() => {
+        state.configSyncLabel = "CF OFFLINE";
+      });
+  }, 300);
+}
+
+/* ===== Pane & Query Helpers ===== */
+
+function getQueryById(id: string | undefined): SavedQuery {
+  return state.queries.find((q) => q.id === id) ?? state.queries[0];
+}
+
+function visiblePaneContents(): string[] {
+  const eff = resolveEffectiveLayout(state.layoutPref, window.innerWidth);
+  const normalized = normalizePaneAssignments(
+    state.paneContents,
+    state.queries,
+    eff,
+  );
+  if (
+    state.maximizedPaneIndex !== null &&
+    state.maximizedPaneIndex >= 0 &&
+    state.maximizedPaneIndex < normalized.length
+  ) {
+    return [normalized[state.maximizedPaneIndex]];
+  }
+  return normalized;
+}
+
+function visibleQueryObjects(): SavedQuery[] {
+  const contents = visiblePaneContents();
+  const seen = new Set<string>();
+  const out: SavedQuery[] = [];
+  for (const id of contents) {
+    if (id === GLOBE_PANE_ID || seen.has(id)) continue;
+    const q = state.queries.find((item) => item.id === id);
+    if (q) {
+      seen.add(q.id);
+      out.push(q);
+    }
+  }
+  return out;
+}
+
+function isContentVisible(contentId: string): boolean {
+  return visiblePaneContents().includes(contentId);
 }
 
 function ensureQueryForKind(kind: TableQuery, networkSlug?: string): SavedQuery {
@@ -277,27 +473,51 @@ function ensureQueryForKind(kind: TableQuery, networkSlug?: string): SavedQuery 
   return created;
 }
 
-function assignQueryToActivePane(queryId: string): void {
-  state.paneQueryIds = normalizePaneAssignments(
-    state.paneQueryIds,
+function assignContentToPane(paneIndex: number, contentId: string): void {
+  const eff = resolveEffectiveLayout(state.layoutPref, window.innerWidth);
+  state.paneContents = normalizePaneAssignments(
+    state.paneContents,
     state.queries,
-    state.layout,
+    eff,
   );
   const idx = Math.min(
-    Math.max(0, state.activePaneIndex),
-    Math.max(0, state.paneQueryIds.length - 1),
+    Math.max(0, paneIndex),
+    Math.max(0, state.paneContents.length - 1),
   );
-  state.paneQueryIds[idx] = queryId;
-  const q = getQueryById(queryId);
-  state.networkSlug = q.networkSlug;
-  const net = networkBySlug(q.networkSlug);
-  if (!net.hosts.some((h) => h.name === state.hostName)) {
-    state.hostName = net.hosts[0]?.name ?? "";
+  state.paneContents[idx] = contentId;
+  if (contentId !== GLOBE_PANE_ID) {
+    const q = getQueryById(contentId);
+    state.networkSlug = q.networkSlug;
+    const net = networkBySlug(q.networkSlug);
+    if (!net.hosts.some((h) => h.name === state.hostName)) {
+      state.hostName = net.hosts[0]?.name ?? "";
+    }
+    if (!net.tests.some((t) => t.testId === state.testId)) {
+      state.testId = net.tests[0]?.testId ?? "";
+    }
+    q.nextDueAtMs = Date.now();
   }
-  if (!net.tests.some((t) => t.testId === state.testId)) {
-    state.testId = net.tests[0]?.testId ?? "";
+  persistUserConfig();
+}
+
+/** Pick the active pane if it's a table pane, or the first non-globe pane, else pane 0. */
+function targetQueryPaneIndex(): number {
+  const eff = resolveEffectiveLayout(state.layoutPref, window.innerWidth);
+  const normalized = normalizePaneAssignments(
+    state.paneContents,
+    state.queries,
+    eff,
+  );
+  if (
+    state.activePaneIndex >= 0 &&
+    state.activePaneIndex < normalized.length &&
+    normalized[state.activePaneIndex] !== GLOBE_PANE_ID
+  ) {
+    return state.activePaneIndex;
   }
-  q.nextDueAtMs = Date.now();
+  const firstTableIdx = normalized.findIndex((c) => c !== GLOBE_PANE_ID);
+  if (firstTableIdx >= 0) return firstTableIdx;
+  return state.activePaneIndex < normalized.length ? state.activePaneIndex : 0;
 }
 
 function startBestEffortQueryScheduler(): void {
@@ -307,35 +527,26 @@ function startBestEffortQueryScheduler(): void {
   }
   querySchedulerTimer = window.setInterval(() => {
     if (document.hidden) return;
-    const visible = visiblePaneQueries();
-    if (visible.length === 0) {
-      // Minimized: zero query-plane traffic (only mesh-formation base plane runs)
-      for (const q of state.queries) {
-        q.estBytesPerSec = 0;
-      }
-      return;
-    }
-
+    const visible = visibleQueryObjects();
     const visibleIds = new Set(visible.map((q) => q.id));
     for (const q of state.queries) {
       if (!visibleIds.has(q.id)) {
         q.estBytesPerSec = 0;
       }
     }
+    if (visible.length === 0) return;
 
     const nowMs = Date.now();
     let anyTouched = false;
-    const deduped = new Map<string, SavedQuery>();
     for (const q of visible) {
-      deduped.set(q.id, q);
-    }
-
-    for (const q of deduped.values()) {
       if (nowMs < q.nextDueAtMs) continue;
       schedulerTickSeq += 1;
       if (state.session.authenticated) {
         void syncSingleLiveQuery(q).then((changed) => {
-          if (changed) renderAll();
+          if (changed) {
+            syncGlobeFocus();
+            renderAll();
+          }
         });
       } else {
         tickSimulatedQuery(q, state.networks, nowMs, schedulerTickSeq);
@@ -353,6 +564,8 @@ function startBestEffortQueryScheduler(): void {
     }
   }, QUERY_SCHEDULER_TICK_MS);
 }
+
+/* ===== Session, Live Mesh & Public Live-Control Sync ===== */
 
 async function detectSession(): Promise<SessionInfo> {
   try {
@@ -377,7 +590,7 @@ async function detectSession(): Promise<SessionInfo> {
       }
     }
   } catch {
-    // Offline or static preview: default safely to simulated signed-out tour.
+    // Offline or static preview
   }
   return {
     authenticated: false,
@@ -444,10 +657,6 @@ async function syncSingleLiveQuery(q: SavedQuery): Promise<boolean> {
   return changed;
 }
 
-async function syncActiveLiveQuery(initial = false): Promise<boolean> {
-  return syncLiveEndpointForKind(activePaneQuery().kind, initial);
-}
-
 async function syncLiveEndpointForKind(
   kind: TableQuery,
   initial: boolean,
@@ -457,9 +666,7 @@ async function syncLiveEndpointForKind(
   }
 
   if (kind === "log" && state.testId && /^[a-f0-9]{32}$/.test(state.testId)) {
-    if (state.loadedLogCache[state.testId]) {
-      return false;
-    }
+    if (state.loadedLogCache[state.testId]) return false;
     const payload = await fetchOptionalJson(`/api/mesh/test-runs/${state.testId}`);
     const run =
       payload?.run && typeof payload.run === "object"
@@ -496,7 +703,6 @@ async function syncLiveEndpointForKind(
 
   const endpoint = liveEndpointForQuery(kind, state.testId);
   if (!endpoint) return false;
-
   const payload = await fetchOptionalJson(endpoint);
   if (!payload) {
     if (initial && !state.liveRawCache["/api/mesh/state"]) {
@@ -550,9 +756,7 @@ async function syncPublicLiveControl(initial = false): Promise<boolean> {
   if (state.session.authenticated) return false;
   try {
     const headers: Record<string, string> = {};
-    if (state.liveEtag) {
-      headers["If-None-Match"] = state.liveEtag;
-    }
+    if (state.liveEtag) headers["If-None-Match"] = state.liveEtag;
     const response = await fetch("/api/live", {
       headers,
       cache: "no-store",
@@ -611,8 +815,10 @@ async function syncPublicLiveControl(initial = false): Promise<boolean> {
 }
 
 function applyLiveSiteState(live: LiveSiteState, initial: boolean): void {
-  document.documentElement.dataset.theme =
-    live.theme === "light" ? "light" : "dark";
+  if (live.theme) {
+    document.documentElement.dataset.theme =
+      live.theme === "light" ? "light" : "dark";
+  }
   if (live.title) {
     document.title = `${live.title} — dialtone.earth`;
   } else if (!state.session.authenticated) {
@@ -631,7 +837,8 @@ function applyLiveSiteState(live: LiveSiteState, initial: boolean): void {
       viewToQueryKind(live.view),
       live.network ?? undefined,
     );
-    assignQueryToActivePane(q.id);
+    const idx = targetQueryPaneIndex();
+    state.paneContents[idx] = q.id;
   }
   if (typeof live.tour_playing === "boolean") {
     state.tourPlaying = live.tour_playing;
@@ -642,12 +849,7 @@ function applyLiveSiteState(live: LiveSiteState, initial: boolean): void {
     }
   }
   if (typeof live.fullscreen === "boolean") {
-    state.tableFullscreen = live.fullscreen;
-    if (live.fullscreen) {
-      state.tableMinimized = false;
-    }
-  } else {
-    state.tableFullscreen = false;
+    state.maximizedPaneIndex = live.fullscreen ? targetQueryPaneIndex() : null;
   }
   if (!initial) {
     renderAll();
@@ -680,31 +882,28 @@ async function runAdaptiveMeshTick(): Promise<void> {
     state.currentPollMs = null;
     return;
   }
+  const visibleQs = visibleQueryObjects();
   const changed = state.session.authenticated
-    ? await syncActiveLiveQuery(false)
+    ? await syncLiveEndpointForKind(visibleQs[0]?.kind ?? "networks", false)
     : await syncPublicLiveControl(false);
-  if (changed) {
-    state.unchangedStreak = 0;
-  } else {
-    state.unchangedStreak += 1;
-  }
+  if (changed) state.unchangedStreak = 0;
+  else state.unchangedStreak += 1;
   scheduleNextAdaptivePoll();
-  if (!state.configOpen) {
-    renderAll();
-  }
+  if (!state.configOpen) renderAll();
 }
 
 async function reportLivePresence(): Promise<void> {
   if (!state.session.authenticated || state.session.mode !== "live") return;
-  const activeQ = activePaneQuery();
+  const visibleQs = visibleQueryObjects();
+  const activeKind = visibleQs[0]?.kind ?? "networks";
   try {
     await fetch("/api/mesh/presence", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       cache: "no-store",
       body: JSON.stringify({
-        view: queryToPresenceView(activeQ.kind),
-        node: activeQ.kind === "networks" ? null : state.hostName || null,
+        view: queryToPresenceView(activeKind),
+        node: activeKind === "networks" ? null : state.hostName || null,
       }),
     });
   } catch {
@@ -754,7 +953,7 @@ function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
       networkSlug: net.slug,
       hostName: null,
       headline: `Live mesh ${net.slug} (${net.hosts.length} peers)`,
-      caption: `Open tables subscribe on a best-effort basis; minimized tables drop back to base mesh-formation metadata only.`,
+      caption: `Saved layouts persist in Cloudflare KV across sessions.`,
     },
     {
       id: "live-hosts",
@@ -775,24 +974,6 @@ function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
       headline: `Inspecting host ${firstHost ?? "origin"}`,
       caption: `Single-host telemetry, blob store, and dialtone/shell/1 sessions.`,
     },
-    {
-      id: "live-users",
-      label: "LIVE USERS",
-      view: "users",
-      networkSlug: net.slug,
-      hostName: null,
-      headline: `Cloudflare Gateway Users (${net.slug})`,
-      caption: `Cloudflare edge presence and redacted dialtone-shell audit log.`,
-    },
-    {
-      id: "live-tests",
-      label: "LIVE TESTS",
-      view: "tests",
-      networkSlug: net.slug,
-      hostName: null,
-      headline: `Recorded tests (${net.tests.length})`,
-      caption: `Immutable per-run test results queried on demand.`,
-    },
     ...(firstTestId
       ? [
           {
@@ -810,28 +991,32 @@ function buildLiveTourSteps(net: MeshNetwork): TourStep[] {
   ];
 }
 
+/* ===== Persistent Full-App Shell & WebGL Reparenting ===== */
+
 function mountShell(): void {
   document.title = state.session.authenticated
     ? `dialtone.earth — live ${state.networkSlug} mesh`
     : state.liveSite?.title
       ? `${state.liveSite.title} — dialtone.earth`
       : "dialtone.earth — simulated system tour";
+
   app.innerHTML = `
-    <main class="hud-shell earth-minimal-shell">
-      <div class="globe-stage"></div>
-      <div class="scene-shade" aria-hidden="true"></div>
-      <aside class="tour-captions" id="tour-captions" aria-live="polite" data-testid="tour-captions"></aside>
-      <section class="config-page" id="config-page" aria-label="Table and query configuration" data-testid="config-page" hidden></section>
-      <section class="bottom-table-dock" id="bottom-table-dock" aria-label="Live mesh query workspace"></section>
+    <main class="hud-shell app-wm-shell">
+      <div class="globe-parking" id="globe-parking" hidden></div>
+      <section class="app-window-grid earth-split-grid" id="app-window-grid" data-testid="split-grid"></section>
+      <section class="config-page" id="config-page" aria-label="Window, query, and camera configuration" data-testid="config-page" hidden></section>
+      <footer class="app-bottom-bar" id="bottom-table-dock" aria-label="Workspace bar"></footer>
     </main>
   `;
+
+  globeStageEl = document.createElement("div");
+  globeStageEl.className = "globe-stage";
+  const parking = app.querySelector<HTMLElement>("#globe-parking");
+  parking?.appendChild(globeStageEl);
 }
 
 function networkBySlug(slug: string): MeshNetwork {
-  return (
-    state.networks.find((n) => n.slug === slug) ??
-    state.networks[0]
-  );
+  return state.networks.find((n) => n.slug === slug) ?? state.networks[0];
 }
 
 function activeHost(net: MeshNetwork): MeshHost | null {
@@ -847,40 +1032,86 @@ function activeTestRun(net: MeshNetwork): SimTestRun | null {
 }
 
 function renderAll(): void {
-  state.paneQueryIds = normalizePaneAssignments(
-    state.paneQueryIds,
+  const baseEff = resolveEffectiveLayout(state.layoutPref, window.innerWidth);
+  state.paneContents = normalizePaneAssignments(
+    state.paneContents,
     state.queries,
-    state.layout,
+    baseEff,
   );
-  if (state.activePaneIndex >= state.paneQueryIds.length) {
+  if (state.activePaneIndex >= state.paneContents.length) {
     state.activePaneIndex = 0;
   }
+  if (
+    state.maximizedPaneIndex !== null &&
+    state.maximizedPaneIndex >= state.paneContents.length
+  ) {
+    state.maximizedPaneIndex = null;
+  }
+  lastEffectiveLayout = currentEffectiveLayout();
+
   const shell = app.querySelector<HTMLElement>(".hud-shell");
   if (shell) {
-    shell.classList.toggle("is-table-fullscreen", state.tableFullscreen);
     shell.classList.toggle("is-config-open", state.configOpen);
-    shell.classList.toggle(
-      "is-table-minimized",
-      !state.tableFullscreen && state.tableMinimized,
-    );
   }
-  renderTourCaptions();
+
+  // Park live WebGL globe before rebuilding window DOM so canvas is NEVER destroyed
+  const parking = app.querySelector<HTMLElement>("#globe-parking");
+  if (globeStageEl && parking && globeStageEl.parentElement !== parking) {
+    parking.appendChild(globeStageEl);
+  }
+
+  renderWindowGrid();
   renderConfigPage();
-  renderBottomWorkspace();
+  renderBottomBar();
   bindInteractions();
 }
 
-function renderTourCaptions(): void {
-  const ccEl = app.querySelector<HTMLElement>("#tour-captions");
-  if (!ccEl) return;
+function renderWindowGrid(): void {
+  const gridEl = app.querySelector<HTMLElement>("#app-window-grid");
+  if (!gridEl) return;
 
-  if (state.tableFullscreen || state.configOpen) {
-    ccEl.innerHTML = "";
-    ccEl.hidden = true;
-    return;
+  const effectiveLayout = currentEffectiveLayout();
+  gridEl.dataset.layout = effectiveLayout;
+
+  const visibleSlots: Array<{ originalIndex: number; contentId: string }> =
+    state.maximizedPaneIndex !== null
+      ? [
+          {
+            originalIndex: state.maximizedPaneIndex,
+            contentId: state.paneContents[state.maximizedPaneIndex],
+          },
+        ]
+      : state.paneContents.map((contentId, idx) => ({
+          originalIndex: idx,
+          contentId,
+        }));
+
+  gridEl.innerHTML = visibleSlots
+    .map(({ originalIndex, contentId }) =>
+      contentId === GLOBE_PANE_ID
+        ? renderGlobePane(originalIndex)
+        : renderQueryPane(getQueryById(contentId), originalIndex),
+    )
+    .join("");
+
+  // Reparent the live Three.js WebGL globe into the first visible globe pane
+  const globeMount = gridEl.querySelector<HTMLElement>(".globe-pane-mount");
+  if (globeMount && globeStageEl) {
+    globeMount.appendChild(globeStageEl);
   }
+}
 
-  const controlsHtml = `
+function renderGlobePane(paneIndex: number): string {
+  const focused = paneIndex === state.activePaneIndex ? "is-focused" : "";
+  const isMax = state.maximizedPaneIndex === paneIndex;
+  const camSummary =
+    state.cameraResult.ok && state.cameraResult.target
+      ? `${state.cameraResult.target.node ?? `${state.cameraResult.target.lat.toFixed(1)}°,${state.cameraResult.target.lng.toFixed(1)}°`}${state.cameraResult.target.reason ? ` · ${state.cameraResult.target.reason}` : ""}`
+      : "free orbit";
+
+  const step = state.tourSteps[state.tourStepIndex] ?? state.tourSteps[0];
+  const liveCtrl = !state.session.authenticated ? state.liveSite : null;
+  const ccControls = `
     <span class="cc-controls">
       <button type="button" class="tbl-chip" data-action="prev-step" title="Previous tour step">◀</button>
       <button type="button" class="tbl-chip ${state.tourPlaying ? "is-active" : ""}" data-action="toggle-tour" data-testid="toggle-tour" aria-pressed="${state.tourPlaying}">${state.tourPlaying ? "⏸ tour" : "▶ tour"}</button>
@@ -888,33 +1119,71 @@ function renderTourCaptions(): void {
     </span>
   `;
 
-  if (!state.tourCaptionsVisible) {
-    ccEl.hidden = false;
-    ccEl.innerHTML = `<div class="cc-head-row">${controlsHtml}</div>`;
-    return;
-  }
+  const ccHtml =
+    state.tourCaptionsVisible && step
+      ? `<div class="cc-head-row">
+          <span class="cc-line cc-kicker">CC · TOUR ${state.tourStepIndex + 1}/${state.tourSteps.length} · ${escapeHtml(step.label)}</span>
+          ${ccControls}
+        </div>
+        <div class="cc-line cc-headline">${escapeHtml(liveCtrl?.headline || step.headline)}</div>
+        <div class="cc-line cc-body">${escapeHtml(liveCtrl?.subline || step.caption)}</div>`
+      : `<div class="cc-head-row">${ccControls}</div>`;
 
-  const net = networkBySlug(state.networkSlug);
-  const isLive = state.session.authenticated && !net.simulated;
-  const liveCtrl = !isLive ? state.liveSite : null;
-  const step = state.tourSteps[state.tourStepIndex] ?? state.tourSteps[0];
-  if (!step) {
-    ccEl.hidden = false;
-    ccEl.innerHTML = `<div class="cc-head-row">${controlsHtml}</div>`;
-    return;
-  }
-
-  const headline = liveCtrl?.headline || step.headline;
-  const caption = liveCtrl?.subline || step.caption;
-
-  ccEl.hidden = false;
-  ccEl.innerHTML = `
-    <div class="cc-head-row">
-      <span class="cc-line cc-kicker">CC · TOUR ${state.tourStepIndex + 1}/${state.tourSteps.length} · ${escapeHtml(step.label)}</span>
-      ${controlsHtml}
+  return `
+    <div class="earth-pane globe-pane ${focused}" data-pane-index="${paneIndex}" data-testid="query-pane-${paneIndex}" data-pane-type="globe">
+      <div class="earth-pane-head">
+        <div class="pane-head-left">
+          <span class="pane-num">#${paneIndex + 1}</span>
+          <strong class="pane-title">3D H3 GLOBE</strong>
+          <span class="pane-source is-ch">H3 + BUNDLED PINGS</span>
+        </div>
+        <div class="pane-head-right">
+          <span class="pane-stats" data-testid="globe-cam-stats">CAM: ${escapeHtml(camSummary)}</span>
+          <button type="button" class="tbl-chip ${isMax ? "is-active" : ""}" data-max-pane="${paneIndex}">${isMax ? "split" : "full"}</button>
+        </div>
+      </div>
+      <div class="globe-pane-body">
+        <div class="globe-pane-mount" data-testid="globe-pane-mount"></div>
+        <aside class="tour-captions" id="tour-captions" aria-live="polite" data-testid="tour-captions">${ccHtml}</aside>
+      </div>
     </div>
-    <div class="cc-line cc-headline">${escapeHtml(headline)}</div>
-    <div class="cc-line cc-body">${escapeHtml(caption)}</div>
+  `;
+}
+
+function renderQueryPane(query: SavedQuery, paneIndex: number): string {
+  const net = networkBySlug(query.networkSlug);
+  const host = activeHost(net);
+  const testRun = activeTestRun(net);
+  const { columns, rowsHtml } = buildSingleQueryTable(query, net, host, testRun);
+  const focused = paneIndex === state.activePaneIndex ? "is-focused" : "";
+  const isMax = state.maximizedPaneIndex === paneIndex;
+  const sourceTag = query.source === "cloudflare" ? "CF GATEWAY" : "DIALTONE CH";
+  const statsText = `${query.rate} · ${query.estBytesPerSec} B/s · Δ${query.deltas} · ${query.notModified}×304${query.lastUpdatedAt ? ` · ${query.lastUpdatedAt}` : ""}`;
+
+  return `
+    <div class="earth-pane ${focused}" data-pane-index="${paneIndex}" data-testid="query-pane-${paneIndex}" data-pane-type="query">
+      <div class="earth-pane-head">
+        <div class="pane-head-left">
+          <span class="pane-num">#${paneIndex + 1}</span>
+          <strong class="pane-title">${escapeHtml(query.label)}</strong>
+          <span class="pane-source ${query.source === "cloudflare" ? "is-cf" : "is-ch"}">${sourceTag}</span>
+        </div>
+        <div class="pane-head-right">
+          <span class="pane-stats">${escapeHtml(statsText)}</span>
+          <button type="button" class="tbl-chip ${isMax ? "is-active" : ""}" data-max-pane="${paneIndex}">${isMax ? "split" : "full"}</button>
+        </div>
+      </div>
+      <div class="earth-table-scroll">
+        <table class="earth-table" data-testid="${paneIndex === 0 ? "earth-table" : `earth-table-${paneIndex}`}">
+          <thead>
+            <tr>${columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("")}</tr>
+          </thead>
+          <tbody>
+            ${rowsHtml}
+          </tbody>
+        </table>
+      </div>
+    </div>
   `;
 }
 
@@ -927,19 +1196,34 @@ function renderConfigPage(): void {
     return;
   }
 
-  const layoutCards = SPLIT_LAYOUTS.map((item) => {
-    const active = state.layout === item.id ? "is-active" : "";
-    const cells = Array.from({ length: item.panes }, () => `<i></i>`).join("");
-    return `<button type="button" class="cfg-layout-card ${active}" data-layout-btn="${item.id}" data-testid="layout-${item.id.replace(/[^a-z0-9]/gi, "_")}" title="${escapeHtml(item.title)}">
-      <span class="cfg-wireframe" data-layout="${item.id}">${cells}</span>
-      <span class="cfg-layout-label">${escapeHtml(item.label)}</span>
-    </button>`;
-  }).join("");
+  const resolvedEff = resolveEffectiveLayout(state.layoutPref, window.innerWidth);
+  const autoCard = `<button type="button" class="cfg-layout-card ${state.layoutPref === "auto" ? "is-active" : ""}" data-layout-btn="auto" data-testid="layout-auto" title="Auto: Left/Right on wide displays, Top/Bottom on mobile">
+    <span class="cfg-wireframe" data-layout="${resolvedEff}"><i></i><i></i></span>
+    <span class="cfg-layout-label">auto (${resolvedEff})</span>
+  </button>`;
 
-  const paneSlots = state.paneQueryIds
-    .map((qId, idx) => {
-      const q = getQueryById(qId);
+  const layoutCards =
+    autoCard +
+    SPLIT_LAYOUTS.map((item) => {
+      const active = state.layoutPref === item.id ? "is-active" : "";
+      const cells = Array.from({ length: item.panes }, () => `<i></i>`).join("");
+      return `<button type="button" class="cfg-layout-card ${active}" data-layout-btn="${item.id}" data-testid="layout-${item.id.replace(/[^a-z0-9]/gi, "_")}" title="${escapeHtml(item.title)}">
+        <span class="cfg-wireframe" data-layout="${item.id}">${cells}</span>
+        <span class="cfg-layout-label">${escapeHtml(item.label)}</span>
+      </button>`;
+    }).join("");
+
+  const paneSlots = state.paneContents
+    .map((contentId, idx) => {
       const selected = idx === state.activePaneIndex ? "is-active" : "";
+      if (contentId === GLOBE_PANE_ID) {
+        return `<button type="button" class="cfg-pane-slot ${selected}" data-cfg-pane="${idx}" data-testid="cfg-pane-${idx}">
+          <span class="cfg-slot-top">PANE #${idx + 1} · VISUAL PANEL</span>
+          <strong class="cfg-slot-name">3D H3 GLOBE</strong>
+          <span class="cfg-slot-sub">geospatial H3 + bundled atmospheric pings</span>
+        </button>`;
+      }
+      const q = getQueryById(contentId);
       const src = q.source === "cloudflare" ? "CF GATEWAY" : "DIALTONE CH";
       return `<button type="button" class="cfg-pane-slot ${selected}" data-cfg-pane="${idx}" data-testid="cfg-pane-${idx}">
         <span class="cfg-slot-top">PANE #${idx + 1} · ${src} · ${escapeHtml(q.rate.toUpperCase())}</span>
@@ -949,6 +1233,21 @@ function renderConfigPage(): void {
     })
     .join("");
 
+  const globeAssignedToActive =
+    state.paneContents[state.activePaneIndex] === GLOBE_PANE_ID;
+  const globeInAnyPane = state.paneContents.includes(GLOBE_PANE_ID);
+
+  const globeRow = `<tr>
+    <td>
+      <button type="button" class="tbl-chip ${globeAssignedToActive ? "is-active" : globeInAnyPane ? "is-shown" : ""}" data-cfg-assign="${GLOBE_PANE_ID}" data-testid="cfg-assign-globe">${globeAssignedToActive ? `● #${state.activePaneIndex + 1}` : `set #${state.activePaneIndex + 1}`}</button>
+      <span class="c-strong cfg-q-name">3D H3 GLOBE</span>
+    </td>
+    <td><span class="pane-source is-ch">VISUAL</span></td>
+    <td class="c-dim">all networks</td>
+    <td class="c-dim">camera policy driven</td>
+    <td></td>
+  </tr>`;
+
   const rateList: RateTier[] = ["base", "slow", "med", "fast"];
   const rateLabels: Record<RateTier, string> = {
     base: "base 30s",
@@ -957,45 +1256,47 @@ function renderConfigPage(): void {
     fast: "fast 1.5s",
   };
 
-  const queryRows = state.queries
-    .map((q) => {
-      const assignedToActive =
-        state.paneQueryIds[state.activePaneIndex] === q.id;
-      const inAnyPane = state.paneQueryIds.includes(q.id);
-      const sourceBtns = (["channel", "cloudflare"] as QuerySource[])
-        .map(
-          (src) =>
-            `<button type="button" class="tbl-chip ${q.source === src ? "is-active" : ""}" data-cfg-source="${escapeHtml(q.id)}:${src}">${src === "cloudflare" ? "cf" : "ch"}</button>`,
-        )
-        .join("");
-      const netBtns = state.networks
-        .map(
-          (n) =>
-            `<button type="button" class="tbl-chip ${q.networkSlug === n.slug ? "is-active" : ""}" data-cfg-net="${escapeHtml(q.id)}:${escapeHtml(n.slug)}">${escapeHtml(n.slug.replace(/^sim-/, ""))}</button>`,
-        )
-        .join("");
-      const rateBtns = rateList
-        .map(
-          (r) =>
-            `<button type="button" class="tbl-chip ${q.rate === r ? "is-active" : ""}" data-cfg-rate="${escapeHtml(q.id)}:${r}" data-testid="rate-${escapeHtml(q.id)}-${r}">${rateLabels[r]}</button>`,
-        )
-        .join("");
-      const rmBtn =
-        state.queries.length > 1
-          ? `<button type="button" class="tbl-chip" data-remove-query="${escapeHtml(q.id)}" title="Remove query">×</button>`
-          : "";
-      return `<tr>
-        <td>
-          <button type="button" class="tbl-chip ${assignedToActive ? "is-active" : inAnyPane ? "is-shown" : ""}" data-cfg-assign="${escapeHtml(q.id)}" data-testid="cfg-assign-${escapeHtml(q.id)}">${assignedToActive ? `● #${state.activePaneIndex + 1}` : `set #${state.activePaneIndex + 1}`}</button>
-          <span class="c-strong cfg-q-name">${escapeHtml(q.label)}</span>
-        </td>
-        <td><span class="cfg-btn-row">${sourceBtns}</span></td>
-        <td><span class="cfg-btn-row">${netBtns}</span></td>
-        <td><span class="cfg-btn-row">${rateBtns}</span></td>
-        <td>${rmBtn}</td>
-      </tr>`;
-    })
-    .join("");
+  const queryRows =
+    globeRow +
+    state.queries
+      .map((q) => {
+        const assignedToActive =
+          state.paneContents[state.activePaneIndex] === q.id;
+        const inAnyPane = state.paneContents.includes(q.id);
+        const sourceBtns = (["channel", "cloudflare"] as QuerySource[])
+          .map(
+            (src) =>
+              `<button type="button" class="tbl-chip ${q.source === src ? "is-active" : ""}" data-cfg-source="${escapeHtml(q.id)}:${src}">${src === "cloudflare" ? "cf" : "ch"}</button>`,
+          )
+          .join("");
+        const netBtns = state.networks
+          .map(
+            (n) =>
+              `<button type="button" class="tbl-chip ${q.networkSlug === n.slug ? "is-active" : ""}" data-cfg-net="${escapeHtml(q.id)}:${escapeHtml(n.slug)}">${escapeHtml(n.slug.replace(/^sim-/, ""))}</button>`,
+          )
+          .join("");
+        const rateBtns = rateList
+          .map(
+            (r) =>
+              `<button type="button" class="tbl-chip ${q.rate === r ? "is-active" : ""}" data-cfg-rate="${escapeHtml(q.id)}:${r}" data-testid="rate-${escapeHtml(q.id)}-${r}">${rateLabels[r]}</button>`,
+          )
+          .join("");
+        const rmBtn =
+          state.queries.length > 1
+            ? `<button type="button" class="tbl-chip" data-remove-query="${escapeHtml(q.id)}" title="Remove query">×</button>`
+            : "";
+        return `<tr>
+          <td>
+            <button type="button" class="tbl-chip ${assignedToActive ? "is-active" : inAnyPane ? "is-shown" : ""}" data-cfg-assign="${escapeHtml(q.id)}" data-testid="cfg-assign-${escapeHtml(q.id)}">${assignedToActive ? `● #${state.activePaneIndex + 1}` : `set #${state.activePaneIndex + 1}`}</button>
+            <span class="c-strong cfg-q-name">${escapeHtml(q.label)}</span>
+          </td>
+          <td><span class="cfg-btn-row">${sourceBtns}</span></td>
+          <td><span class="cfg-btn-row">${netBtns}</span></td>
+          <td><span class="cfg-btn-row">${rateBtns}</span></td>
+          <td>${rmBtn}</td>
+        </tr>`;
+      })
+      .join("");
 
   const addKinds: TableQuery[] = [
     "networks",
@@ -1014,10 +1315,6 @@ function renderConfigPage(): void {
     )
     .join("");
 
-  const modeMin = !state.tableFullscreen && state.tableMinimized ? "is-active" : "";
-  const modeDock = !state.tableFullscreen && !state.tableMinimized ? "is-active" : "";
-  const modeFull = state.tableFullscreen ? "is-active" : "";
-
   const presetButtons = CAMERA_PRESETS.map((p) => {
     const isCurrent = state.cameraPolicyCode.trim() === p.code.trim();
     return `<button type="button" class="tbl-chip ${isCurrent ? "is-active" : ""}" data-cam-preset="${escapeHtml(p.id)}" data-testid="cam-preset-${escapeHtml(p.id)}">${escapeHtml(p.label)}</button>`;
@@ -1029,59 +1326,45 @@ function renderConfigPage(): void {
       ? `<span class="cfg-cam-ok" data-testid="cam-status">TARGET: ${escapeHtml(state.cameraResult.target.node ?? "custom")} (${state.cameraResult.target.lat.toFixed(2)}°, ${state.cameraResult.target.lng.toFixed(2)}°)${state.cameraResult.target.reason ? ` · ${escapeHtml(state.cameraResult.target.reason)}` : ""}</span>`
       : `<span class="c-dim" data-testid="cam-status">TARGET: null (free orbit)</span>`;
 
+  const saveLabel = state.session.authenticated
+    ? `CLOUDFLARE KV · ${state.configSyncLabel}`
+    : `BROWSER STORAGE · ${state.configSyncLabel} (SIGN IN TO SYNC VIA CLOUDFLARE)`;
+
   cfgEl.hidden = false;
   cfgEl.innerHTML = `
     <div class="cfg-frame">
       <header class="cfg-header">
         <div class="earth-bar-left">
-          <span class="tbl-brand">CONFIG // TABLES, QUERIES &amp; CAMERA</span>
-          <span class="tbl-cadence">SINGLE-BUTTON SETUP + TYPESCRIPT CAMERA POLICY</span>
+          <span class="tbl-brand">CONFIG // APP WINDOWS, QUERIES &amp; CAMERA</span>
+          <span class="tbl-cadence" data-testid="config-sync-status">${escapeHtml(saveLabel)}</span>
         </div>
         <div class="earth-bar-right">
-          <button type="button" class="tbl-chip ${modeMin}" data-cfg-mode="min" data-testid="cfg-mode-min">minimized</button>
-          <button type="button" class="tbl-chip ${modeDock}" data-cfg-mode="dock" data-testid="cfg-mode-dock">docked</button>
-          <button type="button" class="tbl-chip ${modeFull}" data-cfg-mode="full" data-testid="cfg-mode-full">fullscreen</button>
-          <button type="button" class="tbl-chip" data-cfg-reset="1">reset defaults</button>
+          <button type="button" class="tbl-chip" data-cfg-reset="1" data-testid="cfg-reset">reset defaults</button>
           <button type="button" class="tbl-chip is-active" data-action="close-config" data-testid="config-done">done</button>
         </div>
       </header>
 
       <div class="cfg-body">
         <section class="cfg-section">
-          <div class="cfg-section-head">
-            <span class="cfg-section-title">1. CAMERA — TYPESCRIPT GEOLOCATION SELECTOR (NO AUTO-TOUR CAMERA)</span>
-            <span class="cfg-btn-row">${presetButtons}</span>
-          </div>
-          <div class="cfg-cam-meta">
-            <span class="c-dim">ctx.nodes: { name, network, lat, lng, online, cpu, mem, disk, gpu, load1m, rttMs, rttP95, cores, blobs } · helpers: maxBy, minBy, p95, avg, centroid, Math</span>
-          </div>
-          <textarea class="cfg-ts-editor" id="camera-ts-editor" data-testid="camera-ts-editor" spellcheck="false" rows="8">${escapeHtml(state.cameraDraftCode)}</textarea>
-          <div class="cfg-section-head">
-            ${camStatusHtml}
-            <button type="button" class="tbl-chip is-active" data-action="apply-camera-ts" data-testid="apply-camera-ts">apply typescript policy (Ctrl+Enter)</button>
-          </div>
-        </section>
-
-        <section class="cfg-section">
-          <div class="cfg-section-title">2. LAYOUT — PICK A SPLIT SHAPE</div>
+          <div class="cfg-section-title">1. APP WINDOW LAYOUT (AUTO = LEFT/RIGHT WIDE · TOP/BOTTOM MOBILE)</div>
           <div class="cfg-layout-row">${layoutCards}</div>
         </section>
 
         <section class="cfg-section">
-          <div class="cfg-section-title">3. PANE MAP — CLICK A PANE (#${state.activePaneIndex + 1} SELECTED), THEN ASSIGN A QUERY BELOW</div>
-          <div class="cfg-pane-map" data-layout="${state.layout}" data-testid="cfg-pane-map">${paneSlots}</div>
+          <div class="cfg-section-title">2. WINDOW PANE MAP — CLICK A PANE (#${state.activePaneIndex + 1} SELECTED), THEN ASSIGN GLOBE OR ANY QUERY BELOW</div>
+          <div class="cfg-pane-map" data-layout="${resolvedEff}" data-testid="cfg-pane-map">${paneSlots}</div>
         </section>
 
         <section class="cfg-section">
           <div class="cfg-section-head">
-            <span class="cfg-section-title">4. QUERY SET &amp; BEST-EFFORT RATES</span>
+            <span class="cfg-section-title">3. PANELS &amp; QUERY SET (SINGLE-BUTTON RATES)</span>
             <span class="cfg-btn-row">${addButtons}</span>
           </div>
           <div class="cfg-table-wrap">
             <table class="earth-table" data-testid="cfg-query-table">
               <thead>
                 <tr>
-                  <th>QUERY (CLICK TO PUT IN #${state.activePaneIndex + 1})</th>
+                  <th>PANEL / QUERY (SET IN #${state.activePaneIndex + 1})</th>
                   <th>SOURCE</th>
                   <th>NETWORK</th>
                   <th>BEST-EFFORT RATE</th>
@@ -1094,12 +1377,27 @@ function renderConfigPage(): void {
             </table>
           </div>
         </section>
+
+        <section class="cfg-section">
+          <div class="cfg-section-head">
+            <span class="cfg-section-title">4. CAMERA — TYPESCRIPT GEOLOCATION SELECTOR</span>
+            <span class="cfg-btn-row">${presetButtons}</span>
+          </div>
+          <div class="cfg-cam-meta">
+            <span class="c-dim">ctx.nodes: { name, network, lat, lng, online, cpu, mem, disk, gpu, load1m, rttMs, rttP95, cores, blobs } · helpers: maxBy, minBy, p95, avg, centroid, Math</span>
+          </div>
+          <textarea class="cfg-ts-editor" id="camera-ts-editor" data-testid="camera-ts-editor" spellcheck="false" rows="8">${escapeHtml(state.cameraDraftCode)}</textarea>
+          <div class="cfg-section-head">
+            ${camStatusHtml}
+            <button type="button" class="tbl-chip is-active" data-action="apply-camera-ts" data-testid="apply-camera-ts">apply typescript policy (Ctrl+Enter)</button>
+          </div>
+        </section>
       </div>
     </div>
   `;
 }
 
-function renderBottomWorkspace(): void {
+function renderBottomBar(): void {
   const dockEl = app.querySelector<HTMLElement>("#bottom-table-dock");
   if (!dockEl) return;
 
@@ -1115,17 +1413,22 @@ function renderBottomWorkspace(): void {
       ? `<span class="tbl-pill is-live" data-testid="live-cli-badge">${escapeHtml(liveCtrl.badge)}</span>`
       : `<span class="tbl-pill is-sim" data-testid="simulated-badge">SIM · ${summary.onlineNodes}/${summary.totalNodes}</span>`;
 
-  const visible = visiblePaneQueries();
-  const totalBps = visible.reduce((acc, q) => acc + q.estBytesPerSec, 0);
+  const visibleQs = visibleQueryObjects();
+  const totalBps = visibleQs.reduce((acc, q) => acc + q.estBytesPerSec, 0);
   const baseCadence = formatCadenceLabel(
     state.currentPollMs,
     state.unchangedStreak,
     state.notModifiedCount,
   );
   const trafficSummary =
-    visible.length === 0
+    visibleQs.length === 0
       ? `BASE ONLY · 0 B/s · ${baseCadence}`
-      : `${visible.length} ACTIVE · ${totalBps} B/s · ${baseCadence}`;
+      : `${visibleQs.length} ACTIVE · ${totalBps} B/s · ${baseCadence}`;
+
+  const camBadge =
+    state.cameraResult.ok && state.cameraResult.target
+      ? `CAM: ${state.cameraResult.target.node ?? `${state.cameraResult.target.lat.toFixed(1)}°,${state.cameraResult.target.lng.toFixed(1)}°`}${state.cameraResult.target.reason ? ` (${state.cameraResult.target.reason})` : ""}`
+      : "CAM: free";
 
   const authAction = isLive
     ? `<a class="tbl-chip" data-testid="auth-logout" href="${escapeHtml(state.session.logout_url || "/cdn-cgi/access/logout")}">sign out</a>`
@@ -1133,17 +1436,24 @@ function renderBottomWorkspace(): void {
       ? `<a class="tbl-chip" data-testid="auth-login" href="${escapeHtml(state.session.login_url)}">sign in</a>`
       : "";
 
-  const activeQ = activePaneQuery();
+  const activeContent = state.paneContents[state.activePaneIndex];
+  const globeChipCls =
+    activeContent === GLOBE_PANE_ID
+      ? "is-active"
+      : isContentVisible(GLOBE_PANE_ID)
+        ? "is-shown"
+        : "";
+  const globeChip = `<button type="button" class="tbl-tab ${globeChipCls}" data-pick-content="${GLOBE_PANE_ID}" data-testid="pick-globe">globe</button>`;
+
   const queryChips = state.queries
     .map((q) => {
-      const isFocused = !state.tableMinimized && q.id === activeQ.id;
-      const isShown = isQueryVisible(q.id);
-      const cls = isFocused
-        ? "is-active"
-        : isShown
-          ? "is-shown"
-          : "";
-      return `<button type="button" class="tbl-tab ${cls}" data-pick-query="${escapeHtml(q.id)}" title="${escapeHtml(q.source)} · rate=${escapeHtml(q.rate)}">${escapeHtml(q.label)}</button>`;
+      const cls =
+        activeContent === q.id
+          ? "is-active"
+          : isContentVisible(q.id)
+            ? "is-shown"
+            : "";
+      return `<button type="button" class="tbl-tab ${cls}" data-pick-content="${escapeHtml(q.id)}" title="${escapeHtml(q.source)} · rate=${escapeHtml(q.rate)}">${escapeHtml(q.label)}</button>`;
     })
     .join("");
 
@@ -1153,17 +1463,11 @@ function renderBottomWorkspace(): void {
       ? `<div class="tbl-banner-bar is-live" data-testid="live-cli-banner"><strong>REV #${liveCtrl.revision}</strong> ${escapeHtml(liveCtrl.banner)}</div>`
       : "";
 
-  const panesHtml = state.paneQueryIds
-    .map((qId, paneIndex) => renderQueryPane(getQueryById(qId), paneIndex))
-    .join("");
-
-  const camBadge =
-    state.cameraResult.ok && state.cameraResult.target
-      ? `CAM: ${state.cameraResult.target.node ?? `${state.cameraResult.target.lat.toFixed(1)}°,${state.cameraResult.target.lng.toFixed(1)}°`}${state.cameraResult.target.reason ? ` (${state.cameraResult.target.reason})` : ""}`
-      : "CAM: free";
+  const isMax = state.maximizedPaneIndex !== null;
 
   dockEl.innerHTML = `
     <div class="earth-table-frame">
+      ${liveBannerBar}
       <div class="earth-table-bar">
         <div class="earth-bar-left">
           <a class="tbl-brand" href="/">${escapeHtml(brand)}</a>
@@ -1171,54 +1475,15 @@ function renderBottomWorkspace(): void {
           <span class="tbl-cadence" data-testid="mesh-cadence">${escapeHtml(trafficSummary)}</span>
           <span class="tbl-cadence" data-testid="camera-readout">${escapeHtml(camBadge)}</span>
         </div>
-        <div class="earth-bar-tabs" role="tablist" aria-label="Query set">
+        <div class="earth-bar-tabs" role="tablist" aria-label="Panels and query set">
+          ${globeChip}
           ${queryChips}
         </div>
         <div class="earth-bar-right">
-          <button type="button" class="tbl-chip ${!state.tableMinimized && !state.tableFullscreen ? "is-active" : ""}" data-action="toggle-minimize" data-testid="toggle-minimize" aria-pressed="${state.tableMinimized}">${state.tableMinimized ? "table" : "min"}</button>
-          <button type="button" class="tbl-chip ${state.tableFullscreen ? "is-active" : ""}" data-action="toggle-fullscreen" data-testid="toggle-fullscreen" aria-pressed="${state.tableFullscreen}">${state.tableFullscreen ? "dock" : "full"}</button>
+          <button type="button" class="tbl-chip ${isMax ? "is-active" : ""}" data-action="toggle-fullscreen" data-testid="toggle-fullscreen" aria-pressed="${isMax}">${isMax ? "split" : "full"}</button>
           <button type="button" class="tbl-chip ${state.configOpen ? "is-active" : ""}" data-action="open-config" data-testid="open-config">config</button>
           ${authAction}
         </div>
-      </div>
-      ${liveBannerBar}
-      <div class="earth-split-grid" data-layout="${state.layout}" data-testid="split-grid">
-        ${panesHtml}
-      </div>
-    </div>
-  `;
-}
-
-function renderQueryPane(query: SavedQuery, paneIndex: number): string {
-  const net = networkBySlug(query.networkSlug);
-  const host = activeHost(net);
-  const testRun = activeTestRun(net);
-  const { columns, rowsHtml } = buildSingleQueryTable(query, net, host, testRun);
-  const focused = paneIndex === state.activePaneIndex ? "is-focused" : "";
-  const sourceTag = query.source === "cloudflare" ? "CF GATEWAY" : "DIALTONE CH";
-  const statsText = `${query.rate} · ${query.estBytesPerSec} B/s · Δ${query.deltas} · ${query.notModified}×304${query.lastUpdatedAt ? ` · ${query.lastUpdatedAt}` : ""}`;
-
-  return `
-    <div class="earth-pane ${focused}" data-pane-index="${paneIndex}" data-testid="query-pane-${paneIndex}">
-      <div class="earth-pane-head">
-        <div class="pane-head-left">
-          <span class="pane-num">#${paneIndex + 1}</span>
-          <strong class="pane-title">${escapeHtml(query.label)}</strong>
-          <span class="pane-source ${query.source === "cloudflare" ? "is-cf" : "is-ch"}">${sourceTag}</span>
-        </div>
-        <div class="pane-head-right">
-          <span class="pane-stats">${escapeHtml(statsText)}</span>
-        </div>
-      </div>
-      <div class="earth-table-scroll">
-        <table class="earth-table" data-testid="${paneIndex === 0 ? "earth-table" : `earth-table-${paneIndex}`}">
-          <thead>
-            <tr>${columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("")}</tr>
-          </thead>
-          <tbody>
-            ${rowsHtml}
-          </tbody>
-        </table>
       </div>
     </div>
   `;
@@ -1462,19 +1727,43 @@ function buildSingleQueryTable(
 }
 
 function bindInteractions(): void {
-  // Query set chip clicks on bottom bar
-  app.querySelectorAll<HTMLButtonElement>("[data-pick-query]").forEach((btn) => {
+  // Bottom bar panel / query chips
+  app.querySelectorAll<HTMLButtonElement>("[data-pick-content]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const id = btn.dataset.pickQuery;
+      const id = btn.dataset.pickContent;
       if (!id) return;
-      exitTour();
-      state.tableMinimized = false;
-      assignQueryToActivePane(id);
+      if (id === GLOBE_PANE_ID) {
+        assignContentToPane(state.activePaneIndex, GLOBE_PANE_ID);
+      } else {
+        exitTour();
+        const paneIdx = targetQueryPaneIndex();
+        state.activePaneIndex = paneIdx;
+        assignContentToPane(paneIdx, id);
+      }
       renderAll();
       syncGlobeFocus();
       void reportLivePresence();
     });
   });
+
+  // Per-pane full / split maximize toggle
+  app.querySelectorAll<HTMLButtonElement>("[data-max-pane]").forEach((btn) => {
+    btn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const idx = Number(btn.dataset.maxPane ?? 0);
+      state.activePaneIndex = idx;
+      state.maximizedPaneIndex = state.maximizedPaneIndex === idx ? null : idx;
+      renderAll();
+    });
+  });
+
+  app
+    .querySelector<HTMLButtonElement>('[data-action="toggle-fullscreen"]')
+    ?.addEventListener("click", () => {
+      state.maximizedPaneIndex =
+        state.maximizedPaneIndex !== null ? null : state.activePaneIndex;
+      renderAll();
+    });
 
   // Open / close visual Config Page
   app
@@ -1488,7 +1777,7 @@ function bindInteractions(): void {
     .querySelector<HTMLButtonElement>('[data-action="close-config"]')
     ?.addEventListener("click", () => {
       state.configOpen = false;
-      for (const q of visiblePaneQueries()) {
+      for (const q of visibleQueryObjects()) {
         q.nextDueAtMs = Date.now();
       }
       renderAll();
@@ -1498,19 +1787,20 @@ function bindInteractions(): void {
   // Config Page: single-button visual layout cards
   app.querySelectorAll<HTMLButtonElement>("[data-layout-btn]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const nextLayout = btn.dataset.layoutBtn as SplitLayout | undefined;
-      if (!nextLayout) return;
-      exitTour();
-      state.layout = nextLayout;
-      state.tableMinimized = false;
-      state.paneQueryIds = normalizePaneAssignments(
-        state.paneQueryIds,
+      const nextPref = btn.dataset.layoutBtn as LayoutPreference | undefined;
+      if (!nextPref) return;
+      state.layoutPref = nextPref;
+      state.maximizedPaneIndex = null;
+      const eff = resolveEffectiveLayout(state.layoutPref, window.innerWidth);
+      state.paneContents = normalizePaneAssignments(
+        state.paneContents,
         state.queries,
-        state.layout,
+        eff,
       );
-      if (state.activePaneIndex >= state.paneQueryIds.length) {
+      if (state.activePaneIndex >= state.paneContents.length) {
         state.activePaneIndex = 0;
       }
+      persistUserConfig();
       renderAll();
     });
   });
@@ -1523,17 +1813,17 @@ function bindInteractions(): void {
     });
   });
 
-  // Config Page: assign query to active pane in 1 click
+  // Config Page: assign globe or query to active pane in 1 click
   app.querySelectorAll<HTMLButtonElement>("[data-cfg-assign]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const id = btn.dataset.cfgAssign;
       if (!id) return;
-      assignQueryToActivePane(id);
+      assignContentToPane(state.activePaneIndex, id);
       renderAll();
     });
   });
 
-  // Config Page: 1-click source toggle (channel | cloudflare)
+  // Config Page: 1-click source toggle
   app.querySelectorAll<HTMLButtonElement>("[data-cfg-source]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const raw = btn.dataset.cfgSource || "";
@@ -1541,6 +1831,7 @@ function bindInteractions(): void {
       if (sep < 0) return;
       const q = getQueryById(raw.slice(0, sep));
       q.source = raw.slice(sep + 1) as QuerySource;
+      persistUserConfig();
       renderAll();
     });
   });
@@ -1554,6 +1845,7 @@ function bindInteractions(): void {
       const q = getQueryById(raw.slice(0, sep));
       q.networkSlug = raw.slice(sep + 1);
       q.nextDueAtMs = Date.now();
+      persistUserConfig();
       renderAll();
     });
   });
@@ -1568,6 +1860,7 @@ function bindInteractions(): void {
       q.rate = raw.slice(sep + 1) as RateTier;
       q.unchangedStreak = 0;
       q.nextDueAtMs = Date.now();
+      persistUserConfig();
       renderAll();
     });
   });
@@ -1583,7 +1876,7 @@ function bindInteractions(): void {
         rate: "med",
       });
       state.queries.push(created);
-      assignQueryToActivePane(created.id);
+      assignContentToPane(state.activePaneIndex, created.id);
       renderAll();
     });
   });
@@ -1594,31 +1887,13 @@ function bindInteractions(): void {
       const removeId = btn.dataset.removeQuery;
       if (!removeId || state.queries.length <= 1) return;
       state.queries = state.queries.filter((q) => q.id !== removeId);
-      state.paneQueryIds = normalizePaneAssignments(
-        state.paneQueryIds,
+      const eff = resolveEffectiveLayout(state.layoutPref, window.innerWidth);
+      state.paneContents = normalizePaneAssignments(
+        state.paneContents,
         state.queries,
-        state.layout,
+        eff,
       );
-      renderAll();
-    });
-  });
-
-  // Config Page: 1-click display mode (min | dock | full)
-  app.querySelectorAll<HTMLButtonElement>("[data-cfg-mode]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const mode = btn.dataset.cfgMode;
-      if (mode === "min") {
-        state.tableFullscreen = false;
-        state.tableMinimized = true;
-      } else if (mode === "dock") {
-        state.tableFullscreen = false;
-        state.tableMinimized = false;
-        exitTour();
-      } else if (mode === "full") {
-        state.tableMinimized = false;
-        state.tableFullscreen = true;
-        exitTour();
-      }
+      persistUserConfig();
       renderAll();
     });
   });
@@ -1664,13 +1939,23 @@ function bindInteractions(): void {
     .querySelector<HTMLButtonElement>("[data-cfg-reset]")
     ?.addEventListener("click", () => {
       state.queries = createDefaultQuerySet(state.networks);
-      state.layout = "1";
-      state.paneQueryIds = [state.queries[0].id];
+      state.layoutPref = "auto";
+      state.maximizedPaneIndex = null;
+      state.paneContents = [GLOBE_PANE_ID, state.queries[0].id];
       state.activePaneIndex = 0;
-      state.tableFullscreen = false;
-      state.tableMinimized = true;
       state.cameraDraftCode = CAMERA_PRESETS[0].code;
       applyCameraPolicyCode(CAMERA_PRESETS[0].code);
+      try {
+        window.localStorage.removeItem(LOCAL_UI_CONFIG_KEY);
+      } catch {
+        // ignore
+      }
+      if (state.session.authenticated) {
+        void fetch("/api/user/ui-config", { method: "DELETE" });
+        state.configSyncLabel = "CF RESET";
+      } else {
+        state.configSyncLabel = "LOCAL RESET";
+      }
       renderAll();
     });
 
@@ -1680,15 +1965,17 @@ function bindInteractions(): void {
       const idx = Number(pane.dataset.paneIndex ?? 0);
       if (idx !== state.activePaneIndex) {
         state.activePaneIndex = idx;
-        const q = activePaneQuery();
-        state.networkSlug = q.networkSlug;
+        const contentId = state.paneContents[idx];
+        if (contentId && contentId !== GLOBE_PANE_ID) {
+          state.networkSlug = getQueryById(contentId).networkSlug;
+        }
         renderAll();
         syncGlobeFocus();
       }
     });
   });
 
-  // Row drill-downs (sync globe + active pane)
+  // Row drill-downs inside query tables
   app
     .querySelectorAll<HTMLElement>("[data-select-network]")
     .forEach((row) => {
@@ -1698,7 +1985,9 @@ function bindInteractions(): void {
         exitTour();
         state.networkSlug = slug;
         const q = ensureQueryForKind("hosts", slug);
-        assignQueryToActivePane(q.id);
+        const idx = targetQueryPaneIndex();
+        state.activePaneIndex = idx;
+        assignContentToPane(idx, q.id);
         renderAll();
         syncGlobeFocus();
       });
@@ -1713,7 +2002,9 @@ function bindInteractions(): void {
       state.networkSlug = netSlug;
       state.hostName = hostName;
       const q = ensureQueryForKind("host", netSlug);
-      assignQueryToActivePane(q.id);
+      const idx = targetQueryPaneIndex();
+      state.activePaneIndex = idx;
+      assignContentToPane(idx, q.id);
       renderAll();
       syncGlobeFocus();
       void reportLivePresence();
@@ -1729,43 +2020,14 @@ function bindInteractions(): void {
       state.networkSlug = netSlug;
       state.testId = id;
       const q = ensureQueryForKind("log", netSlug);
-      assignQueryToActivePane(q.id);
+      const idx = targetQueryPaneIndex();
+      state.activePaneIndex = idx;
+      assignContentToPane(idx, q.id);
       renderAll();
     });
   });
 
-  // Minimize / Fullscreen / Tour controls
-  app
-    .querySelector<HTMLButtonElement>('[data-action="toggle-minimize"]')
-    ?.addEventListener("click", () => {
-      if (state.tableFullscreen) {
-        state.tableFullscreen = false;
-        state.tableMinimized = true;
-      } else {
-        state.tableMinimized = !state.tableMinimized;
-      }
-      if (!state.tableMinimized) {
-        for (const q of visiblePaneQueries()) {
-          q.nextDueAtMs = Date.now();
-        }
-      }
-      renderAll();
-    });
-
-  app
-    .querySelector<HTMLButtonElement>('[data-action="toggle-fullscreen"]')
-    ?.addEventListener("click", () => {
-      state.tableFullscreen = !state.tableFullscreen;
-      if (state.tableFullscreen) {
-        state.tableMinimized = false;
-        exitTour();
-        for (const q of visiblePaneQueries()) {
-          q.nextDueAtMs = Date.now();
-        }
-      }
-      renderAll();
-    });
-
+  // Top-left tour controls inside globe panel
   app
     .querySelector<HTMLButtonElement>('[data-action="prev-step"]')
     ?.addEventListener("click", () => {
@@ -1787,12 +2049,8 @@ function bindInteractions(): void {
     ?.addEventListener("click", () => {
       state.tourPlaying = !state.tourPlaying;
       state.tourCaptionsVisible = state.tourPlaying;
-      if (state.tourPlaying) {
-        state.tableFullscreen = false;
-        startTourTimer();
-      } else {
-        clearTourTimer();
-      }
+      if (state.tourPlaying) startTourTimer();
+      else clearTourTimer();
       renderAll();
     });
 }
@@ -1810,7 +2068,10 @@ function applyTourStep(index: number, keepPlaying: boolean): void {
     state.testId = step.testId ?? net.tests[0]?.testId ?? "";
   }
   const q = ensureQueryForKind(kind, step.networkSlug ?? undefined);
-  assignQueryToActivePane(q.id);
+  const idx = targetQueryPaneIndex();
+  if (state.paneContents[idx] !== GLOBE_PANE_ID) {
+    state.paneContents[idx] = q.id;
+  }
   if (!keepPlaying) {
     state.tourPlaying = false;
     clearTourTimer();
@@ -1829,11 +2090,7 @@ function applyCameraPolicyCode(code: string): void {
   state.cameraResult = result;
   if (result.ok) {
     state.cameraPolicyCode = code;
-    try {
-      window.localStorage.setItem(CAMERA_POLICY_STORAGE_KEY, code);
-    } catch {
-      // ignore storage errors
-    }
+    persistUserConfig();
     globeController?.setCameraTarget(result.target);
   }
 }

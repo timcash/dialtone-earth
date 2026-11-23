@@ -17,8 +17,10 @@ import {
   bestEffortIntervalMs,
   createCustomQuery,
   createDefaultQuerySet,
+  GLOBE_PANE_ID,
   normalizePaneAssignments,
   paneCountForLayout,
+  resolveEffectiveLayout,
   tickSimulatedQuery,
 } from "../src/query-workspace.ts";
 import {
@@ -260,16 +262,25 @@ test("query workspace supports custom queries, best-effort rate tiers, and 1 / 1
   assert.equal(custom.label, "orbit-fast-hosts");
   assert.equal(custom.rate, "fast");
 
-  // Layout pane counts: 1, 1|1 (2), 1/1 (2), 1|2 (3: left half + right split in 2), 2x2 (4)
+  // Layout pane counts & responsive auto default (top/bottom mobile, left/right wide)
+  assert.equal(resolveEffectiveLayout("auto", 390), "1/1");
+  assert.equal(resolveEffectiveLayout("auto", 1280), "1|1");
+  assert.equal(resolveEffectiveLayout("1|2", 390), "1|2");
   assert.equal(paneCountForLayout("1"), 1);
   assert.equal(paneCountForLayout("1|1"), 2);
   assert.equal(paneCountForLayout("1/1"), 2);
   assert.equal(paneCountForLayout("1|2"), 3);
   assert.equal(paneCountForLayout("2x2"), 4);
 
-  const panes3 = normalizePaneAssignments([queries[0].id], queries, "1|2");
+  // Globe is a first-class panel alongside queries
+  const defaultTwo = normalizePaneAssignments([], queries, "1|1");
+  assert.equal(defaultTwo[0], GLOBE_PANE_ID);
+  assert.equal(defaultTwo.length, 2);
+
+  const panes3 = normalizePaneAssignments([GLOBE_PANE_ID, queries[0].id], queries, "1|2");
   assert.equal(panes3.length, 3);
-  assert.equal(new Set(panes3).size, 3, "split panes default to distinct queries");
+  assert.equal(panes3[0], GLOBE_PANE_ID);
+  assert.equal(new Set(panes3).size, 3, "split panes default to distinct panels");
 
   const panes4 = normalizePaneAssignments(panes3, queries, "2x2");
   assert.equal(panes4.length, 4);

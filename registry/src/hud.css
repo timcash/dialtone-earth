@@ -1,6 +1,6 @@
 :root {
   --bg: #0e0e0e;
-  --panel: rgba(14, 14, 14, 0.92);
+  --panel: #121212;
   --fg: #f0f0f0;
   --muted: #9e9e9e;
   --line: #333333;
@@ -14,7 +14,7 @@
 
 :root[data-theme="light"] {
   --bg: #f2f2f2;
-  --panel: rgba(244, 244, 244, 0.94);
+  --panel: #f7f7f7;
   --fg: #121212;
   --muted: #555555;
   --line: #c4c4c4;
@@ -52,11 +52,146 @@ a {
   text-decoration: none;
 }
 
+/* Full-app tiling window manager */
+.app-wm-shell {
+  display: flex;
+  flex-direction: column;
+}
+
+.hud-shell.is-config-open .app-window-grid,
+.hud-shell.is-config-open .app-bottom-bar {
+  opacity: 0.22;
+  pointer-events: none;
+}
+
+.app-window-grid {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: grid;
+  background: var(--line);
+  gap: 1px;
+}
+
+.earth-split-grid[data-layout="1"] {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+}
+
+.earth-split-grid[data-layout="1|1"] {
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr;
+}
+
+.earth-split-grid[data-layout="1/1"] {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr 1fr;
+}
+
+.earth-split-grid[data-layout="1|2"],
+.earth-split-grid[data-layout="2x2"] {
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+}
+
+.earth-split-grid[data-layout="1|2"] .earth-pane:nth-child(1) {
+  grid-column: 1;
+  grid-row: 1 / 3;
+}
+
+.earth-split-grid[data-layout="1|2"] .earth-pane:nth-child(2) {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.earth-split-grid[data-layout="1|2"] .earth-pane:nth-child(3) {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+.earth-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--panel);
+}
+
+.earth-pane.is-focused .earth-pane-head {
+  border-top: 2px solid var(--fg);
+}
+
+.earth-pane-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+  border-top: 2px solid transparent;
+  background: var(--bg);
+}
+
+.pane-head-left,
+.pane-head-right,
+.earth-bar-left,
+.earth-bar-tabs,
+.earth-bar-right {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.pane-num {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.pane-title {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.pane-source {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+}
+
+.pane-source.is-ch {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.pane-source.is-cf {
+  color: var(--cf);
+  border-color: var(--cf);
+}
+
+.pane-stats {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Globe inside a window panel */
+.globe-pane-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.globe-pane-mount,
 .globe-stage {
-  position: fixed;
+  position: absolute;
   inset: 0;
-  z-index: 1;
-  transition: opacity 0.2s ease;
+  width: 100%;
+  height: 100%;
 }
 
 .globe-stage canvas {
@@ -71,65 +206,17 @@ a {
   cursor: grabbing;
 }
 
-.hud-shell.is-table-minimized .earth-split-grid {
-  display: none;
-}
-
-.hud-shell.is-table-minimized .earth-table-bar {
-  border-bottom: none;
-}
-
-.hud-shell.is-table-fullscreen .globe-stage,
-.hud-shell.is-config-open .globe-stage {
-  opacity: 0.22;
-  pointer-events: none;
-}
-
-.hud-shell.is-config-open .bottom-table-dock {
-  display: none;
-}
-
-.hud-shell.is-table-fullscreen .tour-captions {
-  display: none;
-}
-
-.hud-shell.is-table-fullscreen .bottom-table-dock {
-  inset: 0;
-}
-
-.hud-shell.is-table-fullscreen .earth-table-frame {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  background: rgba(14, 14, 14, 0.72);
-  border-top: none;
-}
-
-:root[data-theme="light"] .hud-shell.is-table-fullscreen .earth-table-frame {
-  background: rgba(244, 244, 244, 0.78);
-}
-
-.hud-shell.is-table-fullscreen .earth-split-grid {
-  flex: 1;
-  height: auto;
-  min-height: 0;
-}
-
 .tour-captions {
-  position: fixed;
-  top: 18px;
-  left: 20px;
-  max-width: min(680px, calc(100vw - 40px));
+  position: absolute;
+  top: 12px;
+  left: 14px;
+  max-width: min(560px, calc(100% - 28px));
   z-index: 5;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
   pointer-events: none;
-}
-
-.tour-captions[hidden] {
-  display: none;
 }
 
 .cc-head-row {
@@ -144,42 +231,40 @@ a {
   align-items: center;
   gap: 4px;
   pointer-events: auto;
-  background: var(--panel);
+  background: rgba(14, 14, 14, 0.88);
 }
 
 .cc-line {
-  background: var(--panel);
+  background: rgba(14, 14, 14, 0.88);
   padding: 3px 8px;
+}
+
+:root[data-theme="light"] .cc-line,
+:root[data-theme="light"] .cc-controls {
+  background: rgba(244, 244, 244, 0.92);
 }
 
 .cc-kicker {
   font-size: 12px;
   font-weight: 700;
-  letter-spacing: 0.06em;
   color: var(--warn);
 }
 
 .cc-headline {
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 700;
 }
 
 .cc-body {
-  font-size: 15px;
+  font-size: 14px;
   color: var(--muted);
 }
 
-.bottom-table-dock {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 6;
-}
-
-.earth-table-frame {
-  background: var(--panel);
+/* Bottom workspace bar */
+.app-bottom-bar {
+  flex-shrink: 0;
   border-top: 1px solid var(--line);
+  background: var(--bg);
 }
 
 .earth-table-bar {
@@ -189,19 +274,6 @@ a {
   justify-content: space-between;
   gap: 8px 12px;
   padding: 8px 14px;
-  border-bottom: 1px solid var(--line);
-}
-
-.earth-bar-left,
-.earth-bar-tabs,
-.earth-bar-right,
-.tbl-split-group,
-.pane-head-left,
-.pane-head-right {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
 }
 
 .tbl-brand {
@@ -267,107 +339,7 @@ a {
   color: var(--warn);
 }
 
-/* Split layouts: 1, 1|1, 1/1, 1|2 (left half + right split in 2), 2x2 */
-.earth-split-grid {
-  display: grid;
-  height: min(42dvh, 380px);
-  background: var(--line);
-  gap: 1px;
-}
-
-.earth-split-grid[data-layout="1"] {
-  grid-template-columns: 1fr;
-  grid-template-rows: 1fr;
-  height: min(36dvh, 320px);
-}
-
-.earth-split-grid[data-layout="1|1"] {
-  grid-template-columns: 1fr 1fr;
-  grid-template-rows: 1fr;
-}
-
-.earth-split-grid[data-layout="1/1"] {
-  grid-template-columns: 1fr;
-  grid-template-rows: 1fr 1fr;
-}
-
-.earth-split-grid[data-layout="1|2"] {
-  grid-template-columns: 1fr 1fr;
-  grid-template-rows: 1fr 1fr;
-}
-
-.earth-split-grid[data-layout="1|2"] .earth-pane:nth-child(1) {
-  grid-column: 1;
-  grid-row: 1 / 3;
-}
-
-.earth-split-grid[data-layout="1|2"] .earth-pane:nth-child(2) {
-  grid-column: 2;
-  grid-row: 1;
-}
-
-.earth-split-grid[data-layout="1|2"] .earth-pane:nth-child(3) {
-  grid-column: 2;
-  grid-row: 2;
-}
-
-.earth-split-grid[data-layout="2x2"] {
-  grid-template-columns: 1fr 1fr;
-  grid-template-rows: 1fr 1fr;
-}
-
-.earth-pane {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  background: var(--panel);
-}
-
-.earth-pane.is-focused .earth-pane-head {
-  border-top: 2px solid var(--fg);
-}
-
-.earth-pane-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px 10px;
-  padding: 5px 10px;
-  border-bottom: 1px solid var(--line);
-  border-top: 2px solid transparent;
-  background: var(--bg);
-}
-
-.pane-num {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--muted);
-}
-
-.pane-source {
-  font-size: 11px;
-  font-weight: 700;
-  padding: 2px 6px;
-  border: 1px solid var(--line);
-}
-
-.pane-source.is-ch {
-  color: var(--ok);
-  border-color: var(--ok);
-}
-
-.pane-source.is-cf {
-  color: var(--cf);
-  border-color: var(--cf);
-}
-
-.pane-stats {
-  font-size: 12px;
-  color: var(--muted);
-}
-
+/* Query tables inside panes */
 .earth-table-scroll {
   flex: 1;
   min-height: 0;
@@ -444,22 +416,17 @@ a {
   background: var(--err);
 }
 
-.pane-title {
-  font-size: 13px;
-  font-weight: 700;
-}
-
-/* Visual Config Page (single-button layout + query setup over faded globe) */
+/* Visual Config Page */
 .config-page {
   position: fixed;
   inset: 0;
   z-index: 10;
-  background: rgba(14, 14, 14, 0.84);
+  background: rgba(14, 14, 14, 0.88);
   overflow: auto;
 }
 
 :root[data-theme="light"] .config-page {
-  background: rgba(244, 244, 244, 0.88);
+  background: rgba(244, 244, 244, 0.92);
 }
 
 .config-page[hidden] {

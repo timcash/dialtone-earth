@@ -7,6 +7,20 @@ export type RateTier = "base" | "slow" | "med" | "fast";
 
 export type SplitLayout = "1" | "1|1" | "1/1" | "1|2" | "2x2";
 
+export type LayoutPreference = "auto" | SplitLayout;
+
+export const GLOBE_PANE_ID = "globe";
+
+export const MOBILE_BREAKPOINT_PX = 900;
+
+export function resolveEffectiveLayout(
+  pref: LayoutPreference,
+  viewportWidth: number,
+): SplitLayout {
+  if (pref !== "auto") return pref;
+  return viewportWidth < MOBILE_BREAKPOINT_PX ? "1/1" : "1|1";
+}
+
 export interface SavedQuery {
   id: string;
   label: string;
@@ -235,9 +249,9 @@ export function tickSimulatedQuery(
 }
 
 /**
- * Ensures paneAssignments has `paneCount` valid query IDs drawn from `queries`,
- * picking distinct queries where possible so split layouts immediately show
- * complementary views (e.g., networks | hosts | tests).
+ * Ensures paneAssignments has `paneCount` valid content IDs ("globe" or a
+ * SavedQuery.id), defaulting pane #1 to "globe" when empty so the globe is a
+ * first-class window panel alongside query tables.
  */
 export function normalizePaneAssignments(
   current: string[],
@@ -245,14 +259,17 @@ export function normalizePaneAssignments(
   layout: SplitLayout,
 ): string[] {
   const count = paneCountForLayout(layout);
-  if (queries.length === 0) return [];
+  if (queries.length === 0) return Array.from({ length: count }, () => GLOBE_PANE_ID);
   const validIds = new Set(queries.map((q) => q.id));
+  validIds.add(GLOBE_PANE_ID);
   const next: string[] = [];
 
   for (let i = 0; i < count; i += 1) {
     const existing = current[i];
     if (existing && validIds.has(existing)) {
       next.push(existing);
+    } else if (i === 0 && !next.includes(GLOBE_PANE_ID)) {
+      next.push(GLOBE_PANE_ID);
     } else {
       const unused = queries.find((q) => !next.includes(q.id));
       next.push((unused ?? queries[i % queries.length]).id);
