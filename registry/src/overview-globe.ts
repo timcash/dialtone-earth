@@ -50,11 +50,16 @@ type ArcVisual = {
   baseOpacity: number;
 };
 
+export type OverviewGlobeController = {
+  dispose: () => void;
+  focusTarget: (networkSlug: string | null, nodeName?: string | null) => void;
+};
+
 export async function mountOverviewGlobe(
   container: HTMLElement,
   networks: OverviewNetwork[],
   onFocus: (networkSlug: string) => void,
-): Promise<() => void> {
+): Promise<OverviewGlobeController> {
   const landCells = await loadLandCells();
   const globe = new OverviewGlobe(
     container,
@@ -62,7 +67,11 @@ export async function mountOverviewGlobe(
     landCells,
     onFocus,
   );
-  return () => globe.dispose();
+  return {
+    dispose: () => globe.dispose(),
+    focusTarget: (networkSlug, nodeName) =>
+      globe.focusTarget(networkSlug, nodeName ?? null),
+  };
 }
 
 async function loadLandCells(): Promise<string[]> {
@@ -171,6 +180,33 @@ class OverviewGlobe {
     this.resizeObserver.observe(container);
     this.resize();
     this.animate();
+  }
+
+  focusTarget(networkSlug: string | null, nodeName: string | null): void {
+    if (this.stops.length === 0) return;
+    if (!networkSlug) {
+      this.interrupted = false;
+      this.beginTransition(0, performance.now());
+      return;
+    }
+    const networkIndex = this.networks.findIndex(
+      (item) => item.slug === networkSlug,
+    );
+    if (networkIndex < 0) return;
+    const nodeIndex = nodeName
+      ? this.networks[networkIndex].snapshot.nodes.findIndex(
+          (node) => node.name === nodeName,
+        )
+      : -1;
+    const stopIndex = this.stops.findIndex(
+      (stop) =>
+        stop.networkIndex === networkIndex &&
+        stop.nodeIndex === (nodeIndex >= 0 ? nodeIndex : null),
+    );
+    if (stopIndex >= 0) {
+      this.interrupted = false;
+      this.beginTransition(stopIndex, performance.now());
+    }
   }
 
   dispose(): void {
