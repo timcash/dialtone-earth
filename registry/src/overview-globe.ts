@@ -131,7 +131,7 @@ class OverviewGlobe {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.domElement.setAttribute(
       "aria-label",
-      "Interactive H3 globe touring all dialtone networks",
+      "Interactive H3 Earth globe",
     );
     container.appendChild(this.renderer.domElement);
 
@@ -521,6 +521,9 @@ class OverviewGlobe {
     this.frameId = requestAnimationFrame(this.animate);
     const now = performance.now();
     this.updateTour(now);
+    if (this.stops.length === 0 && !this.reducedMotion && !this.interrupted) {
+      this.globe.rotation.y += 0.0007;
+    }
     this.cloudMaterial.uniforms.uTime.value = now / 1000;
     const pulse = 1.3 + Math.sin(now * 0.006) * 0.04;
     this.markers.forEach((marker) => {
