@@ -109,6 +109,17 @@ a {
   grid-row: 2;
 }
 
+@media (max-width: 899px) {
+  .earth-split-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .earth-split-grid .earth-pane {
+    grid-column: auto !important;
+    grid-row: auto !important;
+  }
+}
+
 .earth-pane {
   display: flex;
   flex-direction: column;

@@ -432,53 +432,83 @@ export class CdpClient {
     }
   }
 
+  async openConfigMenu() {
+    const isOpen = await this.eval(
+      `Boolean(document.querySelector('#config-page:not([hidden]) [data-testid="config-done"]'))`,
+    );
+    if (!isOpen) {
+      await this.click('[data-testid="open-config"]', "menu button");
+      await this.waitFor(
+        "menu overlay open",
+        `document.querySelector('#config-page:not([hidden]) [data-testid="config-done"]') !== null && document.querySelector('#config-page:not([hidden]) [data-testid="cfg-query-table"]') !== null`,
+      );
+    }
+  }
+
+  async closeConfigMenu() {
+    const isOpen = await this.eval(
+      `Boolean(document.querySelector('#config-page:not([hidden]) [data-testid="config-done"]'))`,
+    );
+    if (isOpen) {
+      await this.click('#config-page:not([hidden]) [data-testid="config-done"]', "menu done button");
+      await this.waitFor(
+        "menu overlay closed",
+        `document.querySelector('#config-page:not([hidden])') === null`,
+      );
+    }
+  }
+
   async pickBottomTab(substr, label) {
-    const matchExpr = `(() => {
-      const target = ${JSON.stringify(substr.toLowerCase())};
-      const btns = Array.from(document.querySelectorAll('[data-pick-content]'));
-      return btns.find((b) => {
-        const txt = (b.textContent || '').trim().toLowerCase();
+    // Window selection is done through the menu overlay (`open-config`).
+    const target = substr.toLowerCase();
+    await this.openConfigMenu();
+    // Focus pane #2 if present (so pane #1 stays 3D globe), else pane #1
+    const hasPane1 = await this.eval(
+      `document.querySelector('#config-page:not([hidden]) [data-testid="cfg-pane-1"]') !== null`,
+    );
+    if (hasPane1) {
+      await this.click('#config-page:not([hidden]) [data-testid="cfg-pane-1"]', "pane #2 slot");
+    } else {
+      await this.click('#config-page:not([hidden]) [data-testid="cfg-pane-0"]', "pane #1 slot");
+    }
+    const assigned = await this.eval(`(() => {
+      const target = ${JSON.stringify(target)};
+      const rows = Array.from(document.querySelectorAll('#config-page:not([hidden]) [data-testid="cfg-query-table"] tbody tr'));
+      const row = rows.find((r) => {
+        const txt = (r.querySelector('.cfg-q-name')?.textContent || '').trim().toLowerCase();
         if (target === 'host') return /(?:^|[\\s:])host$/.test(txt);
         return txt.includes(target);
-      }) || null;
-    })()`;
-    await this.waitFor(label || `bottom tab ${substr}`, `${matchExpr} !== null`);
-    if (this.headed) {
-      await this.eval(`(() => {
-        const btn = ${matchExpr};
-        if (!btn) return false;
-        btn.setAttribute("data-cdp-spot-tab", "1");
-        return true;
-      })()`);
-      await this.spotlight('[data-cdp-spot-tab="1"]', `TAB: ${label || substr}`, Math.min(320, this.stepMs));
-      await this.pulseClick('[data-cdp-spot-tab="1"]');
-    }
-    const clicked = await this.eval(`(() => {
-      const btn = ${matchExpr};
-      if (!btn) return false;
-      btn.removeAttribute("data-cdp-spot-tab");
+      });
+      if (!row) return null;
+      const btn = row.querySelector('[data-cfg-assign]');
+      if (!btn) return null;
       btn.click();
-      return btn.textContent.trim();
+      return (row.querySelector('.cfg-q-name')?.textContent || '').trim();
     })()`);
-    assert.ok(clicked, `Could not find bottom tab matching ${substr}`);
-    return clicked;
+    assert.ok(assigned, `Could not find window set matching ${substr} in menu`);
+    await sleep(Math.min(200, this.stepMs));
+    await this.closeConfigMenu();
+    return assigned;
   }
 
   async ensureQueryTab(kind) {
+    const target = kind.toLowerCase();
+    await this.openConfigMenu();
     const exists = await this.eval(`(() => {
-      const target = ${JSON.stringify(kind.toLowerCase())};
-      return Array.from(document.querySelectorAll('[data-pick-content]')).some((b) => {
-        const txt = (b.textContent || '').trim().toLowerCase();
+      const target = ${JSON.stringify(target)};
+      const rows = Array.from(document.querySelectorAll('#config-page:not([hidden]) [data-testid="cfg-query-table"] tbody tr'));
+      return rows.some((r) => {
+        const txt = (r.querySelector('.cfg-q-name')?.textContent || '').trim().toLowerCase();
         if (target === 'host') return /(?:^|[\\s:])host$/.test(txt);
         return txt.includes(target);
       });
     })()`);
-    if (exists) return false;
-    await this.click('[data-testid="open-config"]', "config button");
-    await this.click(`[data-testid="cfg-add-${kind}"]`, `add + ${kind} query`);
-    await sleep(Math.min(300, this.stepMs));
-    await this.click('[data-testid="config-done"]', "config done button");
-    return true;
+    if (!exists) {
+      await this.click(`#config-page:not([hidden]) [data-testid="cfg-add-${kind}"]`, `add + ${kind} query`);
+      await sleep(Math.min(250, this.stepMs));
+    }
+    await this.closeConfigMenu();
+    return !exists;
   }
 
   /** Close only the CDP WebSocket connection — never terminates the browser. */
@@ -673,19 +703,11 @@ export async function ensurePersistentBrowser(opts = {}) {
 
       if (!reused || forceArrange || shouldCreateDashboard) {
         const bCdp = getBrowserCdp();
-        if (dashboardTarget?.id) {
-          await setWindowBounds(bCdp, dashboardTarget.id, {
-            left: 10,
-            top: 20,
-            width: 530,
-            height: 980,
-          });
-        }
         await setWindowBounds(bCdp, appTarget.id, {
-          left: dashboardTarget?.id ? 545 : 60,
+          left: 40,
           top: 20,
-          width: dashboardTarget?.id ? 1365 : 1440,
-          height: 980,
+          width: 1440,
+          height: 940,
         });
       }
     }

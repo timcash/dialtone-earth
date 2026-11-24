@@ -187,12 +187,12 @@ async function isSignedInLive(cdp) {
 }
 
 async function dismissOverlays(cdp) {
-  // If a prior run left Config or Camera Studio open, close it cleanly.
+  // If a prior run left Menu or Camera Studio visible, close it cleanly.
   try {
     await cdp.eval(`(() => {
-      const cfgDone = document.querySelector('[data-testid="config-done"]');
+      const cfgDone = document.querySelector('#config-page:not([hidden]) [data-testid="config-done"]');
       if (cfgDone) cfgDone.click();
-      const camDone = document.querySelector('[data-testid="camera-done"]');
+      const camDone = document.querySelector('#camera-page:not([hidden]) [data-testid="camera-done"]');
       if (camDone) camDone.click();
       return true;
     })()`);
@@ -382,12 +382,33 @@ async function step01SignedOut(cdp) {
   // verify unauthenticated containment via fresh cookieless fetch without destroying the live session.
   await dismissOverlays(cdp);
   if (KEEP_SIGNED_IN && process.env.QA_FORCE_RELOGIN !== "1" && (await isSignedInLive(cdp))) {
+    if (IS_STAGING_TEST) {
+      // Reload freshly built staging dist so wide & mobile tabs reflect the latest code edits.
+      await cdp.send("Page.reload", { ignoreCache: true });
+      await cdp.waitFor(
+        `reloaded LIVE ${NETWORK_LABEL} staging preview`,
+        `document.body.innerText.includes("LIVE") && document.querySelector('[href="/auth/logout"]') !== null`,
+        15_000,
+      );
+      try {
+        const listResp = await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`, { signal: AbortSignal.timeout(1_500) });
+        const pages = listResp.ok ? await listResp.json() : [];
+        const mob = Array.isArray(pages) ? pages.find((p) => String(p.url || "").includes("#mobile-preview")) : null;
+        if (mob?.webSocketDebuggerUrl) {
+          const mobCdp = new CdpClient(mob.webSocketDebuggerUrl, { headed: false });
+          await mobCdp.send("Page.reload", { ignoreCache: true });
+          mobCdp.disconnect();
+        }
+      } catch {
+        // best-effort mobile preview reload
+      }
+    }
     const anonHome = await fetch(`${TARGET_ORIGIN}/`);
     assert.equal(anonHome.status, 200, "signed-out GET / should return 200");
     const anonHtml = await anonHome.text();
     assert.ok(!anonHtml.includes("vm-asia"), "real metal node leaked in signed-out HTML");
-    await cdp.showBanner("01 Signed-out 401 checks passed (preserving LIVE metal session)");
-    console.log("  [PASS 01] 401 default-deny on protected routes + zero signed-out leaks (preserved existing LIVE metal session)");
+    await cdp.showBanner(`01 Signed-out 401 checks passed (preserving LIVE ${NETWORK_LABEL} session)`);
+    console.log(`  [PASS 01] 401 default-deny on protected routes + zero signed-out leaks (preserved existing LIVE ${NETWORK_LABEL} session)`);
     await sleep(Math.min(400, STEP_MS));
     return;
   }
@@ -638,11 +659,11 @@ async function step08CameraTsAndReload(cdp) {
   await cdp.click('[data-testid="open-camera"]', "camera button");
   await cdp.waitFor(
     "camera studio open with syntax highlight",
-    `document.querySelector('[data-testid="cam-preset-highest-p95"]') !== null && document.querySelectorAll('[data-testid="camera-ts-highlight"] .tok-kw').length > 0`,
+    `document.querySelector('#camera-page:not([hidden]) [data-testid="cam-preset-highest-p95"]') !== null && document.querySelectorAll('#camera-page:not([hidden]) [data-testid="camera-ts-highlight"] .tok-kw').length > 0`,
   );
-  await cdp.click('[data-testid="cam-preset-highest-cpu"]', "highest CPU preset");
+  await cdp.click('#camera-page:not([hidden]) [data-testid="cam-preset-highest-cpu"]', "highest CPU preset");
   await sleep(Math.min(350, STEP_MS));
-  await cdp.click('[data-testid="cam-preset-highest-p95"]', "highest p95 preset");
+  await cdp.click('#camera-page:not([hidden]) [data-testid="cam-preset-highest-p95"]', "highest p95 preset");
   await sleep(Math.min(350, STEP_MS));
 
   const customTsPolicy = [

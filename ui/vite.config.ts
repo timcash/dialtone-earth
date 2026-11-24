@@ -379,14 +379,6 @@ async function captureSingleCdpFrame(targetId = "", viewport = ""): Promise<Buff
             params: { width: 390, height: 844, deviceScaleFactor: 2, mobile: true },
           }),
         );
-      } else if (viewport === "wide") {
-        ws.send(
-          JSON.stringify({
-            id: 9,
-            method: "Emulation.setDeviceMetricsOverride",
-            params: { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false },
-          }),
-        );
       }
       ws.send(JSON.stringify({ id: 1, method: "Page.captureScreenshot", params: { format: "jpeg", quality: 78 } }));
     });
@@ -473,21 +465,6 @@ async function streamCdpViewport(
           id: 5,
           method: "Emulation.setTouchEmulationEnabled",
           params: { enabled: true },
-        }),
-      );
-    } else if (viewport === "wide") {
-      ws.send(
-        JSON.stringify({
-          id: 4,
-          method: "Emulation.setDeviceMetricsOverride",
-          params: { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false },
-        }),
-      );
-      ws.send(
-        JSON.stringify({
-          id: 5,
-          method: "Emulation.setTouchEmulationEnabled",
-          params: { enabled: false },
         }),
       );
     }

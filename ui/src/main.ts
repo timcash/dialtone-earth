@@ -161,8 +161,12 @@ function applyTheme(): void {
 
 function resolveEffectiveLayout(): SplitLayout {
   if (maximizedPane !== null) return "1";
+  // Mobile viewports strictly stay single-column ("1" or stacked "1/1")
+  if (window.innerWidth < 900) {
+    return layoutPref === "1" ? "1" : "1/1";
+  }
   if (layoutPref !== "auto") return layoutPref;
-  return window.innerWidth < 900 ? "1/1" : "1|2";
+  return "1|2";
 }
 
 function paneCountFor(layout: SplitLayout): number {
@@ -370,7 +374,7 @@ function renderWorkspace(): void {
     }
   });
 
-  renderBottomBar(bottomBar, catalog, assigned, runningTest);
+  renderBottomBar(bottomBar, runningTest);
   if (menuOpen) {
     menuEl.hidden = false;
     renderMenuOverlay(menuEl, catalog, assigned);
@@ -567,8 +571,6 @@ function renderLogPaneBody(slot: HTMLElement): void {
 
 function renderBottomBar(
   bar: HTMLElement,
-  catalog: WorkspaceContent[],
-  assigned: WorkspaceContent[],
   runningTest: TestRow | undefined,
 ): void {
   const passed = tests.filter((t) => normalizeStatus(t.status) === "pass").length;
@@ -604,8 +606,6 @@ function renderBottomBar(
           ? "is-err"
           : "";
 
-  const shownIds = new Set(assigned.map((a) => a.id));
-  const focusedId = assigned[focusedPane]?.id || "";
   const deployInfo = stagingEnv.deploy;
   const deployReady = Boolean(deployInfo?.ready) && !busy;
   const gatePillClass =
@@ -671,19 +671,6 @@ function renderBottomBar(
           ${escapeHtml(gatePillText)}
         </span>
       </div>
-      <div class="earth-bar-tabs">
-        ${catalog
-          .map((item) => {
-            const cls = [
-              "tbl-tab",
-              item.id === focusedId ? "is-active" : shownIds.has(item.id) ? "is-shown" : "",
-            ]
-              .filter(Boolean)
-              .join(" ");
-            return `<button type="button" class="${cls}" data-pick-content="${escapeHtml(item.id)}">${escapeHtml(item.label)}</button>`;
-          })
-          .join("")}
-      </div>
       <div class="earth-bar-right">
         <button type="button" class="tbl-chip" data-testid="add-browser-btn" title="Open an additional projected Chrome browser tab">+ browser</button>
         <button type="button" class="tbl-chip" data-testid="run-browser-suite" ${busy ? "disabled" : ""}>run browser</button>
@@ -718,16 +705,6 @@ function renderBottomBar(
   bar.querySelector<HTMLButtonElement>("[data-testid='open-menu']")?.addEventListener("click", () => {
     menuOpen = !menuOpen;
     renderWorkspace();
-  });
-
-  bar.querySelectorAll<HTMLButtonElement>("[data-pick-content]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const id = btn.dataset.pickContent || "";
-      if (!id) return;
-      paneContents[focusedPane] = id;
-      saveWorkspacePrefs();
-      renderWorkspace();
-    });
   });
 }
 

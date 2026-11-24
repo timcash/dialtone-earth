@@ -459,10 +459,6 @@ function visibleQueryObjects(): SavedQuery[] {
   return out;
 }
 
-function isContentVisible(contentId: string): boolean {
-  return visiblePaneContents().includes(contentId);
-}
-
 function currentGlobeLayers(): GlobeQueryLayers {
   return buildQueryDrivenGlobeLayers(
     state.networks,
@@ -1584,27 +1580,6 @@ function renderBottomBar(): void {
       ? `<a class="tbl-chip" data-testid="auth-login" href="${escapeHtml(state.session.login_url)}">sign in</a>`
       : "";
 
-  const activeContent = state.paneContents[state.activePaneIndex];
-  const globeChipCls =
-    activeContent === GLOBE_PANE_ID
-      ? "is-active"
-      : isContentVisible(GLOBE_PANE_ID)
-        ? "is-shown"
-        : "";
-  const globeChip = `<button type="button" class="tbl-tab ${globeChipCls}" data-pick-content="${GLOBE_PANE_ID}" data-testid="pick-globe">globe</button>`;
-
-  const queryChips = state.queries
-    .map((q) => {
-      const cls =
-        activeContent === q.id
-          ? "is-active"
-          : isContentVisible(q.id)
-            ? "is-shown"
-            : "";
-      return `<button type="button" class="tbl-tab ${cls}" data-pick-content="${escapeHtml(q.id)}" title="${escapeHtml(q.source)} · rate=${escapeHtml(q.rate)}">${escapeHtml(q.label)}</button>`;
-    })
-    .join("");
-
   const liveBannerBar = state.liveError
     ? `<div class="tbl-banner-bar is-warn">${escapeHtml(state.liveError)}</div>`
     : liveCtrl?.banner
@@ -1623,14 +1598,10 @@ function renderBottomBar(): void {
           <span class="tbl-cadence" data-testid="mesh-cadence">${escapeHtml(trafficSummary)}</span>
           <span class="tbl-cadence" data-testid="camera-readout">${escapeHtml(camBadge)}</span>
         </div>
-        <div class="earth-bar-tabs" role="tablist" aria-label="Panels and query set">
-          ${globeChip}
-          ${queryChips}
-        </div>
         <div class="earth-bar-right">
           <button type="button" class="tbl-chip ${isMax ? "is-active" : ""}" data-action="toggle-fullscreen" data-testid="toggle-fullscreen" aria-pressed="${isMax}">${isMax ? "split" : "full"}</button>
           <button type="button" class="tbl-chip ${state.cameraOpen ? "is-active" : ""}" data-action="open-camera" data-testid="open-camera">camera</button>
-          <button type="button" class="tbl-chip ${state.configOpen ? "is-active" : ""}" data-action="open-config" data-testid="open-config">config</button>
+          <button type="button" class="tbl-chip ${state.configOpen ? "is-active" : ""}" data-action="open-config" data-testid="open-config">menu</button>
           ${authAction}
         </div>
       </div>
