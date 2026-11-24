@@ -119,20 +119,28 @@ export async function recordUserPresence(
   let viewingView = opts.viewingView ?? "overview";
   let viewingNode = opts.viewingNode ?? null;
 
-  if (kv && opts.preserveExistingView) {
-    const existingRaw = await kv.get(key);
-    if (existingRaw) {
-      try {
-        const existing = JSON.parse(existingRaw) as Partial<StoredPresenceRecord>;
-        if (typeof existing.viewingView === "string") {
-          viewingView = normalizePresenceView(existing.viewingView);
+  let existingLastSeenMs = 0;
+  let existingRecord: Partial<StoredPresenceRecord> | null = null;
+  if (kv) {
+    try {
+      const existingRaw = await kv.get(key);
+      if (existingRaw) {
+        existingRecord = JSON.parse(existingRaw) as Partial<StoredPresenceRecord>;
+        if (opts.preserveExistingView) {
+          if (typeof existingRecord.viewingView === "string") {
+            viewingView = normalizePresenceView(existingRecord.viewingView);
+          }
+          if (existingRecord.viewingNode !== undefined) {
+            viewingNode = normalizePresenceNode(existingRecord.viewingNode);
+          }
         }
-        if (existing.viewingNode !== undefined) {
-          viewingNode = normalizePresenceNode(existing.viewingNode);
+        if (typeof existingRecord.lastSeenAt === "string") {
+          const parsedMs = Date.parse(existingRecord.lastSeenAt);
+          if (Number.isFinite(parsedMs)) existingLastSeenMs = parsedMs;
         }
-      } catch {
-        // Ignore malformed record and overwrite cleanly.
       }
+    } catch {
+      // Ignore transient KV read or parse errors.
     }
   }
 
@@ -150,10 +158,23 @@ export async function recordUserPresence(
     lastSeenAt: new Date(opts.nowSec * 1000).toISOString(),
   };
 
-  if (kv) {
-    await kv.put(key, JSON.stringify(record), {
-      expirationTtl: PRESENCE_TTL_SEC,
-    });
+  // Throttle KV writes per session key (Cloudflare KV allows 1 write/sec per key).
+  // Skip redundant writes when the same session/view/node was persisted within 30s.
+  const sameState =
+    existingRecord !== null &&
+    existingRecord.viewingView === record.viewingView &&
+    (existingRecord.viewingNode ?? null) === record.viewingNode &&
+    existingRecord.location === record.location;
+  const ageSec = existingLastSeenMs > 0 ? opts.nowSec - existingLastSeenMs / 1000 : Infinity;
+
+  if (kv && (!sameState || ageSec >= 30)) {
+    try {
+      await kv.put(key, JSON.stringify(record), {
+        expirationTtl: PRESENCE_TTL_SEC,
+      });
+    } catch {
+      // Never fail /api/mesh/users or /api/mesh/presence with HTTP 500 on a transient KV 429.
+    }
   }
   return record;
 }
@@ -164,7 +185,11 @@ export async function clearUserPresence(
   sessionId: string | undefined,
 ): Promise<void> {
   if (!kv || !sessionId) return;
-  await kv.delete(presenceKey(host, sessionId));
+  try {
+    await kv.delete(presenceKey(host, sessionId));
+  } catch {
+    // Best-effort cleanup on sign-out.
+  }
 }
 
 export async function listNetworkPresence(
@@ -178,18 +203,22 @@ export async function listNetworkPresence(
   const prefix = `presence:${host.toLowerCase()}:`;
 
   if (kv && typeof kv.list === "function") {
-    const listed = await kv.list({ prefix });
-    for (const item of listed.keys) {
-      const raw = await kv.get(item.name);
-      if (!raw) continue;
-      try {
-        const parsed = JSON.parse(raw) as StoredPresenceRecord;
-        if (parsed.subject && parsed.sessionId) {
-          records.push(parsed);
+    try {
+      const listed = await kv.list({ prefix });
+      for (const item of listed.keys) {
+        const raw = await kv.get(item.name);
+        if (!raw) continue;
+        try {
+          const parsed = JSON.parse(raw) as StoredPresenceRecord;
+          if (parsed.subject && parsed.sessionId) {
+            records.push(parsed);
+          }
+        } catch {
+          // Skip malformed presence record.
         }
-      } catch {
-        // Skip unreadable record
       }
+    } catch {
+      // Fall back cleanly to fallbackCurrent if KV list/get transiently fails.
     }
   }
 
