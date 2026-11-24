@@ -46,10 +46,149 @@ main.synced-workspace {
 }
 
 .viewport-card {
-  border: 1px solid #2d3e31;
+  border: 2px solid #2d3e31;
   background: #0a0c0b;
   overflow: hidden;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  transition: border-color 200ms ease, box-shadow 200ms ease;
+}
+
+.viewport-card.demonstrating {
+  border-color: #38d66b;
+  box-shadow: 0 0 0 2px rgba(56, 214, 107, 0.28), 0 0 36px rgba(56, 214, 107, 0.34);
+}
+
+.viewport-card.deploying {
+  border-color: #f3d27a;
+  box-shadow: 0 0 0 2px rgba(243, 210, 122, 0.28), 0 0 32px rgba(243, 210, 122, 0.28);
+}
+
+.viewport-card.deployed {
+  border-color: #38d66b;
+  box-shadow: 0 0 22px rgba(56, 214, 107, 0.22);
+}
+
+.viewport-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-top: 1px solid #222824;
+  background: #0e1310;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 0.72rem;
+  color: #a6cbb0;
+}
+
+.viewport-foot-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #38d66b;
+  flex-shrink: 0;
+}
+
+.viewport-card.demonstrating .viewport-foot-dot {
+  animation: pulseDot 1s ease-in-out infinite;
+}
+
+.pipeline-bar {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid #2c2c2c;
+  background: #121413;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pipeline-bar.stage-edit,
+.pipeline-bar.stage-testing {
+  border-color: #355e41;
+  background: linear-gradient(90deg, rgba(56, 214, 107, 0.08), #121413 60%);
+}
+
+.pipeline-bar.stage-deploying {
+  border-color: #6b5a25;
+  background: linear-gradient(90deg, rgba(243, 210, 122, 0.12), #121413 60%);
+}
+
+.pipeline-bar.stage-deployed {
+  border-color: #38d66b;
+  background: linear-gradient(90deg, rgba(56, 214, 107, 0.14), #121413 65%);
+}
+
+.pipeline-bar.stage-failed {
+  border-color: #823232;
+  background: linear-gradient(90deg, rgba(255, 102, 102, 0.12), #121413 60%);
+}
+
+.pipeline-steps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.pipe-step {
+  padding: 2px 8px;
+  border: 1px solid #2f2f2f;
+  color: #848484;
+}
+
+.pipe-step.done {
+  color: #8ef0a8;
+  border-color: #295235;
+}
+
+.pipe-step.active {
+  color: #0b140d;
+  background: #38d66b;
+  border-color: #38d66b;
+}
+
+.pipe-step.failed {
+  color: #ff9c9c;
+  border-color: #823232;
+}
+
+.pipe-arrow {
+  color: #555555;
+}
+
+.pipeline-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: #c8c8c8;
+}
+
+.pipe-file {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 0.72rem;
+  color: #7ea8d8;
+  background: #171c22;
+  border: 1px solid #2b3847;
+  padding: 1px 6px;
+}
+
+.pipe-live-link {
+  margin-left: auto;
+  color: #8ef0a8;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+@keyframes pulseDot {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.45); opacity: 0.55; }
 }
 
 .viewport-card.viewport-offline {
@@ -414,7 +553,21 @@ button:disabled {
 }
 
 .test-card.running {
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0.07), transparent 54%);
+  background: linear-gradient(90deg, rgba(56, 214, 107, 0.16), rgba(56, 214, 107, 0.03) 65%);
+  border-left: 4px solid #38d66b;
+  box-shadow: inset 0 0 0 1px rgba(56, 214, 107, 0.35);
+}
+
+.running-pulse {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #38d66b;
+  margin-right: 8px;
+  vertical-align: middle;
+  box-shadow: 0 0 10px #38d66b;
+  animation: pulseDot 0.9s ease-in-out infinite;
 }
 
 .test-card.pass {

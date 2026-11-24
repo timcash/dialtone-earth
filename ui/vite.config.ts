@@ -31,6 +31,7 @@ type TestRecord = {
 type RunOptions = {
   browser: boolean;
   keepSignedIn: boolean;
+  deployOnPass: boolean;
   filter: string;
   dashboardUrl: string;
 };
@@ -56,13 +57,21 @@ function testApiPlugin(): Plugin {
           }
           const browser = parsedUrl.searchParams.get("browser") === "1";
           const keepSignedIn = parsedUrl.searchParams.get("keepSignedIn") === "1";
+          const deployOnPass = parsedUrl.searchParams.get("deployOnPass") === "1";
           const hostHeader = typeof request.headers.host === "string" ? request.headers.host : "127.0.0.1:5174";
           startTests(response, {
             browser,
             keepSignedIn,
+            deployOnPass,
             filter,
             dashboardUrl: `http://${hostHeader}/`,
           });
+          return;
+        }
+        if (pathname === "/api/pipeline" && request.method === "GET") {
+          readPipeline()
+            .then((pipeline) => sendJson(response, pipeline))
+            .catch((error: unknown) => sendError(response, error));
           return;
         }
         if (pathname === "/api/cdp/status" && request.method === "GET") {
@@ -142,6 +151,9 @@ function startTests(response: ServerResponse, opts: RunOptions): void {
   if (opts.browser) {
     extraArgs.push("--browser", "--cdp-port", String(cdpPort), "--dashboard-url", opts.dashboardUrl);
     if (opts.keepSignedIn) extraArgs.push("--keep-signed-in");
+  }
+  if (opts.deployOnPass) {
+    extraArgs.push("--deploy-on-pass");
   }
   if (opts.filter) {
     extraArgs.push("--filter", opts.filter);
@@ -399,6 +411,17 @@ function closeCdpBrowser(_request: IncomingMessage, response: ServerResponse): v
   closer.once("error", (error) => {
     sendError(response, error);
   });
+}
+
+async function readPipeline(): Promise<Record<string, unknown>> {
+  try {
+    const raw = await readFile(resolve(logsDir, "pipeline.json"), "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (isRecord(parsed)) return parsed;
+  } catch {
+    // no pipeline run yet
+  }
+  return { stage: "idle", message: "Ready — edit code or start tests to run and auto-deploy to dialtone.earth" };
 }
 
 async function readTests(): Promise<TestRecord[]> {

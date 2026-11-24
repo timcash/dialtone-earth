@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -40,6 +41,7 @@ Flags:
   test --list              Print the selected test names without running them
   test --browser           Start/reconnect persistent CDP Chrome synced with dashboard
   test --keep-signed-in    Leave Chrome signed into LIVE metal after browser tests
+  test --deploy-on-pass    Auto-deploy to https://dialtone.earth/ if all tests pass
   test --close-browser     Close the persistent CDP Chrome browser and exit
   deploy --live            Build registry/ and deploy live to Cloudflare Workers
   live <status|set|reset|watch|init-token>  Control or watch-deploy dialtone.earth live
@@ -194,6 +196,8 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	list := flags.Bool("list", false, "Print the selected test names without running them")
 	browser := flags.Bool("browser", false, "Start or reconnect persistent CDP Chrome synced with the test dashboard")
 	keepSignedIn := flags.Bool("keep-signed-in", false, "Keep the persistent CDP Chrome browser signed into LIVE metal after tests finish")
+	deployOnPass := flags.Bool("deploy-on-pass", false, "Automatically deploy live to https://dialtone.earth/ if all tests pass")
+	triggerFile := flags.String("trigger-file", "", "Optional edited file label shown in the live pipeline banner")
 	closeBrowser := flags.Bool("close-browser", false, "Close the persistent CDP Chrome browser and exit")
 	cdpPort := flags.Int("cdp-port", 9222, "Chrome DevTools Protocol loopback port for --browser")
 	dashboardURL := flags.String("dashboard-url", "http://127.0.0.1:5174/", "Test dashboard URL opened beside the live app in --browser mode")
@@ -248,7 +252,87 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	if err := writeTestState(root, &state); err != nil {
 		return err
 	}
-	return runGoTests(root, &state, *filter, extraEnv, stdout)
+	msg := fmt.Sprintf("Running %d test(s)", len(names))
+	if *deployOnPass {
+		msg += " — will auto-deploy to https://dialtone.earth/ on pass"
+	}
+	writePipelineState(root, pipelineState{
+		Stage:   "testing",
+		Message: msg,
+		Changed: strings.TrimSpace(*triggerFile),
+		Total:   len(state.Tests),
+	})
+	testErr := runGoTests(root, &state, *filter, extraEnv, stdout)
+	passed, failed, total := countStateTotals(&state)
+	if testErr != nil {
+		writePipelineState(root, pipelineState{
+			Stage:   "failed",
+			Message: fmt.Sprintf("Tests failed (%d failed) — deploy blocked", failed),
+			Changed: strings.TrimSpace(*triggerFile),
+			Passed:  passed,
+			Failed:  failed,
+			Total:   total,
+		})
+		return testErr
+	}
+	if !*deployOnPass {
+		writePipelineState(root, pipelineState{
+			Stage:   "passed",
+			Message: fmt.Sprintf("All tests passed (%d passed)", passed),
+			Changed: strings.TrimSpace(*triggerFile),
+			Passed:  passed,
+			Failed:  failed,
+			Total:   total,
+		})
+		return nil
+	}
+	writePipelineState(root, pipelineState{
+		Stage:     "deploying",
+		Message:   fmt.Sprintf("All %d tests passed — deploying live to https://dialtone.earth/...", passed),
+		Changed:   strings.TrimSpace(*triggerFile),
+		DeployURL: defaultLiveSiteURL + "/",
+		Passed:    passed,
+		Failed:    failed,
+		Total:     total,
+	})
+	var deployBuf bytes.Buffer
+	deployOut := io.MultiWriter(stdout, &deployBuf)
+	if err := runDeployLive(deployOut, stderr); err != nil {
+		writePipelineState(root, pipelineState{
+			Stage:   "failed",
+			Message: fmt.Sprintf("Tests passed, but live deploy failed: %v", err),
+			Changed: strings.TrimSpace(*triggerFile),
+			Passed:  passed,
+			Failed:  failed,
+			Total:   total,
+		})
+		return err
+	}
+	versionID := extractWranglerVersionID(deployBuf.String())
+	writePipelineState(root, pipelineState{
+		Stage:     "deployed",
+		Message:   fmt.Sprintf("All %d tests passed & deployed live to https://dialtone.earth/", passed),
+		Changed:   strings.TrimSpace(*triggerFile),
+		DeployURL: defaultLiveSiteURL + "/",
+		VersionID: versionID,
+		Passed:    passed,
+		Failed:    failed,
+		Total:     total,
+	})
+	if *browser {
+		_ = exec.Command("node", cdpScript, "banner", "ALL TESTS PASSED — DEPLOYED LIVE TO dialtone.earth!", "--port", strconv.Itoa(*cdpPort)).Run()
+	}
+	return nil
+}
+
+func extractWranglerVersionID(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if idx := strings.Index(line, "Current Version ID:"); idx >= 0 {
+			return strings.TrimSpace(line[idx+len("Current Version ID:"):])
+		}
+	}
+	return ""
 }
 
 func ensurePersistentBrowserSession(root, cdpScript string, port int, dashboardURL string, stdout, stderr io.Writer) error {

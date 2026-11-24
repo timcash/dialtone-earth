@@ -419,6 +419,7 @@ async function step03GlobeAndPaths(cdp) {
     "globe split legend with H3 or ARCS",
     `(() => { const el = document.querySelector('[data-testid="globe-layer-legend"]'); return el && (el.textContent.includes("H3:") || el.textContent.includes("ARCS:")) ? el.textContent.trim() : null; })()`,
   );
+  await cdp.spotlight('[data-testid="globe-layer-legend"]', "DEMO: Query-Driven H3 + RTT Arcs", 500);
 
   await cdp.ensureQueryTab("hosts");
   await cdp.pickBottomTab("hosts", "metal hosts tab");
@@ -428,6 +429,7 @@ async function step03GlobeAndPaths(cdp) {
     15_000,
   );
   assert.ok(!hostsText.includes("0.0/0 GB"), "remote metal peers should show RAM % instead of 0.0/0 GB");
+  await cdp.spotlight('[data-testid="query-pane-1"]', "DEMO: Live Fleet RTT + LAN/DIR Paths", 550);
   await cdp.captureFrame("03-live-metal-hosts-rtt");
   console.log(`  [PASS 03] globe switched "${baseLegend}" -> "${queryLegend}" & metal hosts shows live RTT + LAN/DIR/RLY badges`);
   await sleep(STEP_MS);
@@ -585,6 +587,7 @@ async function step07Tiling2x2AndKv(cdp) {
     `document.querySelector('[data-testid="split-grid"]')?.getAttribute("data-layout") === "2x2" && document.body.innerText.includes("shell") && document.body.innerText.includes("fast") && document.body.innerText.includes(${JSON.stringify(QA_EMAIL)})`,
     15_000,
   );
+  await cdp.spotlight('[data-testid="split-grid"]', "DEMO: Live 2x2 Workspace Persisted in CF KV", 600);
   await cdp.captureFrame("07-live-metal-2x2-workspace");
   console.log("  [PASS 07] configured 2x2 split (Globe + Hosts[fast] + Plugins + Users) & persisted to CF KV");
   await sleep(STEP_MS);
@@ -614,11 +617,12 @@ async function step08CameraTsAndReload(cdp) {
     `  reason: "tokyo e2-micro",`,
     `};`,
   ].join("\n");
-  await cdp.typeInto('[data-testid="camera-ts-editor"]', customTsPolicy);
+  await cdp.typeInto('[data-testid="camera-ts-editor"]', customTsPolicy, "Custom vm-asia TS Camera Policy");
   const customCamStatus = await cdp.waitFor(
     "custom TypeScript policy targeting vm-asia",
     `(() => { const el = document.querySelector('[data-testid="cam-status"]'); return el && el.textContent.includes("vm-asia") ? el.textContent.trim() : null; })()`,
   );
+  await cdp.spotlight('[data-testid="cam-status"]', `LIVE EVAL: ${customCamStatus}`, 500);
   await cdp.captureFrame("08-camera-studio-custom-ts");
   await sleep(Math.min(450, STEP_MS));
   await cdp.click('[data-testid="apply-camera-ts"]', "apply custom TypeScript policy");

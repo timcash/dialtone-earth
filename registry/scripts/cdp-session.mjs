@@ -281,19 +281,125 @@ export class CdpClient {
     return null;
   }
 
-  async click(selector, label) {
-    await this.waitFor(label || selector, `document.querySelector(${JSON.stringify(selector)}) !== null`);
-    if (this.headed) {
+  async spotlight(selector, caption = "", holdMs = 350) {
+    if (!this.headed) return;
+    try {
       await this.eval(`(() => {
         const el = document.querySelector(${JSON.stringify(selector)});
         if (!el) return false;
         el.scrollIntoView({ block: "nearest", inline: "nearest" });
-        const prev = el.style.outline;
-        el.style.outline = "2px solid #38d66b";
-        setTimeout(() => { el.style.outline = prev; }, 450);
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) return false;
+
+        let box = document.getElementById("__cdp_spotlight_box");
+        if (!box) {
+          box = document.createElement("div");
+          box.id = "__cdp_spotlight_box";
+          Object.assign(box.style, {
+            position: "fixed",
+            zIndex: "2147483645",
+            pointerEvents: "none",
+            border: "2.5px solid #38d66b",
+            borderRadius: "6px",
+            background: "rgba(56, 214, 107, 0.09)",
+            boxShadow: "0 0 0 4px rgba(56, 214, 107, 0.22), 0 0 28px rgba(56, 214, 107, 0.55)",
+            transition: "all 220ms cubic-bezier(0.2, 0.8, 0.2, 1)",
+          });
+          document.body.appendChild(box);
+        }
+        const pad = 4;
+        const left = Math.max(2, rect.left - pad);
+        const top = Math.max(2, rect.top - pad);
+        const width = Math.min(window.innerWidth - left - 2, rect.width + pad * 2);
+        const height = Math.min(window.innerHeight - top - 2, rect.height + pad * 2);
+        Object.assign(box.style, {
+          opacity: "1",
+          left: left + "px",
+          top: top + "px",
+          width: width + "px",
+          height: height + "px",
+        });
+
+        let lbl = document.getElementById("__cdp_spotlight_label");
+        if (!lbl) {
+          lbl = document.createElement("div");
+          lbl.id = "__cdp_spotlight_label";
+          Object.assign(lbl.style, {
+            position: "fixed",
+            zIndex: "2147483646",
+            pointerEvents: "none",
+            background: "#08120b",
+            color: "#8ef5ad",
+            border: "1px solid #38d66b",
+            borderRadius: "4px",
+            padding: "4px 9px",
+            fontFamily: 'ui-monospace, "SFMono-Regular", Consolas, monospace',
+            fontSize: "11px",
+            fontWeight: "800",
+            letterSpacing: "0.04em",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.75)",
+            whiteSpace: "nowrap",
+            transition: "all 220ms cubic-bezier(0.2, 0.8, 0.2, 1)",
+          });
+          document.body.appendChild(lbl);
+        }
+        const labelTop = top > 34 ? top - 28 : Math.min(window.innerHeight - 28, top + height + 6);
+        const labelLeft = Math.min(window.innerWidth - 260, Math.max(6, left));
+        lbl.textContent = ${JSON.stringify(caption ? `▶ ${caption}` : `▶ ${selector}`)};
+        Object.assign(lbl.style, {
+          opacity: "1",
+          left: labelLeft + "px",
+          top: labelTop + "px",
+        });
         return true;
       })()`);
-      await sleep(Math.min(300, this.stepMs));
+      if (holdMs > 0) await sleep(Math.min(holdMs, this.stepMs + 250));
+    } catch {
+      // ignore during transitions
+    }
+  }
+
+  async pulseClick(selector) {
+    if (!this.headed) return;
+    try {
+      await this.eval(`(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const dot = document.createElement("div");
+        Object.assign(dot.style, {
+          position: "fixed",
+          zIndex: "2147483647",
+          pointerEvents: "none",
+          left: (r.left + r.width / 2 - 14) + "px",
+          top: (r.top + r.height / 2 - 14) + "px",
+          width: "28px",
+          height: "28px",
+          borderRadius: "50%",
+          border: "3px solid #7ff2a4",
+          background: "rgba(56, 214, 107, 0.35)",
+          transform: "scale(0.5)",
+          opacity: "1",
+          transition: "transform 360ms ease-out, opacity 360ms ease-out",
+        });
+        document.body.appendChild(dot);
+        requestAnimationFrame(() => {
+          dot.style.transform = "scale(2.1)";
+          dot.style.opacity = "0";
+        });
+        setTimeout(() => dot.remove(), 420);
+        return true;
+      })()`);
+    } catch {
+      // ignore
+    }
+  }
+
+  async click(selector, label) {
+    await this.waitFor(label || selector, `document.querySelector(${JSON.stringify(selector)}) !== null`);
+    if (this.headed) {
+      await this.spotlight(selector, `CLICK: ${label || selector}`, Math.min(350, this.stepMs));
+      await this.pulseClick(selector);
     }
     await this.eval(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
@@ -303,8 +409,11 @@ export class CdpClient {
     })()`);
   }
 
-  async typeInto(selector, value) {
+  async typeInto(selector, value, label = "") {
     await this.waitFor(selector, `document.querySelector(${JSON.stringify(selector)}) !== null`);
+    if (this.headed) {
+      await this.spotlight(selector, `TYPE: ${label || selector}`, Math.min(250, this.stepMs));
+    }
     await this.eval(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
       el.focus();
@@ -333,9 +442,20 @@ export class CdpClient {
       }) || null;
     })()`;
     await this.waitFor(label || `bottom tab ${substr}`, `${matchExpr} !== null`);
+    if (this.headed) {
+      await this.eval(`(() => {
+        const btn = ${matchExpr};
+        if (!btn) return false;
+        btn.setAttribute("data-cdp-spot-tab", "1");
+        return true;
+      })()`);
+      await this.spotlight('[data-cdp-spot-tab="1"]', `TAB: ${label || substr}`, Math.min(320, this.stepMs));
+      await this.pulseClick('[data-cdp-spot-tab="1"]');
+    }
     const clicked = await this.eval(`(() => {
       const btn = ${matchExpr};
       if (!btn) return false;
+      btn.removeAttribute("data-cdp-spot-tab");
       btn.click();
       return btn.textContent.trim();
     })()`);

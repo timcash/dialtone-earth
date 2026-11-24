@@ -35,6 +35,18 @@ type CdpStatus = {
   page_count?: number;
 };
 
+type PipelineStatus = {
+  stage: string;
+  message: string;
+  changed?: string;
+  deploy_url?: string;
+  version_id?: string;
+  passed?: number;
+  failed?: number;
+  total?: number;
+  updated_at?: string;
+};
+
 const appElement = document.querySelector<HTMLElement>("#app");
 if (!appElement) {
   throw new Error("missing #app");
@@ -47,7 +59,9 @@ let errorMessage = "";
 let starting = false;
 let useBrowser = true;
 let keepSignedIn = true;
+let deployOnPass = true;
 let cdpStatus: CdpStatus = { connected: false, port: 9222 };
+let pipelineStatus: PipelineStatus = { stage: "idle", message: "Ready" };
 let lastRunningTestName = "";
 let streamNonce = 1;
 let mountedStreamConnected: boolean | null = null;
@@ -74,6 +88,7 @@ function ensureDashboardShell(): { testsRoot: HTMLElement; viewportRoot: HTMLEle
 function syncViewportPane(): void {
   const { viewportRoot } = ensureDashboardShell();
   const runningTest = tests.find((test) => normalizeStatus(test.status) === "running");
+  const isBrowserDemoActive = Boolean(runningTest && runningTest.name.startsWith("TestBrowser"));
 
   // Only recreate the <img> stream element when CDP connection state changes
   // so live MJPEG playback never flickers as individual test cards update.
@@ -82,12 +97,12 @@ function syncViewportPane(): void {
     if (cdpStatus.connected) {
       streamNonce += 1;
       viewportRoot.innerHTML = `
-        <div class="viewport-card">
+        <div class="viewport-card" data-testid="viewport-card">
           <div class="viewport-head">
             <div class="viewport-title-row">
               <span class="cdp-pill connected" data-testid="viewport-live-pill">
                 <span class="cdp-dot"></span>
-                LIVE CHROME · CDP :${cdpStatus.port}
+                PROJECTED CHROME · CDP :${cdpStatus.port}
               </span>
               <code class="viewport-url" data-testid="viewport-url">${escapeHtml(cdpStatus.app_url || "https://metal.dialtone.earth/")}</code>
             </div>
@@ -105,6 +120,10 @@ function syncViewportPane(): void {
               alt="Live Chrome browser running Dialtone Earth tests"
             />
           </div>
+          <div class="viewport-foot" data-testid="viewport-foot">
+            <span class="viewport-foot-dot"></span>
+            <span data-testid="viewport-foot-label">Connected to persistent Chrome — UI spotlight follows each running test</span>
+          </div>
         </div>
       `;
       viewportRoot.querySelector<HTMLButtonElement>("[data-testid='viewport-reconnect']")?.addEventListener("click", () => {
@@ -116,7 +135,7 @@ function syncViewportPane(): void {
       });
     } else {
       viewportRoot.innerHTML = `
-        <div class="viewport-card viewport-offline">
+        <div class="viewport-card viewport-offline" data-testid="viewport-card">
           <div class="viewport-head">
             <span class="cdp-pill offline" data-testid="viewport-live-pill">
               <span class="cdp-dot"></span>
@@ -135,20 +154,81 @@ function syncViewportPane(): void {
     }
   }
 
+  const card = viewportRoot.querySelector<HTMLElement>("[data-testid='viewport-card']");
+  if (card) {
+    card.classList.toggle("demonstrating", isBrowserDemoActive);
+    card.classList.toggle("deploying", pipelineStatus.stage === "deploying");
+    card.classList.toggle("deployed", pipelineStatus.stage === "deployed");
+  }
+
   const urlEl = viewportRoot.querySelector<HTMLElement>("[data-testid='viewport-url']");
   if (urlEl && cdpStatus.app_url) {
     urlEl.textContent = cdpStatus.app_url;
   }
   const activeBadge = viewportRoot.querySelector<HTMLElement>("[data-testid='viewport-active-test']");
+  const footLabel = viewportRoot.querySelector<HTMLElement>("[data-testid='viewport-foot-label']");
   if (activeBadge) {
     if (runningTest) {
-      activeBadge.textContent = `RUNNING: ${runningTest.title} (${elapsedSeconds(runningTest).toFixed(1)}s)`;
+      const prefix = isBrowserDemoActive ? "DEMONSTRATING" : "RUNNING";
+      activeBadge.textContent = `${prefix}: ${runningTest.title} (${elapsedSeconds(runningTest).toFixed(1)}s)`;
       activeBadge.classList.add("active");
+    } else if (pipelineStatus.stage === "deploying") {
+      activeBadge.textContent = "DEPLOYING → dialtone.earth…";
+      activeBadge.classList.add("active");
+    } else if (pipelineStatus.stage === "deployed") {
+      activeBadge.textContent = "LIVE ON dialtone.earth ✓";
+      activeBadge.classList.remove("active");
     } else {
       activeBadge.textContent = "READY · Reconnectable";
       activeBadge.classList.remove("active");
     }
   }
+  if (footLabel) {
+    if (isBrowserDemoActive && runningTest) {
+      footLabel.textContent = `Live spotlight active on ${runningTest.title} (${runningTest.name})`;
+    } else if (pipelineStatus.stage === "deploying") {
+      footLabel.textContent = "All tests passed — publishing verified build live to https://dialtone.earth/...";
+    } else if (pipelineStatus.stage === "deployed") {
+      footLabel.textContent = `Verified & deployed live to https://dialtone.earth/${pipelineStatus.version_id ? ` (version ${pipelineStatus.version_id.slice(0, 8)})` : ""}`;
+    } else {
+      footLabel.textContent = "Persistent Chrome projected live — spotlight tracks every UI action during tests";
+    }
+  }
+}
+
+function renderPipelineBar(): string {
+  const stage = pipelineStatus.stage || "idle";
+  const stepState = (step: "edit" | "testing" | "deploying" | "deployed"): string => {
+    const order = { idle: 0, edit: 1, testing: 2, passed: 2, failed: 2, deploying: 3, deployed: 4 } as Record<string, number>;
+    const rank = order[stage] ?? 0;
+    const target = { edit: 1, testing: 2, deploying: 3, deployed: 4 }[step];
+    if (stage === "failed" && step === "testing") return "failed";
+    if (stage === step) return "active";
+    if (rank > target || (stage === "deployed" && step === "deployed")) return "done";
+    return "";
+  };
+  return `
+    <section class="pipeline-bar stage-${escapeHtml(stage)}" data-testid="pipeline-bar" aria-label="Live edit-test-deploy pipeline">
+      <div class="pipeline-steps">
+        <span class="pipe-step ${stepState("edit")}">1. Edit</span>
+        <span class="pipe-arrow">→</span>
+        <span class="pipe-step ${stepState("testing")}">2. Synced Tests</span>
+        <span class="pipe-arrow">→</span>
+        <span class="pipe-step ${stepState("deploying")}">3. Deploy</span>
+        <span class="pipe-arrow">→</span>
+        <span class="pipe-step ${stepState("deployed")}">4. Live dialtone.earth</span>
+      </div>
+      <div class="pipeline-meta">
+        ${pipelineStatus.changed ? `<code class="pipe-file">${escapeHtml(pipelineStatus.changed)}</code>` : ""}
+        <span class="pipe-msg">${escapeHtml(pipelineStatus.message || "Ready")}</span>
+        ${
+          pipelineStatus.stage === "deployed"
+            ? `<a class="pipe-live-link" href="${escapeHtml(pipelineStatus.deploy_url || "https://dialtone.earth/")}" target="_blank" rel="noreferrer">Open dialtone.earth ↗</a>`
+            : ""
+        }
+      </div>
+    </section>
+  `;
 }
 
 function render(): void {
@@ -158,12 +238,12 @@ function render(): void {
   const passed = tests.filter((test) => normalizeStatus(test.status) === "pass").length;
   const failed = tests.filter((test) => normalizeStatus(test.status) === "fail").length;
   const runningTest = tests.find((test) => normalizeStatus(test.status) === "running");
-  const running = Boolean(runningTest);
+  const running = Boolean(runningTest) || pipelineStatus.stage === "deploying";
   const sections = groupTestsBySection(tests);
 
   testsRoot.innerHTML = `
     <header>
-      <p class="eyebrow">Dialtone Earth</p>
+      <p class="eyebrow">Dialtone Earth · Live Edit → Test → Deploy</p>
       <section class="heading-row">
         <div>
           <h1>Tests</h1>
@@ -173,10 +253,11 @@ function render(): void {
             Run browser suite
           </button>
           <button data-testid="start-tests" type="button" ${starting || running ? "disabled" : ""}>
-            ${starting ? "Starting…" : running ? "Running…" : "Start tests"}
+            ${starting ? "Starting…" : pipelineStatus.stage === "deploying" ? "Deploying…" : running ? "Running…" : "Start tests"}
           </button>
         </div>
       </section>
+      ${renderPipelineBar()}
       <section class="cdp-bar" aria-label="Persistent browser controls">
         <span class="cdp-pill ${cdpStatus.connected ? "connected" : "offline"}" data-testid="cdp-status">
           <span class="cdp-dot"></span>
@@ -189,6 +270,10 @@ function render(): void {
         <label class="cdp-toggle">
           <input type="checkbox" data-testid="toggle-keep-signed-in" ${keepSignedIn ? "checked" : ""} />
           <span>Keep signed in</span>
+        </label>
+        <label class="cdp-toggle">
+          <input type="checkbox" data-testid="toggle-deploy-on-pass" ${deployOnPass ? "checked" : ""} />
+          <span>Auto-deploy on pass</span>
         </label>
         ${
           cdpStatus.connected
@@ -220,7 +305,7 @@ function render(): void {
 
   const browserSuiteBtn = testsRoot.querySelector<HTMLButtonElement>("[data-testid='run-browser-suite']");
   browserSuiteBtn?.addEventListener("click", () => {
-    startFilteredTests("^TestBrowser", true).catch(showError);
+    startFilteredTests("^TestBrowser", true, deployOnPass).catch(showError);
   });
 
   const browserToggle = testsRoot.querySelector<HTMLInputElement>("[data-testid='toggle-browser']");
@@ -231,6 +316,11 @@ function render(): void {
   const keepSignedInToggle = testsRoot.querySelector<HTMLInputElement>("[data-testid='toggle-keep-signed-in']");
   keepSignedInToggle?.addEventListener("change", () => {
     keepSignedIn = Boolean(keepSignedInToggle.checked);
+  });
+
+  const deployToggle = testsRoot.querySelector<HTMLInputElement>("[data-testid='toggle-deploy-on-pass']");
+  deployToggle?.addEventListener("change", () => {
+    deployOnPass = Boolean(deployToggle.checked);
   });
 
   const closeBrowserBtn = testsRoot.querySelector<HTMLButtonElement>("[data-testid='close-browser']");
@@ -248,14 +338,14 @@ function render(): void {
       const name = btn.dataset.runSingle || "";
       if (!name) return;
       const forceBrowser = name.startsWith("TestBrowser") || useBrowser;
-      startFilteredTests(`^${name}$`, forceBrowser).catch(showError);
+      startFilteredTests(`^${name}$`, forceBrowser, false).catch(showError);
     });
   });
 
   if (runningTest && runningTest.name !== lastRunningTestName) {
     lastRunningTestName = runningTest.name;
     const row = testsRoot.querySelector<HTMLElement>(`[data-test-name="${CSS.escape(runningTest.name)}"]`);
-    row?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    row?.scrollIntoView({ behavior: "smooth", block: "center" });
   } else if (!runningTest) {
     lastRunningTestName = "";
   }
@@ -293,10 +383,11 @@ function renderTest(test: TestRow, busy: boolean): string {
   const status = normalizeStatus(test.status);
   const elapsed = elapsedSeconds(test).toFixed(2);
   const logHref = testLogHref(test["test-id"], import.meta.env.BASE_URL);
+  const isRunning = status === "running";
   return `
     <article class="test-card ${status}" data-status="${status}" data-testid="test-row" data-test-name="${escapeHtml(test.name)}">
       <section class="test-copy">
-        <h3>${escapeHtml(test.title)}</h3>
+        <h3>${isRunning ? '<span class="running-pulse" aria-hidden="true"></span>' : ""}${escapeHtml(test.title)}</h3>
         <div class="test-meta">
           <code>${escapeHtml(test.name)}</code>
           ${test.source ? `<span class="test-src">${escapeHtml(test.source)}</span>` : ""}
@@ -330,6 +421,20 @@ async function refreshTests(): Promise<void> {
   if (changed) render();
 }
 
+async function refreshPipeline(): Promise<void> {
+  try {
+    const response = await fetch("/api/pipeline", { cache: "no-store" });
+    if (!response.ok) return;
+    const next = (await response.json()) as PipelineStatus;
+    if (JSON.stringify(next) !== JSON.stringify(pipelineStatus)) {
+      pipelineStatus = next;
+      render();
+    }
+  } catch {
+    // ignore transient poll error
+  }
+}
+
 async function refreshCdpStatus(): Promise<void> {
   try {
     const response = await fetch("/api/cdp/status", { cache: "no-store" });
@@ -349,16 +454,17 @@ async function refreshCdpStatus(): Promise<void> {
 }
 
 async function startAllTests(): Promise<void> {
-  await startFilteredTests("", useBrowser);
+  await startFilteredTests("", useBrowser, deployOnPass);
 }
 
-async function startFilteredTests(filter: string, withBrowser: boolean): Promise<void> {
+async function startFilteredTests(filter: string, withBrowser: boolean, withDeploy: boolean): Promise<void> {
   starting = true;
   errorMessage = "";
   render();
   const params = new URLSearchParams();
   if (withBrowser) params.set("browser", "1");
   if (withBrowser && keepSignedIn) params.set("keepSignedIn", "1");
+  if (withDeploy) params.set("deployOnPass", "1");
   if (filter) params.set("filter", filter);
   const query = params.toString();
   const response = await fetch(`/api/tests/run${query ? `?${query}` : ""}`, { method: "POST" });
@@ -368,6 +474,7 @@ async function startFilteredTests(filter: string, withBrowser: boolean): Promise
     throw new Error(payload.error || `Could not start tests: HTTP ${response.status}`);
   }
   await refreshTests();
+  void refreshPipeline();
   void refreshCdpStatus();
 }
 
@@ -485,9 +592,11 @@ if (location.pathname.replace(/\/$/, "").endsWith("/logs")) {
 } else {
   render();
   refreshTests().catch(showError);
+  void refreshPipeline();
   void refreshCdpStatus();
   setInterval(() => {
     refreshTests().catch(showError);
+    void refreshPipeline();
   }, 500);
   setInterval(() => {
     void refreshCdpStatus();
@@ -500,7 +609,8 @@ if (location.pathname.replace(/\/$/, "").endsWith("/logs")) {
       if (time) time.textContent = `${elapsedSeconds(runningTest).toFixed(2)}s`;
       const activeBadge = app.querySelector<HTMLElement>("[data-testid='viewport-active-test']");
       if (activeBadge) {
-        activeBadge.textContent = `RUNNING: ${runningTest.title} (${elapsedSeconds(runningTest).toFixed(1)}s)`;
+        const prefix = runningTest.name.startsWith("TestBrowser") ? "DEMONSTRATING" : "RUNNING";
+        activeBadge.textContent = `${prefix}: ${runningTest.title} (${elapsedSeconds(runningTest).toFixed(1)}s)`;
         activeBadge.classList.add("active");
       }
     }

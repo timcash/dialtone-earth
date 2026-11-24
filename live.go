@@ -344,8 +344,13 @@ func runLiveReset(args []string, stdout, stderr io.Writer) error {
 func runLiveWatch(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("live watch", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	interval := fs.Duration("interval", 1500*time.Millisecond, "File change poll interval")
-	pushCode := fs.Bool("push", false, "Also push git bundle to Cloudflare R2 on each deploy")
+	interval := fs.Duration("interval", 1200*time.Millisecond, "File change poll interval")
+	runTests := fs.Bool("test", true, "Run synced tests before deploying live")
+	browser := fs.Bool("browser", true, "Run with persistent CDP Chrome browser synced to the test dashboard")
+	keepSignedIn := fs.Bool("keep-signed-in", true, "Keep persistent CDP Chrome signed into LIVE metal")
+	deployOnPass := fs.Bool("deploy-on-pass", true, "Auto-deploy to https://dialtone.earth/ when all tests pass")
+	filter := fs.String("filter", "", "Optional Go test filter regexp (empty runs all tests)")
+	pushCode := fs.Bool("push", false, "Also push git bundle to Cloudflare R2 on pass")
 	repo := fs.String("repo", defaultRepoSlug(), "Repository slug when --push is set")
 	baseURL := fs.String("url", defaultLiveSiteURL, "Registry base URL when --push is set")
 	tokenFile := fs.String("token-file", "", "Path to LIVE_CONTROL_TOKEN file when --push is set")
@@ -360,36 +365,75 @@ func runLiveWatch(args []string, stdout, stderr io.Writer) error {
 		filepath.Join(root, "registry", "src"),
 		filepath.Join(root, "registry", "worker"),
 	}
-	snapshot := func() string {
-		var b strings.Builder
+	snapshotMap := func() map[string]string {
+		m := map[string]string{}
 		for _, dir := range watchDirs {
 			_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
 				if walkErr != nil || d.IsDir() {
 					return nil
 				}
 				if info, err := d.Info(); err == nil {
-					fmt.Fprintf(&b, "%s:%d:%d;", path, info.Size(), info.ModTime().UnixNano())
+					rel, _ := filepath.Rel(root, path)
+					m[filepath.ToSlash(rel)] = fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
 				}
 				return nil
 			})
 		}
-		return b.String()
+		return m
 	}
-	last := snapshot()
-	fmt.Fprintf(stdout, "live watch: watching registry/src & registry/worker (every %s) -> https://dialtone.earth/\n", *interval)
-	fmt.Fprintln(stdout, "live watch: save any file to rebuild and publish live immediately (Ctrl+C to stop)")
+	last := snapshotMap()
+	fmt.Fprintf(stdout, "live watch: watching registry/src & registry/worker (every %s) -> test -> deploy https://dialtone.earth/\n", *interval)
+	fmt.Fprintln(stdout, "live watch: save any file to trigger synced tests + auto-deploy on pass (Ctrl+C to stop)")
 	ticker := time.NewTicker(*interval)
 	defer ticker.Stop()
 	for range ticker.C {
-		cur := snapshot()
-		if cur == last {
+		cur := snapshotMap()
+		var changed []string
+		for k, v := range cur {
+			if last[k] != v {
+				changed = append(changed, k)
+			}
+		}
+		for k := range last {
+			if _, ok := cur[k]; !ok {
+				changed = append(changed, k)
+			}
+		}
+		if len(changed) == 0 {
 			continue
 		}
 		last = cur
-		fmt.Fprintf(stdout, "\n[%s] live watch: change detected — publishing live to https://dialtone.earth/...\n", time.Now().Format("15:04:05"))
-		if err := runDeployLive(stdout, stderr); err != nil {
-			fmt.Fprintf(stderr, "live watch deploy error: %v\n", err)
-			continue
+		changedLabel := strings.Join(changed, ", ")
+		fmt.Fprintf(stdout, "\n[%s] live watch: edit detected in %s\n", time.Now().Format("15:04:05"), changedLabel)
+		writePipelineState(root, pipelineState{
+			Stage:   "edit",
+			Changed: changedLabel,
+			Message: "Edit detected in " + changedLabel + " — triggering synced test pipeline...",
+		})
+		if *runTests {
+			testArgs := []string{"test"}
+			if *browser {
+				testArgs = append(testArgs, "--browser")
+				if *keepSignedIn {
+					testArgs = append(testArgs, "--keep-signed-in")
+				}
+			}
+			if *deployOnPass {
+				testArgs = append(testArgs, "--deploy-on-pass")
+			}
+			if *filter != "" {
+				testArgs = append(testArgs, "--filter", *filter)
+			}
+			testArgs = append(testArgs, "--trigger-file", changedLabel)
+			if code := Run(testArgs, stdout, stderr); code != 0 {
+				fmt.Fprintf(stderr, "live watch: tests failed (exit %d) — deploy blocked\n", code)
+				continue
+			}
+		} else if *deployOnPass {
+			if err := runDeployLive(stdout, stderr); err != nil {
+				fmt.Fprintf(stderr, "live watch deploy error: %v\n", err)
+				continue
+			}
 		}
 		if *pushCode {
 			if tok, err := loadLiveControlToken(*tokenFile); err == nil {

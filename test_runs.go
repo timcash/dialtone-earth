@@ -33,6 +33,42 @@ const goTestTimeout = "30m"
 // nothing else writes it, and it is never committed.
 var stateFile = filepath.Join("logs", "state.json")
 
+// pipelineFile tracks the live Edit -> Test -> Auto-Deploy stage for the dashboard.
+var pipelineFile = filepath.Join("logs", "pipeline.json")
+
+type pipelineState struct {
+	Stage     string `json:"stage"`
+	Message   string `json:"message"`
+	Changed   string `json:"changed,omitempty"`
+	DeployURL string `json:"deploy_url,omitempty"`
+	VersionID string `json:"version_id,omitempty"`
+	Passed    int    `json:"passed"`
+	Failed    int    `json:"failed"`
+	Total     int    `json:"total"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+func writePipelineState(root string, p pipelineState) {
+	p.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	_ = writeJSONFile(filepath.Join(root, pipelineFile), p)
+}
+
+func countStateTotals(state *testState) (passed, failed, total int) {
+	if state == nil {
+		return 0, 0, 0
+	}
+	total = len(state.Tests)
+	for _, t := range state.Tests {
+		switch t.Status {
+		case "pass":
+			passed++
+		case "fail":
+			failed++
+		}
+	}
+	return passed, failed, total
+}
+
 type testState struct {
 	GeneratedAt string      `json:"generated_at"`
 	Tests       []testEntry `json:"tests"`
