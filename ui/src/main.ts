@@ -64,6 +64,7 @@ type WorkspaceContent = {
   sourceTag: string;
   sourceClass: "is-ch" | "is-cf" | "is-warn";
   targetId?: string;
+  viewport?: "wide" | "mobile";
   url?: string;
 };
 
@@ -90,7 +91,7 @@ let useBrowser = true;
 let keepSignedIn = true;
 let deployOnPass = false;
 let theme: "dark" | "light" = (localStorage.getItem("dt_test_theme") as "dark" | "light") || "dark";
-let layoutPref: LayoutPref = (localStorage.getItem("dt_test_layout") as LayoutPref) || "auto";
+let layoutPref: LayoutPref = (localStorage.getItem("dt_test_layout_v2") as LayoutPref) || "auto";
 let paneContents: string[] = loadSavedPanes();
 let focusedPane = 0;
 let maximizedPane: number | null = null;
@@ -118,7 +119,7 @@ let wmMounted = false;
 
 function loadSavedPanes(): string[] {
   try {
-    const raw = localStorage.getItem("dt_test_panes");
+    const raw = localStorage.getItem("dt_test_panes_v2");
     if (raw) {
       const parsed: unknown = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) {
@@ -128,14 +129,15 @@ function loadSavedPanes(): string[] {
   } catch {
     // ignore
   }
-  return ["tests:all", "browser:primary", "log:active", "tests:browser"];
+  // Default 1|2 layout: full-height test table on left (#1), wide desktop (#2) & mobile (#3) browsers stacked on right
+  return ["tests:all", "browser:wide", "browser:mobile", "log:active"];
 }
 
 function saveWorkspacePrefs(): void {
   try {
     localStorage.setItem("dt_test_theme", theme);
-    localStorage.setItem("dt_test_layout", layoutPref);
-    localStorage.setItem("dt_test_panes", JSON.stringify(paneContents));
+    localStorage.setItem("dt_test_layout_v2", layoutPref);
+    localStorage.setItem("dt_test_panes_v2", JSON.stringify(paneContents));
   } catch {
     // ignore
   }
@@ -148,7 +150,7 @@ function applyTheme(): void {
 function resolveEffectiveLayout(): SplitLayout {
   if (maximizedPane !== null) return "1";
   if (layoutPref !== "auto") return layoutPref;
-  return window.innerWidth < 900 ? "1/1" : "1|1";
+  return window.innerWidth < 900 ? "1/1" : "1|2";
 }
 
 function paneCountFor(layout: SplitLayout): number {
@@ -165,34 +167,52 @@ function shortHostLabel(rawUrl: string): string {
 }
 
 function availableContents(): WorkspaceContent[] {
+  const previewUrl = stagingEnv.preview?.preview_url || cdpStatus.app_url || "http://127.0.0.1:5175/";
+  const targets = cdpStatus.targets && cdpStatus.targets.length > 0 ? cdpStatus.targets : [];
+  const primaryTarget =
+    targets.find((t) => t.url.includes("127.0.0.1:5175")) ||
+    targets.find((t) => t.url.includes("metal.dialtone.earth")) ||
+    targets[0];
+
   const items: WorkspaceContent[] = [
     { id: "tests:all", kind: "tests-all", label: "db:tests", sourceTag: "GO+DB", sourceClass: "is-ch" },
+    {
+      id: "browser:wide",
+      kind: "browser",
+      label: "browser:wide",
+      sourceTag: cdpStatus.connected ? "WIDE" : "OFFLINE",
+      sourceClass: cdpStatus.connected ? "is-ch" : "is-warn",
+      targetId: primaryTarget?.id,
+      viewport: "wide",
+      url: primaryTarget?.url || previewUrl,
+    },
+    {
+      id: "browser:mobile",
+      kind: "browser",
+      label: "browser:mobile",
+      sourceTag: cdpStatus.connected ? "MOBILE 390×844" : "OFFLINE",
+      sourceClass: cdpStatus.connected ? "is-ch" : "is-warn",
+      viewport: "mobile",
+      url: previewUrl,
+    },
     { id: "tests:browser", kind: "tests-browser", label: "cdp:suite", sourceTag: "CDP", sourceClass: "is-ch" },
     { id: "log:active", kind: "log", label: "run:log", sourceTag: "LOG", sourceClass: "is-cf" },
   ];
-  const targets = cdpStatus.targets && cdpStatus.targets.length > 0 ? cdpStatus.targets : [];
-  if (targets.length === 0) {
+
+  // Include any additional user-opened Chrome tabs beyond the primary staging tab
+  let extraNum = 3;
+  for (const t of targets) {
+    if (primaryTarget && t.id === primaryTarget.id) continue;
     items.push({
-      id: "browser:primary",
+      id: `browser:${t.id}`,
       kind: "browser",
-      label: "browser:1",
-      sourceTag: cdpStatus.connected ? `CDP:${cdpStatus.port}` : "OFFLINE",
-      sourceClass: cdpStatus.connected ? "is-ch" : "is-warn",
-      url: cdpStatus.app_url || "https://metal.dialtone.earth/",
+      label: `browser:${extraNum} (${shortHostLabel(t.url).slice(0, 22)})`,
+      sourceTag: `CDP:${cdpStatus.port}`,
+      sourceClass: "is-ch",
+      targetId: t.id,
+      url: t.url,
     });
-  } else {
-    targets.forEach((t, idx) => {
-      const id = idx === 0 ? "browser:primary" : `browser:${t.id}`;
-      items.push({
-        id,
-        kind: "browser",
-        label: `browser:${idx + 1} (${shortHostLabel(t.url).slice(0, 22)})`,
-        sourceTag: `CDP:${cdpStatus.port}`,
-        sourceClass: "is-ch",
-        targetId: t.id,
-        url: t.url,
-      });
-    });
+    extraNum += 1;
   }
   return items;
 }
@@ -267,7 +287,7 @@ function renderWorkspace(): void {
   assigned.forEach((content, idx) => {
     const paneEl = grid.children[idx] as HTMLElement;
     const isFocused = idx === focusedPane;
-    const isDemoPane = content.kind === "browser" && isBrowserDemo && (idx === 1 || content.id === "browser:primary");
+    const isDemoPane = content.kind === "browser" && isBrowserDemo && (content.id === "browser:wide" || idx === 1);
     paneEl.setAttribute("data-testid", `wm-pane-${idx}`);
     paneEl.setAttribute("data-content-id", content.id);
     paneEl.classList.toggle("is-focused", isFocused);
@@ -366,18 +386,22 @@ function renderBrowserPaneBody(
   isDemoPane: boolean,
   runningTest: TestRow | undefined,
 ): void {
-  const streamKey = cdpStatus.connected ? `${content.targetId || "default"}:${streamNonce}` : "offline";
+  const streamKey = cdpStatus.connected
+    ? `${content.viewport || "default"}:${content.viewport === "mobile" ? "mobile" : content.targetId || "default"}:${streamNonce}`
+    : "offline";
   if (slot.getAttribute("data-mounted-stream") !== streamKey) {
     slot.setAttribute("data-mounted-stream", streamKey);
     if (cdpStatus.connected) {
       const qs = new URLSearchParams({ v: String(streamNonce) });
-      if (content.targetId) qs.set("targetId", content.targetId);
+      if (content.viewport) qs.set("viewport", content.viewport);
+      if (content.targetId && content.viewport !== "mobile") qs.set("targetId", content.targetId);
+      const imgCls = content.viewport === "mobile" ? "browser-stream-img is-mobile" : "browser-stream-img";
       slot.innerHTML = `
         <div class="browser-pane-body">
           <div class="browser-stage">
             <img
-              data-testid="cdp-live-stream"
-              class="browser-stream-img"
+              data-testid="${content.viewport === "mobile" ? "cdp-mobile-stream" : "cdp-live-stream"}"
+              class="${imgCls}"
               src="/api/cdp/stream?${qs.toString()}"
               alt="Projected Chrome browser ${escapeHtml(content.label)}"
             />

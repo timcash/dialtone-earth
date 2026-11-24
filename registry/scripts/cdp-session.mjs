@@ -627,11 +627,12 @@ export async function ensurePersistentBrowser(opts = {}) {
     );
 
     appTarget =
-      pageTargets.find((t) => String(t.url || "").startsWith(targetOrigin)) ||
+      pageTargets.find((t) => String(t.url || "").startsWith(targetOrigin) && !String(t.url || "").includes("#mobile-preview")) ||
       pageTargets.find(
         (t) =>
           !String(t.url || "").startsWith(dashboardOrigin) &&
-          !String(t.url || "").startsWith("devtools://"),
+          !String(t.url || "").startsWith("devtools://") &&
+          !String(t.url || "").includes("#mobile-preview"),
       ) ||
       null;
 

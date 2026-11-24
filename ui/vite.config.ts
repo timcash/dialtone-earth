@@ -107,7 +107,8 @@ function testApiPlugin(): Plugin {
         }
         if (pathname === "/api/cdp/stream" && request.method === "GET") {
           const targetId = (parsedUrl.searchParams.get("targetId") || "").trim();
-          streamCdpViewport(request, response, targetId).catch((error: unknown) => {
+          const viewport = (parsedUrl.searchParams.get("viewport") || "").trim().toLowerCase();
+          streamCdpViewport(request, response, targetId, viewport).catch((error: unknown) => {
             if (!response.headersSent) sendError(response, error);
             else response.end();
           });
@@ -115,7 +116,8 @@ function testApiPlugin(): Plugin {
         }
         if (pathname === "/api/cdp/frame" && request.method === "GET") {
           const targetId = (parsedUrl.searchParams.get("targetId") || "").trim();
-          captureSingleCdpFrame(targetId)
+          const viewport = (parsedUrl.searchParams.get("viewport") || "").trim().toLowerCase();
+          captureSingleCdpFrame(targetId, viewport)
             .then((jpeg) => {
               if (!jpeg) {
                 sendJson(response, { error: "No active CDP browser page" }, 503);
@@ -270,14 +272,44 @@ async function listCdpPageTargets(): Promise<CdpPageTarget[]> {
   }
 }
 
-async function findActiveAppPageTarget(targetId = ""): Promise<CdpPageTarget | null> {
+const MOBILE_PREVIEW_HASH = "#mobile-preview";
+let creatingMobileTarget: Promise<CdpPageTarget | null> | null = null;
+
+async function findActiveAppPageTarget(targetId = "", viewport = ""): Promise<CdpPageTarget | null> {
   const pages = await listCdpPageTargets();
+  if (viewport === "mobile") {
+    const existing = pages.find((p) => p.url.includes(MOBILE_PREVIEW_HASH));
+    if (existing) return existing;
+    if (!creatingMobileTarget) {
+      creatingMobileTarget = (async () => {
+        try {
+          const base = (process.env.STAGING_PREVIEW_URL || "http://127.0.0.1:5175").replace(/\/+$/, "");
+          await createNewCdpTab(`${base}/${MOBILE_PREVIEW_HASH}`);
+          await new Promise((r) => setTimeout(r, 450));
+          const updated = await listCdpPageTargets();
+          return updated.find((p) => p.url.includes(MOBILE_PREVIEW_HASH)) || null;
+        } catch {
+          return null;
+        } finally {
+          creatingMobileTarget = null;
+        }
+      })();
+    }
+    return creatingMobileTarget;
+  }
   if (pages.length === 0) return null;
   if (targetId && SAFE_TARGET_ID_RE.test(targetId)) {
     const exact = pages.find((p) => p.id === targetId);
     if (exact) return exact;
   }
-  return pages.find((t) => t.url.includes("metal.dialtone.earth")) || pages.find((t) => t.url.includes("dialtone.earth")) || pages[0];
+  const desktopPages = pages.filter((p) => !p.url.includes(MOBILE_PREVIEW_HASH));
+  const pool = desktopPages.length > 0 ? desktopPages : pages;
+  return (
+    pool.find((t) => t.url.includes("127.0.0.1:5175")) ||
+    pool.find((t) => t.url.includes("metal.dialtone.earth")) ||
+    pool.find((t) => t.url.includes("dialtone.earth")) ||
+    pool[0]
+  );
 }
 
 async function createNewCdpTab(rawUrl: string): Promise<Record<string, unknown>> {
@@ -337,8 +369,8 @@ async function createNewCdpTab(rawUrl: string): Promise<Record<string, unknown>>
   return { ok: true, targetId, url: parsed.toString() };
 }
 
-async function captureSingleCdpFrame(targetId = ""): Promise<Buffer | null> {
-  const target = await findActiveAppPageTarget(targetId);
+async function captureSingleCdpFrame(targetId = "", viewport = ""): Promise<Buffer | null> {
+  const target = await findActiveAppPageTarget(targetId, viewport);
   if (!target) return null;
   return new Promise((resolveFn) => {
     const ws = new WebSocket(target.wsUrl);
@@ -355,6 +387,15 @@ async function captureSingleCdpFrame(targetId = ""): Promise<Buffer | null> {
     };
     const timer = setTimeout(() => done(null), 2_500);
     ws.addEventListener("open", () => {
+      if (viewport === "mobile") {
+        ws.send(
+          JSON.stringify({
+            id: 9,
+            method: "Emulation.setDeviceMetricsOverride",
+            params: { width: 390, height: 844, deviceScaleFactor: 2, mobile: true },
+          }),
+        );
+      }
       ws.send(JSON.stringify({ id: 1, method: "Page.captureScreenshot", params: { format: "jpeg", quality: 78 } }));
     });
     ws.addEventListener("message", (event) => {
@@ -379,8 +420,9 @@ async function streamCdpViewport(
   request: IncomingMessage,
   response: ServerResponse,
   targetId = "",
+  viewport = "",
 ): Promise<void> {
-  const target = await findActiveAppPageTarget(targetId);
+  const target = await findActiveAppPageTarget(targetId, viewport);
   if (!target) {
     sendJson(response, { error: "CDP browser offline" }, 503);
     return;
@@ -426,12 +468,31 @@ async function streamCdpViewport(
   ws.addEventListener("open", () => {
     if (closed) return;
     ws.send(JSON.stringify({ id: 1, method: "Page.enable" }));
+    if (viewport === "mobile") {
+      ws.send(
+        JSON.stringify({
+          id: 4,
+          method: "Emulation.setDeviceMetricsOverride",
+          params: { width: 390, height: 844, deviceScaleFactor: 2, mobile: true },
+        }),
+      );
+      ws.send(
+        JSON.stringify({
+          id: 5,
+          method: "Emulation.setTouchEmulationEnabled",
+          params: { enabled: true },
+        }),
+      );
+    }
     ws.send(JSON.stringify({ id: 2, method: "Page.captureScreenshot", params: { format: "jpeg", quality: 78 } }));
     ws.send(
       JSON.stringify({
         id: 3,
         method: "Page.startScreencast",
-        params: { format: "jpeg", quality: 78, maxWidth: 1280, maxHeight: 840, everyNthFrame: 1 },
+        params:
+          viewport === "mobile"
+            ? { format: "jpeg", quality: 82, maxWidth: 460, maxHeight: 900, everyNthFrame: 1 }
+            : { format: "jpeg", quality: 78, maxWidth: 1280, maxHeight: 760, everyNthFrame: 1 },
       }),
     );
   });
@@ -486,15 +547,19 @@ async function readCdpStatus(): Promise<Record<string, unknown>> {
     }
     const version: unknown = await versionResp.json();
     const pages = await listCdpPageTargets();
-    const appPage = pages.find((t) => t.url.includes("metal.dialtone.earth")) || pages[0];
+    const visiblePages = pages.filter((p) => !p.url.includes(MOBILE_PREVIEW_HASH));
+    const appPage =
+      visiblePages.find((t) => t.url.includes("127.0.0.1:5175")) ||
+      visiblePages.find((t) => t.url.includes("metal.dialtone.earth")) ||
+      visiblePages[0];
     return {
       connected: true,
       port: cdpPort,
       pid: typeof meta?.pid === "number" ? meta.pid : null,
       browser: isRecord(version) ? text(version.Browser) : "",
       app_url: appPage ? appPage.url : text(meta?.app_url),
-      page_count: pages.length,
-      targets: pages.map((p) => ({ id: p.id, title: p.title, url: p.url })),
+      page_count: visiblePages.length,
+      targets: visiblePages.map((p) => ({ id: p.id, title: p.title, url: p.url })),
     };
   } catch {
     return { connected: false, port: cdpPort, pid: null, app_url: text(meta?.app_url), targets: [] };
