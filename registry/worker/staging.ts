@@ -94,15 +94,24 @@ export async function handleStagingRoute({
     return null;
   }
 
-  // Allow public favicon for /login and /auth/verify without triggering a login redirect.
+  // Allow public read-only sign-in assets (favicon + spinning H3 globe bundle)
+  // directly from env.ASSETS without touching any staging origin or private data.
+  const isPublicAuthAsset =
+    url.pathname === "/favicon.svg" ||
+    url.pathname === "/favicon.ico" ||
+    url.pathname === "/land.h3.json" ||
+    url.pathname === "/auth-globe.js" ||
+    url.pathname.startsWith("/assets/");
   if (
-    (url.pathname === "/favicon.svg" || url.pathname === "/favicon.ico") &&
+    isPublicAuthAsset &&
     (request.method === "GET" || request.method === "HEAD") &&
     env.ASSETS
   ) {
     const assetResp = await env.ASSETS.fetch(request);
-    const outHeaders = stagingHeaders(securityHeaders, assetResp.headers.get("Content-Type"));
-    return new Response(assetResp.body, { status: assetResp.status, headers: outHeaders });
+    if (assetResp.status === 200 || !url.pathname.startsWith("/assets/")) {
+      const outHeaders = stagingHeaders(securityHeaders, assetResp.headers.get("Content-Type"));
+      return new Response(assetResp.body, { status: assetResp.status, headers: outHeaders });
+    }
   }
 
   const ownerEmail = getOwnerEmail(env);
