@@ -206,12 +206,20 @@ async function checkLiveBrowserRender() {
 
     const desktopCheck = await cdp.eval(`(() => {
       const tabs = document.querySelectorAll('.earth-bar-tabs [data-pick-content]').length;
+      const bottomButtons = document.querySelectorAll('#bottom-table-dock .earth-table-bar button, #bottom-table-dock .earth-table-bar a').length;
+      const bottomCaptions = document.querySelectorAll('#bottom-table-dock [data-testid="tour-captions"]').length;
+      const globeHeaders = document.querySelectorAll('.globe-pane .earth-pane-head').length;
+      const globeOverlay = document.querySelectorAll('.globe-pane [data-testid="globe-meta-overlay"]').length;
       const menuBtn = document.querySelector('[data-testid="open-config"]')?.textContent?.trim() || "";
       const hasSim = document.body.innerText.includes("SIM");
       const leaked = document.body.innerText.includes("legion") || document.body.innerText.includes("test-alpha");
-      return { tabs, menuBtn, hasSim, leaked };
+      return { tabs, bottomButtons, bottomCaptions, globeHeaders, globeOverlay, menuBtn, hasSim, leaked };
     })()`);
     assert.equal(desktopCheck.tabs, 0, `Expected 0 bottom-bar window-set tabs on production, got ${desktopCheck.tabs}`);
+    assert.equal(desktopCheck.bottomButtons, 1, `Expected only menu button on bottom bar, got ${desktopCheck.bottomButtons}`);
+    assert.equal(desktopCheck.bottomCaptions, 1, "Expected closed captions on bottom bar");
+    assert.equal(desktopCheck.globeHeaders, 0, "Expected 0 header bars on 3D globe pane");
+    assert.equal(desktopCheck.globeOverlay, 1, "Expected right-side metadata overlay inside 3D globe");
     assert.equal(desktopCheck.hasSim, true, "Production signed-out landing should show SIM badge");
     assert.equal(desktopCheck.leaked, false, "Production signed-out landing leaked private node names");
 

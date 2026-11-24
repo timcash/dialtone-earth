@@ -179,7 +179,7 @@ async function isSignedInLive(cdp) {
       return location.pathname === "/" &&
         t.includes("LIVE") &&
         t.includes(${JSON.stringify(NETWORK_LABEL)}) &&
-        document.querySelector('[href="/auth/logout"]') !== null;
+        document.querySelector('[data-testid="live-badge"]') !== null;
     })()`);
   } catch {
     return false;
@@ -207,13 +207,10 @@ async function performMagicLinkLogin(cdp) {
   if (!onTarget) {
     await cdp.send("Page.navigate", { url: `${TARGET_ORIGIN}/` });
   }
-  await cdp.waitFor(
-    "sign-in link on landing page",
-    `document.querySelector('[href="/login"]') !== null || location.pathname === "/login"`,
-  );
   const alreadyAtLogin = await cdp.eval(`location.pathname === "/login"`);
   if (!alreadyAtLogin) {
-    await cdp.click('[href="/login"]', "sign in link");
+    await cdp.openConfigMenu();
+    await cdp.click('#config-page:not([hidden]) [href="/login"]', "sign in link");
   }
   await cdp.waitFor(
     "grayscale login email input",
@@ -302,7 +299,7 @@ async function performMagicLinkLogin(cdp) {
 
   await cdp.waitFor(
     `authenticated LIVE ${NETWORK_LABEL} mode with real nodes`,
-    `location.pathname === "/" && document.body.innerText.includes("LIVE") && document.body.innerText.includes(${JSON.stringify(NETWORK_LABEL)}) && document.querySelector('[href="/auth/logout"]') !== null && (document.body.innerText.includes(${JSON.stringify(PRIMARY_NODE)}) || document.body.innerText.includes(${JSON.stringify(PEER_NODE)}))`,
+    `location.pathname === "/" && document.body.innerText.includes("LIVE") && document.body.innerText.includes(${JSON.stringify(NETWORK_LABEL)}) && document.querySelector('[data-testid="live-badge"]') !== null && (document.body.innerText.includes(${JSON.stringify(PRIMARY_NODE)}) || document.body.innerText.includes(${JSON.stringify(PEER_NODE)}))`,
     20_000,
   );
   const replayResp = await fetch(`${TARGET_ORIGIN}/api/auth/verify`, {
@@ -328,7 +325,7 @@ async function ensureSignedIn(cdp, allowLogin = false) {
   await cdp.send("Page.navigate", { url: `${TARGET_ORIGIN}/` });
   await cdp.waitFor(
     "landing page ready",
-    `document.querySelector('[href="/auth/logout"]') !== null || document.querySelector('[href="/login"]') !== null`,
+    `document.querySelector('[data-testid="live-badge"]') !== null || document.querySelector('[data-testid="simulated-badge"]') !== null`,
     15_000,
   );
   if (await isSignedInLive(cdp)) {
@@ -386,7 +383,7 @@ async function step01SignedOut(cdp) {
     await cdp.send("Page.reload", { ignoreCache: true });
     await cdp.waitFor(
       `reloaded LIVE ${NETWORK_LABEL} app`,
-      `document.body.innerText.includes("LIVE") && document.querySelector('[href="/auth/logout"]') !== null`,
+      `document.body.innerText.includes("LIVE") && document.querySelector('[data-testid="live-badge"]') !== null`,
       15_000,
     );
     if (cdp.mirror) {
@@ -396,12 +393,22 @@ async function step01SignedOut(cdp) {
         // best-effort mobile reload
       }
     }
+    const layoutCheck = await cdp.eval(`(() => ({
+      globeHeaders: document.querySelectorAll('.globe-pane .earth-pane-head').length,
+      globeMeta: document.querySelectorAll('.globe-pane [data-testid="globe-meta-overlay"]').length,
+      bottomButtons: document.querySelectorAll('#bottom-table-dock .earth-table-bar button, #bottom-table-dock .earth-table-bar a').length,
+      bottomCaptions: document.querySelectorAll('#bottom-table-dock [data-testid="tour-captions"]').length,
+    }))()`);
+    assert.equal(layoutCheck.globeHeaders, 0, "3D globe pane must have 0 title/button header bars");
+    assert.equal(layoutCheck.globeMeta, 1, "3D globe pane must render right-side metadata overlay");
+    assert.equal(layoutCheck.bottomButtons, 1, `Bottom bar must have only the menu button (got ${layoutCheck.bottomButtons})`);
+    assert.equal(layoutCheck.bottomCaptions, 1, "Bottom bar must contain closed captions");
     const anonHome = await fetch(`${TARGET_ORIGIN}/`);
     assert.equal(anonHome.status, 200, "signed-out GET / should return 200");
     const anonHtml = await anonHome.text();
     assert.ok(!anonHtml.includes("vm-asia"), "real metal node leaked in signed-out HTML");
-    await cdp.showBanner(`01 Signed-out 401 checks passed (LIVE ${NETWORK_LABEL} · ${TARGET_ORIGIN})`);
-    console.log(`  [PASS 01] 401 default-deny on protected routes + zero signed-out leaks (preserved existing LIVE ${NETWORK_LABEL} session)`);
+    await cdp.showBanner(`01 Signed-out 401 checks + clean HUD passed (LIVE ${NETWORK_LABEL})`);
+    console.log(`  [PASS 01] 401 default-deny + clean HUD (0 globe headers, right overlay, bottom CC + menu-only) on LIVE ${NETWORK_LABEL}`);
     await sleep(Math.min(400, STEP_MS));
     return;
   }
@@ -409,14 +416,15 @@ async function step01SignedOut(cdp) {
   // Otherwise sign out if currently logged in so we verify live browser SIM containment end-to-end.
   if (await isSignedInLive(cdp)) {
     await cdp.showBanner("01 Signing out existing session to verify SIM containment");
-    await cdp.click('[href="/auth/logout"]', "sign out link");
+    await cdp.openConfigMenu();
+    await cdp.click('#config-page:not([hidden]) [href="/auth/logout"]', "sign out link");
   } else {
     await cdp.send("Page.navigate", { url: `${TARGET_ORIGIN}/` });
   }
 
   await cdp.waitFor(
     "signed-out simulated mode with 3D globe",
-    `document.body.innerText.includes("SIM") && document.querySelector('[href="/login"]') !== null && document.querySelector('canvas[aria-label="Interactive H3 Earth globe"]') !== null`,
+    `document.body.innerText.includes("SIM") && document.querySelector('[data-testid="simulated-badge"]') !== null && document.querySelector('canvas[aria-label="Interactive H3 Earth globe"]') !== null`,
     15_000,
   );
   await cdp.showBanner("01 Signed-out SIM containment & zoomed-out 3D H3 globe");
@@ -448,12 +456,14 @@ async function step02Login(cdp) {
 async function step03GlobeAndPaths(cdp) {
   await ensureSignedIn(cdp);
   await cdp.showBanner("03 Query-driven 3D globe: BASE NODES ONLY vs H3+ARCS & LAN/DIR paths");
-  // Ensure pane 0 is not already maximized; click maximize -> verify BASE NODES ONLY -> restore -> verify H3/ARCS
+  // Ensure pane #1 (globe) is focused, then toggle full/split via the menu overlay
   const alreadyBaseOnly = await cdp.eval(
     `Boolean(document.querySelector('[data-testid="globe-layer-legend"]')?.textContent?.includes("BASE NODES ONLY"))`,
   );
   if (!alreadyBaseOnly) {
-    await cdp.click('[data-testid="query-pane-0"] [data-max-pane="0"]', "maximize globe pane");
+    await cdp.openConfigMenu();
+    await cdp.click('#config-page:not([hidden]) [data-testid="cfg-pane-0"]', "pane #1 globe slot");
+    await cdp.click('#config-page:not([hidden]) [data-testid="toggle-fullscreen"]', "full button in menu");
   }
   const baseLegend = await cdp.waitFor(
     "globe fullscreen legend BASE NODES ONLY",
@@ -461,7 +471,8 @@ async function step03GlobeAndPaths(cdp) {
   );
   await cdp.captureFrame("03-globe-base-nodes-only");
   await sleep(Math.min(600, STEP_MS));
-  await cdp.click('[data-testid="query-pane-0"] [data-max-pane="0"]', "restore split from globe");
+  await cdp.openConfigMenu();
+  await cdp.click('#config-page:not([hidden]) [data-testid="toggle-fullscreen"]', "split button in menu");
   const queryLegend = await cdp.waitFor(
     "globe split legend with H3 or ARCS",
     `(() => { const el = document.querySelector('[data-testid="globe-layer-legend"]'); return el && (el.textContent.includes("H3:") || el.textContent.includes("ARCS:")) ? el.textContent.trim() : null; })()`,
@@ -664,7 +675,8 @@ async function step07Tiling2x2AndKv(cdp) {
 async function step08CameraTsAndReload(cdp) {
   await ensureSignedIn(cdp);
   await cdp.showBanner(`08 Camera Studio: custom TS targeting ${CAMERA_TARGET_NODE} + hard reload KV restore`);
-  await cdp.click('[data-testid="open-camera"]', "camera button");
+  await cdp.openConfigMenu();
+  await cdp.click('#config-page:not([hidden]) [data-testid="open-camera"]', "camera button in menu");
   await cdp.waitFor(
     "camera studio open with syntax highlight",
     `document.querySelector('#camera-page:not([hidden]) [data-testid="cam-preset-highest-p95"]') !== null && document.querySelectorAll('#camera-page:not([hidden]) [data-testid="camera-ts-highlight"] .tok-kw').length > 0`,
@@ -725,11 +737,12 @@ async function step09SignOut(cdp) {
   await dismissOverlays(cdp);
   if (await isSignedInLive(cdp)) {
     await cdp.showBanner("09 Signing out -> verifying clean return to SIM mode");
-    await cdp.click('[href="/auth/logout"]', "sign out link");
+    await cdp.openConfigMenu();
+    await cdp.click('#config-page:not([hidden]) [href="/auth/logout"]', "sign out link");
   }
   await cdp.waitFor(
     "signed-out SIM mode after logout",
-    `document.body.innerText.includes("SIM") && document.querySelector('[href="/login"]') !== null && !document.body.innerText.includes(${JSON.stringify(PRIMARY_NODE)})`,
+    `document.body.innerText.includes("SIM") && document.querySelector('[data-testid="simulated-badge"]') !== null && !document.body.innerText.includes(${JSON.stringify(PRIMARY_NODE)})`,
     15_000,
   );
   await cdp.showBanner(`09 ALL ISOLATED ${NETWORK_LABEL.toUpperCase()} BROWSER CAPABILITIES VERIFIED!`);
