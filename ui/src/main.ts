@@ -192,7 +192,7 @@ function availableContents(): WorkspaceContent[] {
       id: "browser:wide",
       kind: "browser",
       label: "browser:wide",
-      sourceTag: cdpStatus.connected ? "WIDE" : "OFFLINE",
+      sourceTag: cdpStatus.connected ? "WIDE 1440×900" : "OFFLINE",
       sourceClass: cdpStatus.connected ? "is-ch" : "is-warn",
       targetId: primaryTarget?.id,
       viewport: "wide",
