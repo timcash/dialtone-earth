@@ -313,6 +313,13 @@ async function performMagicLinkLogin(cdp) {
   assert.equal(replayResp.status, 401, "replayed single-use magic link must return 401");
   const liveDomText = await cdp.eval(`document.body.innerText`);
   assert.ok(!liveDomText.includes("sim-atlas"), "simulated network still visible after live login");
+  if (cdp.mirror) {
+    try {
+      await cdp.mirror.send("Page.navigate", { url: `${TARGET_ORIGIN}/#mobile-preview` });
+    } catch {
+      // best-effort mobile live sync
+    }
+  }
   await cdp.captureFrame("02-live-hydrated");
 }
 

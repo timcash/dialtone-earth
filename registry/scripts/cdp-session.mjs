@@ -433,14 +433,18 @@ export class CdpClient {
       return true;
     })()`);
     // Mirror non-mutating UI navigation clicks onto mobile preview so both formats
-    // stay visually synced without racing duplicate PUT /api/user/ui-config KV writes.
-    const isKvMutation =
+    // stay visually synced without racing KV writes, triggering duplicate magic-link
+    // submits on empty forms, or navigating mobile away from #mobile-preview.
+    const skipMirrorClick =
       selector.includes("apply-camera-ts") ||
       selector.includes("cam-preset-") ||
       selector.includes("layout-") ||
       selector.includes("cfg-add-") ||
-      selector.includes("cfg-assign");
-    if (this.mirror && !isKvMutation) {
+      selector.includes("cfg-assign") ||
+      selector.includes('type="submit"') ||
+      selector.includes("/login") ||
+      selector.includes("/auth/logout");
+    if (this.mirror && !skipMirrorClick) {
       await this.mirror
         .eval(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (el) el.click(); return Boolean(el); })()`)
         .catch(() => {});
