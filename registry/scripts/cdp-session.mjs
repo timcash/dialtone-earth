@@ -232,6 +232,9 @@ export class CdpClient {
 
   async showBanner(stepLabel) {
     if (!this.headed) return;
+    if (this.mirror) {
+      await this.mirror.showBanner(stepLabel).catch(() => {});
+    }
     try {
       await this.eval(`(() => {
         let el = document.getElementById("__cdp_qa_banner");
@@ -240,23 +243,23 @@ export class CdpClient {
           el.id = "__cdp_qa_banner";
           Object.assign(el.style, {
             position: "fixed",
-            top: "10px",
+            top: "8px",
             right: "10px",
             zIndex: "2147483647",
-            background: "#090d0a",
-            color: "#7ff2a4",
-            border: "1px solid #38d66b",
-            padding: "7px 13px",
+            background: "rgba(10, 10, 10, 0.94)",
+            color: "#ffffff",
+            border: "1.5px solid #ffffff",
+            padding: "5px 10px",
             fontFamily: 'ui-monospace, "SFMono-Regular", Consolas, monospace',
-            fontSize: "12px",
+            fontSize: "11px",
             fontWeight: "700",
             letterSpacing: "0.04em",
             pointerEvents: "none",
-            boxShadow: "0 2px 12px rgba(0,0,0,0.65)",
+            boxShadow: "0 2px 12px rgba(0,0,0,0.75)",
           });
           document.body.appendChild(el);
         }
-        el.textContent = ${JSON.stringify(`SYNCED CDP // ${stepLabel}`)};
+        el.textContent = ${JSON.stringify(`TEST // ${stepLabel}`)};
         return true;
       })()`);
     } catch {
@@ -284,6 +287,9 @@ export class CdpClient {
 
   async spotlight(selector, caption = "", holdMs = 350) {
     if (!this.headed) return;
+    if (this.mirror) {
+      await this.mirror.spotlight(selector, caption, 0).catch(() => {});
+    }
     try {
       await this.eval(`(() => {
         const el = document.querySelector(${JSON.stringify(selector)});
@@ -300,10 +306,9 @@ export class CdpClient {
             position: "fixed",
             zIndex: "2147483645",
             pointerEvents: "none",
-            border: "2.5px solid #38d66b",
-            borderRadius: "6px",
-            background: "rgba(56, 214, 107, 0.09)",
-            boxShadow: "0 0 0 4px rgba(56, 214, 107, 0.22), 0 0 28px rgba(56, 214, 107, 0.55)",
+            border: "2.5px solid #ffffff",
+            background: "rgba(255, 255, 255, 0.11)",
+            boxShadow: "0 0 0 3px rgba(255, 255, 255, 0.25), 0 0 24px rgba(255, 255, 255, 0.45)",
             transition: "all 220ms cubic-bezier(0.2, 0.8, 0.2, 1)",
           });
           document.body.appendChild(box);
@@ -329,23 +334,22 @@ export class CdpClient {
             position: "fixed",
             zIndex: "2147483646",
             pointerEvents: "none",
-            background: "#08120b",
-            color: "#8ef5ad",
-            border: "1px solid #38d66b",
-            borderRadius: "4px",
-            padding: "4px 9px",
+            background: "#ffffff",
+            color: "#0b0b0b",
+            border: "1px solid #ffffff",
+            padding: "3px 8px",
             fontFamily: 'ui-monospace, "SFMono-Regular", Consolas, monospace',
             fontSize: "11px",
             fontWeight: "800",
             letterSpacing: "0.04em",
-            boxShadow: "0 4px 16px rgba(0,0,0,0.75)",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.8)",
             whiteSpace: "nowrap",
             transition: "all 220ms cubic-bezier(0.2, 0.8, 0.2, 1)",
           });
           document.body.appendChild(lbl);
         }
-        const labelTop = top > 34 ? top - 28 : Math.min(window.innerHeight - 28, top + height + 6);
-        const labelLeft = Math.min(window.innerWidth - 260, Math.max(6, left));
+        const labelTop = top > 34 ? top - 26 : Math.min(window.innerHeight - 28, top + height + 6);
+        const labelLeft = Math.min(Math.max(6, window.innerWidth - 220), Math.max(6, left));
         lbl.textContent = ${JSON.stringify(caption ? `▶ ${caption}` : `▶ ${selector}`)};
         Object.assign(lbl.style, {
           opacity: "1",
@@ -362,6 +366,9 @@ export class CdpClient {
 
   async pulseClick(selector) {
     if (!this.headed) return;
+    if (this.mirror) {
+      await this.mirror.pulseClick(selector).catch(() => {});
+    }
     try {
       await this.eval(`(() => {
         const el = document.querySelector(${JSON.stringify(selector)});
@@ -377,8 +384,8 @@ export class CdpClient {
           width: "28px",
           height: "28px",
           borderRadius: "50%",
-          border: "3px solid #7ff2a4",
-          background: "rgba(56, 214, 107, 0.35)",
+          border: "3px solid #ffffff",
+          background: "rgba(255, 255, 255, 0.35)",
           transform: "scale(0.5)",
           opacity: "1",
           transition: "transform 360ms ease-out, opacity 360ms ease-out",
@@ -408,6 +415,11 @@ export class CdpClient {
       el.click();
       return true;
     })()`);
+    if (this.mirror) {
+      await this.mirror
+        .eval(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (el) el.click(); return Boolean(el); })()`)
+        .catch(() => {});
+    }
   }
 
   async typeInto(selector, value, label = "") {
@@ -514,6 +526,11 @@ export class CdpClient {
   /** Close only the CDP WebSocket connection — never terminates the browser. */
   disconnect() {
     this.closedByCaller = true;
+    try {
+      this.mirror?.disconnect();
+    } catch {
+      // ignore
+    }
     try {
       this.ws.close();
     } catch {
@@ -752,6 +769,25 @@ export async function connectAppSession(opts = {}) {
   await cdp.send("Page.enable");
   await cdp.send("Runtime.enable");
   await cdp.send("Network.enable");
+  // Attach optional mobile preview mirror (#mobile-preview) so spotlights, banners & UI steps highlight BOTH formats!
+  try {
+    const status = await probeCdp(ensured.port);
+    const mobileTarget = (status.targets || []).find(
+      (t) => t.type === "page" && String(t.url || "").includes("#mobile-preview"),
+    );
+    if (mobileTarget?.webSocketDebuggerUrl) {
+      const mirror = new CdpClient(mobileTarget.webSocketDebuggerUrl, {
+        targetOrigin: opts.targetOrigin || DEFAULT_TARGET_ORIGIN,
+        headed: !opts.headless,
+        stepMs: 0,
+        saveScreenshots: false,
+      });
+      await mirror.send("Runtime.enable");
+      cdp.mirror = mirror;
+    }
+  } catch {
+    // mobile mirror is optional
+  }
   if (!opts.headless) {
     await cdp.send("Page.bringToFront");
   }

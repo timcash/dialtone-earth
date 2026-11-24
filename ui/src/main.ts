@@ -303,7 +303,10 @@ function renderWorkspace(): void {
   assigned.forEach((content, idx) => {
     const paneEl = grid.children[idx] as HTMLElement;
     const isFocused = idx === focusedPane;
-    const isDemoPane = content.kind === "browser" && isBrowserDemo && (content.id === "browser:wide" || idx === 1);
+    const isDemoPane =
+      content.kind === "browser" &&
+      isBrowserDemo &&
+      (content.id === "browser:wide" || content.id === "browser:mobile" || idx === 1);
     paneEl.setAttribute("data-testid", `wm-pane-${idx}`);
     paneEl.setAttribute("data-content-id", content.id);
     paneEl.classList.toggle("is-focused", isFocused);

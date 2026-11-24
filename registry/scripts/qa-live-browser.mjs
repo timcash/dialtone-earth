@@ -647,7 +647,22 @@ async function step07Tiling2x2AndKv(cdp) {
     `document.querySelector('[data-testid="split-grid"]')?.getAttribute("data-layout") === "2x2" && document.body.innerText.includes("shell") && document.body.innerText.includes("fast") && document.body.innerText.includes(${JSON.stringify(QA_EMAIL)})`,
     15_000,
   );
-  await cdp.spotlight('[data-testid="split-grid"]', "DEMO: Live 2x2 Workspace Persisted in CF KV", 600);
+  await cdp.spotlight('[data-testid="split-grid"]', "WIDE: 2x2 · MOBILE: 1-COL", 600);
+  if (cdp.mirror) {
+    const mobileCheck = await cdp.mirror.eval(`(() => {
+      const grid = document.querySelector('[data-testid="split-grid"]');
+      if (!grid) return { ok: false, reason: "missing split-grid" };
+      const cols = getComputedStyle(grid).gridTemplateColumns.trim().split(/\\s+/).filter(Boolean).length;
+      const layout = grid.getAttribute("data-layout");
+      return { ok: cols === 1 && (layout === "1" || layout === "1/1"), width: window.innerWidth, cols, layout };
+    })()`);
+    assert.equal(
+      mobileCheck?.ok,
+      true,
+      `Mobile preview must strictly demonstrate 1 column even when desktop is 2x2 (got ${JSON.stringify(mobileCheck)})`,
+    );
+    console.log(`  [PASS 07-MOBILE] verified mobile (${mobileCheck.width}px) strictly 1-column layout="${mobileCheck.layout}" (cols=${mobileCheck.cols})`);
+  }
   await cdp.captureFrame("07-live-metal-2x2-workspace");
   console.log("  [PASS 07] configured 2x2 split (Globe + Hosts[fast] + Plugins + Users) & persisted to CF KV");
   await sleep(STEP_MS);
