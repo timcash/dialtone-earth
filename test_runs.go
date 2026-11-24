@@ -53,6 +53,7 @@ type pipelineState struct {
 	Stage        string `json:"stage"`
 	Message      string `json:"message"`
 	Changed      string `json:"changed,omitempty"`
+	TargetOrigin string `json:"target_origin,omitempty"`
 	DeployURL    string `json:"deploy_url,omitempty"`
 	VersionID    string `json:"version_id,omitempty"`
 	TestedHash   string `json:"tested_hash,omitempty"`

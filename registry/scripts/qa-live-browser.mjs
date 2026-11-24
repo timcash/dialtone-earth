@@ -382,32 +382,25 @@ async function step01SignedOut(cdp) {
   // verify unauthenticated containment via fresh cookieless fetch without destroying the live session.
   await dismissOverlays(cdp);
   if (KEEP_SIGNED_IN && process.env.QA_FORCE_RELOGIN !== "1" && (await isSignedInLive(cdp))) {
-    if (IS_STAGING_TEST) {
-      // Reload freshly built staging dist so wide & mobile tabs reflect the latest code edits.
-      await cdp.send("Page.reload", { ignoreCache: true });
-      await cdp.waitFor(
-        `reloaded LIVE ${NETWORK_LABEL} staging preview`,
-        `document.body.innerText.includes("LIVE") && document.querySelector('[href="/auth/logout"]') !== null`,
-        15_000,
-      );
+    // Reload freshly built/deployed bundle so both wide & mobile tabs verify the latest code.
+    await cdp.send("Page.reload", { ignoreCache: true });
+    await cdp.waitFor(
+      `reloaded LIVE ${NETWORK_LABEL} app`,
+      `document.body.innerText.includes("LIVE") && document.querySelector('[href="/auth/logout"]') !== null`,
+      15_000,
+    );
+    if (cdp.mirror) {
       try {
-        const listResp = await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`, { signal: AbortSignal.timeout(1_500) });
-        const pages = listResp.ok ? await listResp.json() : [];
-        const mob = Array.isArray(pages) ? pages.find((p) => String(p.url || "").includes("#mobile-preview")) : null;
-        if (mob?.webSocketDebuggerUrl) {
-          const mobCdp = new CdpClient(mob.webSocketDebuggerUrl, { headed: false });
-          await mobCdp.send("Page.reload", { ignoreCache: true });
-          mobCdp.disconnect();
-        }
+        await cdp.mirror.send("Page.reload", { ignoreCache: true });
       } catch {
-        // best-effort mobile preview reload
+        // best-effort mobile reload
       }
     }
     const anonHome = await fetch(`${TARGET_ORIGIN}/`);
     assert.equal(anonHome.status, 200, "signed-out GET / should return 200");
     const anonHtml = await anonHome.text();
     assert.ok(!anonHtml.includes("vm-asia"), "real metal node leaked in signed-out HTML");
-    await cdp.showBanner(`01 Signed-out 401 checks passed (preserving LIVE ${NETWORK_LABEL} session)`);
+    await cdp.showBanner(`01 Signed-out 401 checks passed (LIVE ${NETWORK_LABEL} · ${TARGET_ORIGIN})`);
     console.log(`  [PASS 01] 401 default-deny on protected routes + zero signed-out leaks (preserved existing LIVE ${NETWORK_LABEL} session)`);
     await sleep(Math.min(400, STEP_MS));
     return;

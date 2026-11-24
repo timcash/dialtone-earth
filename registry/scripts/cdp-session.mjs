@@ -771,18 +771,24 @@ export async function connectAppSession(opts = {}) {
   await cdp.send("Network.enable");
   // Attach optional mobile preview mirror (#mobile-preview) so spotlights, banners & UI steps highlight BOTH formats!
   try {
+    const targetOrigin = (opts.targetOrigin || DEFAULT_TARGET_ORIGIN).replace(/\/+$/, "");
     const status = await probeCdp(ensured.port);
     const mobileTarget = (status.targets || []).find(
       (t) => t.type === "page" && String(t.url || "").includes("#mobile-preview"),
     );
     if (mobileTarget?.webSocketDebuggerUrl) {
       const mirror = new CdpClient(mobileTarget.webSocketDebuggerUrl, {
-        targetOrigin: opts.targetOrigin || DEFAULT_TARGET_ORIGIN,
+        targetOrigin,
         headed: !opts.headless,
         stepMs: 0,
         saveScreenshots: false,
       });
+      await mirror.send("Page.enable");
       await mirror.send("Runtime.enable");
+      if (!String(mobileTarget.url || "").startsWith(targetOrigin)) {
+        await mirror.send("Page.navigate", { url: `${targetOrigin}/#mobile-preview` });
+        await sleep(600);
+      }
       cdp.mirror = mirror;
     }
   } catch {

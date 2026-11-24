@@ -204,7 +204,8 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	filter := flags.String("filter", "", "Run only the Go tests matching this regular expression")
 	list := flags.Bool("list", false, "Print the selected test names without running them")
 	browser := flags.Bool("browser", false, "Start or reconnect persistent CDP Chrome synced with the test dashboard")
-	keepSignedIn := flags.Bool("keep-signed-in", false, "Keep the persistent CDP Chrome browser signed into LIVE metal after tests finish")
+	prod := flags.Bool("prod", false, "Run the live production verification suite against https://metal.dialtone.earth/ and https://dialtone.earth/")
+	keepSignedIn := flags.Bool("keep-signed-in", false, "Keep the persistent CDP Chrome browser signed into LIVE session after tests finish")
 	deployOnPass := flags.Bool("deploy-on-pass", false, "Automatically deploy live to https://dialtone.earth/ if all tests pass")
 	triggerFile := flags.String("trigger-file", "", "Optional edited file label shown in the live pipeline banner")
 	closeBrowser := flags.Bool("close-browser", false, "Close the persistent CDP Chrome browser and exit")
@@ -226,6 +227,10 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	cdpScript := filepath.Join(root, "registry", "scripts", "cdp-session.mjs")
 	if *closeBrowser {
 		return runExternal(root, stdout, stderr, "node", cdpScript, "close", "--port", strconv.Itoa(*cdpPort))
+	}
+	if *prod {
+		deployedRec := readDeployedRecord(root)
+		return runTrackedProductionSuite(root, *cdpPort, *dashboardURL, deployedRec.VersionID, deployedRec.DeployedHash, "", false, stdout, stderr)
 	}
 	names, err := listTestNames(root, *filter)
 	if err != nil {
@@ -275,21 +280,23 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	}
 	runHash := computeStagingFingerprint(root)
 	writePipelineState(root, pipelineState{
-		Stage:   "testing",
-		Message: msg,
-		Changed: strings.TrimSpace(*triggerFile),
-		Total:   len(state.Tests),
+		Stage:        "testing",
+		Message:      msg,
+		Changed:      strings.TrimSpace(*triggerFile),
+		TargetOrigin: "http://127.0.0.1:5175",
+		Total:        len(state.Tests),
 	})
 	testErr := runGoTests(root, &state, *filter, extraEnv, stdout)
 	passed, failed, total := countStateTotals(&state)
 	if testErr != nil {
 		writePipelineState(root, pipelineState{
-			Stage:   "failed",
-			Message: fmt.Sprintf("Tests failed (%d failed) — deploy blocked", failed),
-			Changed: strings.TrimSpace(*triggerFile),
-			Passed:  passed,
-			Failed:  failed,
-			Total:   total,
+			Stage:        "failed",
+			Message:      fmt.Sprintf("Tests failed (%d failed) — deploy blocked", failed),
+			Changed:      strings.TrimSpace(*triggerFile),
+			TargetOrigin: "http://127.0.0.1:5175",
+			Passed:       passed,
+			Failed:       failed,
+			Total:        total,
 		})
 		return testErr
 	}
@@ -311,6 +318,7 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 			Stage:        stage,
 			Message:      readyMsg,
 			Changed:      strings.TrimSpace(*triggerFile),
+			TargetOrigin: "http://127.0.0.1:5175",
 			TestedHash:   testedHash,
 			DeployedHash: deployedHash,
 			Passed:       passed,
@@ -358,6 +366,111 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
+const prodVerificationFilter = "^(TestBrowser0[1-9]|TestProductionLiveSmoke|TestDialtoneEarthLiveOwnerAccessOnCloudflare)$"
+const defaultProdBrowserOrigin = "https://metal.dialtone.earth"
+
+// runTrackedProductionSuite runs the live production test suite (all 9 dual-format
+// browser tests against live https://metal.dialtone.earth + live https://dialtone.earth/
+// HTTP/R2/security smoke checks) while streaming live test progress into logs/state.json
+// and projecting both wide & mobile production views into the test dashboard.
+func runTrackedProductionSuite(
+	root string,
+	cdpPort int,
+	dashboardURL string,
+	versionID string,
+	deployedHash string,
+	promotedRel string,
+	recordDeploy bool,
+	stdout, stderr io.Writer,
+) error {
+	cdpScript := filepath.Join(root, "registry", "scripts", "cdp-session.mjs")
+	if err := ensurePersistentBrowserSessionForOrigin(root, cdpScript, cdpPort, dashboardURL, defaultProdBrowserOrigin, stdout, stderr); err != nil {
+		return err
+	}
+	names, err := listTestNames(root, prodVerificationFilter)
+	if err != nil {
+		return err
+	}
+	if len(names) == 0 {
+		return errors.New("production verification filter matched no tests in cli_test.go")
+	}
+	state := buildInitialTestState(root, names, prodVerificationFilter)
+	populateTestSources(root, &state)
+	if err := writeTestState(root, &state); err != nil {
+		return err
+	}
+	prevPipe := readPipelineState(root)
+	keepTestedHash := deployedHash
+	if keepTestedHash == "" {
+		keepTestedHash = prevPipe.TestedHash
+	}
+	writePipelineState(root, pipelineState{
+		Stage:        "verifying_prod",
+		Message:      fmt.Sprintf("Running live production suite (%d tests) on https://metal.dialtone.earth & https://dialtone.earth...", len(names)),
+		TargetOrigin: defaultProdBrowserOrigin,
+		DeployURL:    defaultLiveSiteURL + "/",
+		VersionID:    versionID,
+		TestedHash:   keepTestedHash,
+		Total:        len(state.Tests),
+	})
+
+	extraEnv := []string{
+		"DIALTONE_VERIFY_PROD=1",
+		"DIALTONE_LIVE_CLOUDFLARE_E2E=1",
+		"DIALTONE_CDP_REUSE=1",
+		"DIALTONE_CDP_PORT=" + strconv.Itoa(cdpPort),
+		"DIALTONE_DASHBOARD_URL=" + dashboardURL,
+		"QA_HEADED=1",
+		"QA_KEEP_SIGNED_IN=1",
+		"QA_ORIGIN=" + defaultProdBrowserOrigin,
+		"QA_EMAIL=test@dialtone.earth",
+	}
+	if tok, err := loadLiveControlToken(""); err == nil && tok != "" {
+		extraEnv = append(extraEnv, "DIALTONE_LIVE_TOKEN="+tok)
+	}
+
+	testErr := runGoTests(root, &state, prodVerificationFilter, extraEnv, stdout)
+	passed, failed, total := countStateTotals(&state)
+	if testErr != nil {
+		writePipelineState(root, pipelineState{
+			Stage:        "failed",
+			Message:      fmt.Sprintf("Live production verification failed (%d/%d passed, %d failed)", passed, total, failed),
+			TargetOrigin: defaultProdBrowserOrigin,
+			DeployURL:    defaultLiveSiteURL + "/",
+			VersionID:    versionID,
+			TestedHash:   keepTestedHash,
+			Passed:       passed,
+			Failed:       failed,
+			Total:        total,
+		})
+		return testErr
+	}
+	if recordDeploy && deployedHash != "" {
+		writeDeployedRecord(root, deployedRecord{
+			DeployedHash: deployedHash,
+			VersionID:    versionID,
+			VerifiedProd: true,
+		})
+	}
+	msg := fmt.Sprintf("Live on https://dialtone.earth/ & production verified (%d/%d live prod tests passed)", passed, total)
+	if promotedRel != "" {
+		msg += fmt.Sprintf(" + dialtone auto-update %s", promotedRel)
+	}
+	writePipelineState(root, pipelineState{
+		Stage:        "deployed",
+		Message:      msg,
+		TargetOrigin: defaultProdBrowserOrigin,
+		DeployURL:    defaultLiveSiteURL + "/",
+		VersionID:    versionID,
+		TestedHash:   keepTestedHash,
+		DeployedHash: deployedHash,
+		Passed:       passed,
+		Failed:       0,
+		Total:        total,
+	})
+	return nil
+}
+
 func extractWranglerVersionID(output string) string {
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
@@ -369,7 +482,15 @@ func extractWranglerVersionID(output string) string {
 }
 
 func ensurePersistentBrowserSession(root, cdpScript string, port int, dashboardURL string, stdout, stderr io.Writer) error {
-	command := exec.Command("node", cdpScript, "ensure", "--port", strconv.Itoa(port), "--dashboard", dashboardURL)
+	return ensurePersistentBrowserSessionForOrigin(root, cdpScript, port, dashboardURL, "http://127.0.0.1:5175", stdout, stderr)
+}
+
+func ensurePersistentBrowserSessionForOrigin(root, cdpScript string, port int, dashboardURL, origin string, stdout, stderr io.Writer) error {
+	args := []string{cdpScript, "ensure", "--port", strconv.Itoa(port), "--dashboard", dashboardURL}
+	if strings.TrimSpace(origin) != "" {
+		args = append(args, "--origin", strings.TrimSpace(origin))
+	}
+	command := exec.Command("node", args...)
 	command.Dir = root
 	command.Stderr = stderr
 	out, err := command.Output()
@@ -463,53 +584,7 @@ func runDeploy(args []string, stdout, stderr io.Writer) error {
 		promotedRel := promoteTestReleaseChannelToLatest(defaultLiveSiteURL, "", stdout)
 		deployedHash := computeStagingFingerprint(root)
 		versionID := extractWranglerVersionID(deployBuf.String())
-		if *requirePass {
-			writePipelineState(root, pipelineState{
-				Stage:      "verifying_prod",
-				Message:    "Deployed to https://dialtone.earth/ — running live production verification...",
-				DeployURL:  defaultLiveSiteURL + "/",
-				VersionID:  versionID,
-				TestedHash: deployedHash,
-				Passed:     passed,
-				Total:      total,
-			})
-		}
-		if err := runProductionSmokeVerification(root, stdout, stderr); err != nil {
-			if *requirePass {
-				writePipelineState(root, pipelineState{
-					Stage:      "failed",
-					Message:    fmt.Sprintf("Deployed, but live production verification failed: %v", err),
-					DeployURL:  defaultLiveSiteURL + "/",
-					VersionID:  versionID,
-					TestedHash: deployedHash,
-					Passed:     passed,
-					Total:      total,
-				})
-			}
-			return err
-		}
-		writeDeployedRecord(root, deployedRecord{
-			DeployedHash: deployedHash,
-			VersionID:    versionID,
-			VerifiedProd: true,
-		})
-		if *requirePass {
-			msg := fmt.Sprintf("Live on https://dialtone.earth/ & production verified (%d/%d staging + 4/4 prod checks)", passed, total)
-			if promotedRel != "" {
-				msg += fmt.Sprintf(" + dialtone auto-update %s", promotedRel)
-			}
-			writePipelineState(root, pipelineState{
-				Stage:        "deployed",
-				Message:      msg,
-				DeployURL:    defaultLiveSiteURL + "/",
-				VersionID:    versionID,
-				TestedHash:   deployedHash,
-				DeployedHash: deployedHash,
-				Passed:       passed,
-				Total:        total,
-			})
-		}
-		return nil
+		return runTrackedProductionSuite(root, 9222, "http://127.0.0.1:5174/", versionID, deployedHash, promotedRel, true, stdout, stderr)
 	}
 	root, err := projectRoot()
 	if err != nil {

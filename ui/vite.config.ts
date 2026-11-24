@@ -34,6 +34,7 @@ type RunOptions = {
   browser: boolean;
   keepSignedIn: boolean;
   deployOnPass: boolean;
+  prod: boolean;
   filter: string;
   dashboardUrl: string;
 };
@@ -67,11 +68,13 @@ function testApiPlugin(): Plugin {
           const browser = parsedUrl.searchParams.get("browser") === "1";
           const keepSignedIn = parsedUrl.searchParams.get("keepSignedIn") === "1";
           const deployOnPass = parsedUrl.searchParams.get("deployOnPass") === "1";
+          const prod = parsedUrl.searchParams.get("prod") === "1";
           const hostHeader = typeof request.headers.host === "string" ? request.headers.host : "127.0.0.1:5174";
           startTests(response, {
             browser,
             keepSignedIn,
             deployOnPass,
+            prod,
             filter,
             dashboardUrl: `http://${hostHeader}/`,
           });
@@ -178,6 +181,9 @@ function startTests(response: ServerResponse, opts: RunOptions): void {
     return;
   }
   const extraArgs: string[] = [];
+  if (opts.prod) {
+    extraArgs.push("--prod");
+  }
   if (opts.browser) {
     extraArgs.push("--browser", "--cdp-port", String(cdpPort), "--dashboard-url", opts.dashboardUrl);
     if (opts.keepSignedIn) extraArgs.push("--keep-signed-in");
@@ -259,16 +265,27 @@ async function listCdpPageTargets(): Promise<CdpPageTarget[]> {
 const MOBILE_PREVIEW_HASH = "#mobile-preview";
 let creatingMobileTarget: Promise<CdpPageTarget | null> | null = null;
 
+async function activeTargetOrigin(): Promise<string> {
+  const pipe = await readPipeline();
+  const target = text(pipe.target_origin);
+  if (target) return target.replace(/\/+$/, "");
+  const st = text(pipe.stage);
+  if (st === "verifying_prod" || st === "deployed") {
+    return "https://metal.dialtone.earth";
+  }
+  return (process.env.STAGING_PREVIEW_URL || "http://127.0.0.1:5175").replace(/\/+$/, "");
+}
+
 async function findActiveAppPageTarget(targetId = "", viewport = ""): Promise<CdpPageTarget | null> {
   const pages = await listCdpPageTargets();
+  const preferredOrigin = await activeTargetOrigin();
   if (viewport === "mobile") {
     const existing = pages.find((p) => p.url.includes(MOBILE_PREVIEW_HASH));
     if (existing) return existing;
     if (!creatingMobileTarget) {
       creatingMobileTarget = (async () => {
         try {
-          const base = (process.env.STAGING_PREVIEW_URL || "http://127.0.0.1:5175").replace(/\/+$/, "");
-          await createNewCdpTab(`${base}/${MOBILE_PREVIEW_HASH}`);
+          await createNewCdpTab(`${preferredOrigin}/${MOBILE_PREVIEW_HASH}`);
           await new Promise((r) => setTimeout(r, 450));
           const updated = await listCdpPageTargets();
           return updated.find((p) => p.url.includes(MOBILE_PREVIEW_HASH)) || null;
@@ -289,6 +306,7 @@ async function findActiveAppPageTarget(targetId = "", viewport = ""): Promise<Cd
   const desktopPages = pages.filter((p) => !p.url.includes(MOBILE_PREVIEW_HASH));
   const pool = desktopPages.length > 0 ? desktopPages : pages;
   return (
+    pool.find((t) => t.url.startsWith(preferredOrigin)) ||
     pool.find((t) => t.url.includes("127.0.0.1:5175")) ||
     pool.find((t) => t.url.includes("metal.dialtone.earth")) ||
     pool.find((t) => t.url.includes("dialtone.earth")) ||
@@ -532,7 +550,9 @@ async function readCdpStatus(): Promise<Record<string, unknown>> {
     const version: unknown = await versionResp.json();
     const pages = await listCdpPageTargets();
     const visiblePages = pages.filter((p) => !p.url.includes(MOBILE_PREVIEW_HASH));
+    const preferredOrigin = await activeTargetOrigin();
     const appPage =
+      visiblePages.find((t) => t.url.startsWith(preferredOrigin)) ||
       visiblePages.find((t) => t.url.includes("127.0.0.1:5175")) ||
       visiblePages.find((t) => t.url.includes("metal.dialtone.earth")) ||
       visiblePages[0];
@@ -542,6 +562,8 @@ async function readCdpStatus(): Promise<Record<string, unknown>> {
       pid: typeof meta?.pid === "number" ? meta.pid : null,
       browser: isRecord(version) ? text(version.Browser) : "",
       app_url: appPage ? appPage.url : text(meta?.app_url),
+      active_target_id: appPage ? appPage.id : "",
+      active_origin: preferredOrigin,
       page_count: visiblePages.length,
       targets: visiblePages.map((p) => ({ id: p.id, title: p.title, url: p.url })),
     };

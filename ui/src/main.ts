@@ -38,6 +38,8 @@ type CdpStatus = {
   port: number;
   pid?: number | null;
   app_url?: string;
+  active_target_id?: string;
+  active_origin?: string;
   page_count?: number;
   targets?: CdpTarget[];
 };
@@ -46,6 +48,7 @@ type PipelineStatus = {
   stage: string;
   message: string;
   changed?: string;
+  target_origin?: string;
   deploy_url?: string;
   version_id?: string;
   passed?: number;
@@ -183,33 +186,47 @@ function shortHostLabel(rawUrl: string): string {
 }
 
 function availableContents(): WorkspaceContent[] {
-  const previewUrl = stagingEnv.preview?.preview_url || cdpStatus.app_url || "http://127.0.0.1:5175/";
+  const activeOrigin = (
+    pipelineStatus.target_origin ||
+    cdpStatus.active_origin ||
+    stagingEnv.preview?.preview_url ||
+    "http://127.0.0.1:5175"
+  ).replace(/\/+$/, "");
+  const isProdTarget = activeOrigin.startsWith("https://");
   const targets = cdpStatus.targets && cdpStatus.targets.length > 0 ? cdpStatus.targets : [];
   const primaryTarget =
+    (cdpStatus.active_target_id ? targets.find((t) => t.id === cdpStatus.active_target_id) : undefined) ||
+    targets.find((t) => t.url.startsWith(activeOrigin)) ||
     targets.find((t) => t.url.includes("127.0.0.1:5175")) ||
     targets.find((t) => t.url.includes("metal.dialtone.earth")) ||
     targets[0];
 
   const items: WorkspaceContent[] = [
-    { id: "tests:all", kind: "tests-all", label: "db:tests", sourceTag: "GO+DB", sourceClass: "is-ch" },
+    {
+      id: "tests:all",
+      kind: "tests-all",
+      label: "db:tests",
+      sourceTag: isProdTarget ? "LIVE PROD" : "STAGING TEST",
+      sourceClass: "is-ch",
+    },
     {
       id: "browser:wide",
       kind: "browser",
       label: "browser:wide",
-      sourceTag: cdpStatus.connected ? "WIDE 1440×900" : "OFFLINE",
+      sourceTag: cdpStatus.connected ? (isProdTarget ? "PROD WIDE 1440×900" : "WIDE 1440×900") : "OFFLINE",
       sourceClass: cdpStatus.connected ? "is-ch" : "is-warn",
       targetId: primaryTarget?.id,
       viewport: "wide",
-      url: primaryTarget?.url || previewUrl,
+      url: primaryTarget?.url || `${activeOrigin}/`,
     },
     {
       id: "browser:mobile",
       kind: "browser",
       label: "browser:mobile",
-      sourceTag: cdpStatus.connected ? "MOBILE 390×844" : "OFFLINE",
+      sourceTag: cdpStatus.connected ? (isProdTarget ? "PROD MOBILE 390×844" : "MOBILE 390×844") : "OFFLINE",
       sourceClass: cdpStatus.connected ? "is-ch" : "is-warn",
       viewport: "mobile",
-      url: previewUrl,
+      url: `${activeOrigin}/`,
     },
     { id: "tests:browser", kind: "tests-browser", label: "cdp:suite", sourceTag: "CDP", sourceClass: "is-ch" },
     { id: "log:active", kind: "log", label: "run:log", sourceTag: "LOG", sourceClass: "is-cf" },
@@ -406,7 +423,7 @@ function renderBrowserPaneBody(
   runningTest: TestRow | undefined,
 ): void {
   const streamKey = cdpStatus.connected
-    ? `${content.viewport || "default"}:${content.viewport === "mobile" ? "mobile" : content.targetId || "default"}:${streamNonce}`
+    ? `${content.viewport || "default"}:${content.viewport === "mobile" ? content.url || "mobile" : content.targetId || "default"}:${streamNonce}`
     : "offline";
   if (slot.getAttribute("data-mounted-stream") !== streamKey) {
     slot.setAttribute("data-mounted-stream", streamKey);
@@ -680,6 +697,7 @@ function renderBottomBar(
       <div class="earth-bar-right">
         <button type="button" class="tbl-chip" data-testid="add-browser-btn" title="Open an additional projected Chrome browser tab">+ browser</button>
         <button type="button" class="tbl-chip" data-testid="run-browser-suite" ${busy ? "disabled" : ""}>run browser</button>
+        <button type="button" class="tbl-chip" data-testid="run-prod-suite" ${busy ? "disabled" : ""} title="Run the full live production verification suite on https://metal.dialtone.earth & https://dialtone.earth">test live</button>
         <button type="button" class="tbl-chip" data-testid="start-tests" ${busy ? "disabled" : ""}>
           ${starting ? "starting…" : stage === "deploying" ? "deploying…" : stage === "verifying_prod" ? "verifying…" : runningTest ? "running…" : "start tests"}
         </button>
@@ -694,6 +712,10 @@ function renderBottomBar(
   const startButton = bar.querySelector<HTMLButtonElement>("[data-testid='start-tests']");
   startButton?.addEventListener("click", () => {
     startAllTests().catch(showError);
+  });
+
+  bar.querySelector<HTMLButtonElement>("[data-testid='run-prod-suite']")?.addEventListener("click", () => {
+    startProdTests().catch(showError);
   });
 
   bar.querySelector<HTMLButtonElement>("[data-testid='deploy-live']")?.addEventListener("click", () => {
@@ -1016,6 +1038,21 @@ async function refreshCdpStatus(): Promise<void> {
 
 async function startAllTests(): Promise<void> {
   await startFilteredTests("", useBrowser, deployOnPass);
+}
+
+async function startProdTests(): Promise<void> {
+  starting = true;
+  errorMessage = "";
+  renderWorkspace();
+  const response = await fetch("/api/tests/run?prod=1", { method: "POST" });
+  const payload = (await response.json()) as { error?: string };
+  starting = false;
+  if (!response.ok) {
+    throw new Error(payload.error || `Could not start live production suite: HTTP ${response.status}`);
+  }
+  await refreshTests();
+  void refreshPipeline();
+  void refreshCdpStatus();
 }
 
 async function promoteToLive(): Promise<void> {
