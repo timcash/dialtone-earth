@@ -206,6 +206,7 @@ function binaryResp(
   filename: string,
   sha256: string,
   securityHeaders: Record<string, string>,
+  extraHeaders?: Record<string, string>,
 ): Response {
   const headers = new Headers(securityHeaders);
   headers.set("Content-Type", contentType || "application/octet-stream");
@@ -213,6 +214,11 @@ function binaryResp(
   headers.set("Cache-Control", "no-store");
   if (sha256) headers.set("X-Dialtone-Sha256", sha256);
   if (typeof obj.size === "number") headers.set("Content-Length", String(obj.size));
+  if (extraHeaders) {
+    for (const [k, v] of Object.entries(extraHeaders)) {
+      if (v) headers.set(k, v);
+    }
+  }
   return new Response(obj.body as BodyInit, { status: 200, headers });
 }
 
@@ -351,6 +357,7 @@ export async function handleRegistryRoute(
     if (tag && !TAG_RE.test(tag)) {
       return jsonResp({ error: "Invalid tag format (expected vX.Y.Z)" }, 400, securityHeaders);
     }
+    const shallow = cleanText(request.headers.get("X-Dialtone-Shallow") || "", 512);
 
     const buf = await request.arrayBuffer();
     if (buf.byteLength === 0) {
@@ -360,7 +367,7 @@ export async function handleRegistryRoute(
     const bundleKey = `code/${repo}/bundles/${sha}.bundle`;
     await r2.put(bundleKey, buf, {
       httpMetadata: { contentType: "application/octet-stream" },
-      customMetadata: { repo, branch, sha, sha256: bundleSha256 },
+      customMetadata: { repo, branch, sha, sha256: bundleSha256, ...(shallow ? { shallow } : {}) },
     });
 
     const existing = (await readJsonKv<StoredRepoRecord>(kv!, codeRepoKey(repo))) ?? {
@@ -453,6 +460,10 @@ export async function handleRegistryRoute(
       `${repo}.bundle`,
       targetSha256,
       securityHeaders,
+      {
+        "X-Dialtone-Branch": obj.customMetadata?.branch || rec.default_branch || "main",
+        ...(obj.customMetadata?.shallow ? { "X-Dialtone-Shallow": obj.customMetadata.shallow } : {}),
+      },
     );
   }
 

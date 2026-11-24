@@ -311,6 +311,17 @@ func pushCodeBundle(dir, repo, branch, tag, baseURL, token string, includeArchiv
 		return "", err
 	}
 
+	shallowRoots := ""
+	if gitDir, err := runGitOutput(dir, "rev-parse", "--git-dir"); err == nil {
+		shallowPath := filepath.Join(gitDir, "shallow")
+		if !filepath.IsAbs(shallowPath) {
+			shallowPath = filepath.Join(dir, shallowPath)
+		}
+		if rawShallow, err := os.ReadFile(shallowPath); err == nil {
+			shallowRoots = strings.Join(strings.Fields(string(rawShallow)), ",")
+		}
+	}
+
 	endpoint := strings.TrimRight(baseURL, "/") + "/api/code/" + url.PathEscape(repo) + "/push"
 	raw, _, err := registryHTTPDo(http.MethodPut, endpoint, token, bytes.NewReader(bundleData), map[string]string{
 		"Content-Type":       "application/octet-stream",
@@ -319,6 +330,7 @@ func pushCodeBundle(dir, repo, branch, tag, baseURL, token string, includeArchiv
 		"X-Dialtone-Subject": subject,
 		"X-Dialtone-Author":  author,
 		"X-Dialtone-Tag":     tag,
+		"X-Dialtone-Shallow": shallowRoots,
 	})
 	if err != nil {
 		return "", err
@@ -445,7 +457,7 @@ func runCodeClone(args []string, stdout, stderr io.Writer) error {
 		targetDir = fs.Arg(1)
 	}
 	endpoint := strings.TrimRight(*baseURL, "/") + "/api/code/" + url.PathEscape(repo) + "/bundle"
-	raw, _, err := registryHTTPDo(http.MethodGet, endpoint, "", nil, nil)
+	raw, respHeaders, err := registryHTTPDo(http.MethodGet, endpoint, "", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -462,8 +474,38 @@ func runCodeClone(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, err := runGitOutput(wd, "clone", bundlePath, targetDir); err != nil {
-		return err
+	shallow := strings.TrimSpace(respHeaders.Get("X-Dialtone-Shallow"))
+	branch := strings.TrimSpace(respHeaders.Get("X-Dialtone-Branch"))
+	if branch == "" {
+		branch = "main"
+	}
+	if shallow != "" {
+		absTarget := targetDir
+		if !filepath.IsAbs(absTarget) {
+			absTarget = filepath.Join(wd, targetDir)
+		}
+		if _, err := runGitOutput(wd, "init", "-b", branch, absTarget); err != nil {
+			return err
+		}
+		var lines []string
+		for _, tok := range strings.Split(shallow, ",") {
+			if tok = strings.TrimSpace(tok); tok != "" {
+				lines = append(lines, tok)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(absTarget, ".git", "shallow"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+			return err
+		}
+		if _, err := runGitOutput(absTarget, "fetch", bundlePath, "refs/heads/"+branch+":refs/remotes/cloudflare/"+branch, "refs/tags/*:refs/tags/*"); err != nil {
+			return err
+		}
+		if _, err := runGitOutput(absTarget, "checkout", "-B", branch, "refs/remotes/cloudflare/"+branch); err != nil {
+			return err
+		}
+	} else {
+		if _, err := runGitOutput(wd, "clone", bundlePath, targetDir); err != nil {
+			return err
+		}
 	}
 	fmt.Fprintf(stdout, "code clone: cloned %s from Cloudflare R2 into %s\n", repo, targetDir)
 	return nil
