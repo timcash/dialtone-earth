@@ -846,37 +846,50 @@ async function evaluateDeployReadiness(
   };
 }
 
+let cachedReleaseChannels: Record<string, unknown> = {};
+let cachedReleaseChannelsAt = 0;
+let stagingEnvInFlight: Promise<Record<string, unknown>> | null = null;
+
 async function readStagingEnvStatus(): Promise<Record<string, unknown>> {
-  const previewBase = (process.env.STAGING_PREVIEW_URL || "http://127.0.0.1:5175").replace(/\/+$/, "");
-  let preview: Record<string, unknown> = { ok: false, channel: "test", preview_url: `${previewBase}/`, nodes: [] };
-  try {
-    const resp = await fetch(`${previewBase}/api/staging-test/status`, {
-      signal: AbortSignal.timeout(2_000),
-    });
-    if (resp.ok) {
-      preview = (await resp.json()) as Record<string, unknown>;
+  if (stagingEnvInFlight) return stagingEnvInFlight;
+  stagingEnvInFlight = (async () => {
+    const previewBase = (process.env.STAGING_PREVIEW_URL || "http://127.0.0.1:5175").replace(/\/+$/, "");
+    let preview: Record<string, unknown> = { ok: false, channel: "test", preview_url: `${previewBase}/`, nodes: [] };
+    try {
+      const resp = await fetch(`${previewBase}/api/staging-test/status`, {
+        signal: AbortSignal.timeout(1_500),
+      });
+      if (resp.ok) {
+        preview = (await resp.json()) as Record<string, unknown>;
+      }
+    } catch {
+      // preview offline
     }
-  } catch {
-    // preview offline
-  }
-  let releaseChannels: Record<string, unknown> = {};
-  try {
-    const chResp = await fetch("https://dialtone.earth/api/releases/dialtone/channels", {
-      signal: AbortSignal.timeout(2_500),
-    });
-    if (chResp.ok) {
-      const data = (await chResp.json()) as { channels?: Record<string, unknown> };
-      releaseChannels = data.channels || {};
+    const now = Date.now();
+    if (now - cachedReleaseChannelsAt > 30_000) {
+      try {
+        const chResp = await fetch("https://dialtone.earth/api/releases/dialtone/channels", {
+          signal: AbortSignal.timeout(2_000),
+        });
+        if (chResp.ok) {
+          const data = (await chResp.json()) as { channels?: Record<string, unknown> };
+          cachedReleaseChannels = data.channels || {};
+          cachedReleaseChannelsAt = now;
+        }
+      } catch {
+        // offline or not yet deployed
+      }
     }
-  } catch {
-    // offline or not yet deployed
-  }
-  const deploy = await evaluateDeployReadiness(releaseChannels);
-  return {
-    preview,
-    release_channels: releaseChannels,
-    deploy,
-  };
+    const deploy = await evaluateDeployReadiness(cachedReleaseChannels);
+    return {
+      preview,
+      release_channels: cachedReleaseChannels,
+      deploy,
+    };
+  })().finally(() => {
+    stagingEnvInFlight = null;
+  });
+  return stagingEnvInFlight;
 }
 
 export default defineConfig({

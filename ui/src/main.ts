@@ -426,6 +426,12 @@ function renderBrowserPaneBody(
     ? `${content.viewport || "default"}:${content.viewport === "mobile" ? content.url || "mobile" : content.targetId || "default"}:${streamNonce}`
     : "offline";
   if (slot.getAttribute("data-mounted-stream") !== streamKey) {
+    // Explicitly abort any existing MJPEG <img> stream socket before swapping DOM
+    // so Chromium immediately releases the HTTP/1.1 connection slot.
+    slot.querySelectorAll<HTMLImageElement>("img").forEach((img) => {
+      img.removeAttribute("src");
+      img.src = "";
+    });
     slot.setAttribute("data-mounted-stream", streamKey);
     if (cdpStatus.connected) {
       const qs = new URLSearchParams({ v: String(streamNonce) });
@@ -980,7 +986,10 @@ async function openExtraProjectedBrowser(targetUrl: string): Promise<void> {
 async function fetchSelectedLog(testId: string): Promise<void> {
   if (!testLogHref(testId)) return;
   try {
-    const resp = await fetch(`/api/test-runs/${encodeURIComponent(testId)}`, { cache: "no-store" });
+    const resp = await fetch(`/api/test-runs/${encodeURIComponent(testId)}`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(4000),
+    });
     if (!resp.ok) return;
     const data = (await resp.json()) as { run?: TestRun };
     if (data.run && JSON.stringify(data.run) !== JSON.stringify(selectedLogRun)) {
@@ -993,7 +1002,7 @@ async function fetchSelectedLog(testId: string): Promise<void> {
 }
 
 async function refreshTests(): Promise<void> {
-  const response = await fetch("/api/tests", { cache: "no-store" });
+  const response = await fetch("/api/tests", { cache: "no-store", signal: AbortSignal.timeout(4000) });
   if (!response.ok) {
     throw new Error(`Could not load tests: HTTP ${response.status}`);
   }
@@ -1010,7 +1019,7 @@ async function refreshTests(): Promise<void> {
 
 async function refreshPipeline(): Promise<void> {
   try {
-    const response = await fetch("/api/pipeline", { cache: "no-store" });
+    const response = await fetch("/api/pipeline", { cache: "no-store", signal: AbortSignal.timeout(4000) });
     if (!response.ok) return;
     const next = (await response.json()) as PipelineStatus;
     if (JSON.stringify(next) !== JSON.stringify(pipelineStatus)) {
@@ -1024,7 +1033,7 @@ async function refreshPipeline(): Promise<void> {
 
 async function refreshCdpStatus(): Promise<void> {
   try {
-    const response = await fetch("/api/cdp/status", { cache: "no-store" });
+    const response = await fetch("/api/cdp/status", { cache: "no-store", signal: AbortSignal.timeout(4000) });
     if (!response.ok) return;
     const next = (await response.json()) as CdpStatus;
     if (JSON.stringify(next) !== JSON.stringify(cdpStatus)) {
@@ -1191,10 +1200,13 @@ async function refreshLogPage(testId: string): Promise<void> {
 
 async function refreshStagingEnv(): Promise<void> {
   try {
-    const response = await fetch("/api/staging/env", { cache: "no-store" });
+    const response = await fetch("/api/staging/env", { cache: "no-store", signal: AbortSignal.timeout(6000) });
     if (!response.ok) return;
-    stagingEnv = (await response.json()) as StagingEnvStatus;
-    renderWorkspace();
+    const next = (await response.json()) as StagingEnvStatus;
+    if (JSON.stringify(next) !== JSON.stringify(stagingEnv)) {
+      stagingEnv = next;
+      renderWorkspace();
+    }
   } catch {
     // ignore transient poll errors
   }
@@ -1206,29 +1218,67 @@ if (location.pathname.replace(/\/$/, "").endsWith("/logs")) {
     app.innerHTML = `<div class="log-page-wrap"><main class="log-page"><a class="c-cf" href="${import.meta.env.BASE_URL}">← All tests</a><p role="alert">A valid test-id is required.</p></main></div>`;
   } else {
     app.innerHTML = `<div class="log-page-wrap"><main class="log-page"><p>Loading test run…</p></main></div>`;
-    const refresh = () =>
-      refreshLogPage(testId).catch((error: unknown) => {
-        renderedRun = "";
-        app.innerHTML = `<div class="log-page-wrap"><main class="log-page"><a class="c-cf" href="${import.meta.env.BASE_URL}">← All tests</a><p role="alert">${escapeHtml(error instanceof Error ? error.message : String(error))}</p></main></div>`;
-      });
-    void refresh();
-    setInterval(refresh, 500);
+    let logPageInFlight = false;
+    const refresh = () => {
+      if (logPageInFlight) return;
+      logPageInFlight = true;
+      refreshLogPage(testId)
+        .catch((error: unknown) => {
+          renderedRun = "";
+          app.innerHTML = `<div class="log-page-wrap"><main class="log-page"><a class="c-cf" href="${import.meta.env.BASE_URL}">← All tests</a><p role="alert">${escapeHtml(error instanceof Error ? error.message : String(error))}</p></main></div>`;
+        })
+        .finally(() => {
+          logPageInFlight = false;
+        });
+    };
+    refresh();
+    setInterval(refresh, 750);
   }
 } else {
   renderWorkspace();
-  refreshTests().catch(showError);
-  void refreshPipeline();
-  void refreshCdpStatus();
-  void refreshStagingEnv();
+
+  // Sequential, in-flight-guarded pollers so HTTP/1.1 connection slots (shared with
+  // the 2 live MJPEG streams) can never pile up into net::ERR_INSUFFICIENT_RESOURCES.
+  let fastPollInFlight = false;
+  let slowPollInFlight = false;
+  const pollFast = async () => {
+    if (fastPollInFlight) return;
+    fastPollInFlight = true;
+    try {
+      await refreshTests().catch(showError);
+      await refreshPipeline();
+      if (selectedTestId) await fetchSelectedLog(selectedTestId);
+    } finally {
+      fastPollInFlight = false;
+    }
+  };
+  const pollSlow = async () => {
+    if (slowPollInFlight) return;
+    slowPollInFlight = true;
+    try {
+      await refreshCdpStatus();
+      await refreshStagingEnv();
+    } finally {
+      slowPollInFlight = false;
+    }
+  };
+
+  void pollFast();
+  void pollSlow();
   setInterval(() => {
-    refreshTests().catch(showError);
-    void refreshPipeline();
-    if (selectedTestId) void fetchSelectedLog(selectedTestId);
-  }, 500);
+    if (document.visibilityState === "hidden") return;
+    void pollFast();
+  }, 750);
   setInterval(() => {
-    void refreshCdpStatus();
-    void refreshStagingEnv();
-  }, 1500);
+    if (document.visibilityState === "hidden") return;
+    void pollSlow();
+  }, 2500);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      void pollFast();
+      void pollSlow();
+    }
+  });
   setInterval(() => {
     const runningTest = tests.find((test) => normalizeStatus(test.status) === "running");
     if (runningTest) {
@@ -1236,5 +1286,5 @@ if (location.pathname.replace(/\/$/, "").endsWith("/logs")) {
       const time = row?.querySelector("time");
       if (time) time.textContent = `${elapsedSeconds(runningTest).toFixed(2)}s`;
     }
-  }, 100);
+  }, 150);
 }
