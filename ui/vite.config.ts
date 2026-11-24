@@ -371,9 +371,64 @@ async function createNewCdpTab(rawUrl: string): Promise<Record<string, unknown>>
   return { ok: true, targetId, url: parsed.toString() };
 }
 
+let cachedHostDpr: number | null = null;
+
+async function readHostDeviceScaleFactor(): Promise<number> {
+  if (cachedHostDpr !== null) return cachedHostDpr;
+  try {
+    const wideTarget = await findActiveAppPageTarget("", "wide");
+    if (!wideTarget) return 1;
+    const dpr = await new Promise<number>((resolveFn) => {
+      const ws = new WebSocket(wideTarget.wsUrl);
+      let settled = false;
+      const done = (val: number) => {
+        if (settled) return;
+        settled = true;
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+        resolveFn(val);
+      };
+      const timer = setTimeout(() => done(1), 1_500);
+      ws.addEventListener("open", () => {
+        ws.send(
+          JSON.stringify({
+            id: 1,
+            method: "Runtime.evaluate",
+            params: { expression: "window.devicePixelRatio || 1", returnByValue: true },
+          }),
+        );
+      });
+      ws.addEventListener("message", (event) => {
+        try {
+          const msg = JSON.parse(String(event.data)) as { id?: number; result?: { result?: { value?: unknown } } };
+          if (msg.id === 1) {
+            clearTimeout(timer);
+            const v = Number(msg.result?.result?.value);
+            done(Number.isFinite(v) && v > 0 && v <= 4 ? v : 1);
+          }
+        } catch {
+          // ignore
+        }
+      });
+      ws.addEventListener("error", () => {
+        clearTimeout(timer);
+        done(1);
+      });
+    });
+    cachedHostDpr = dpr;
+    return dpr;
+  } catch {
+    return 1;
+  }
+}
+
 async function captureSingleCdpFrame(targetId = "", viewport = ""): Promise<Buffer | null> {
   const target = await findActiveAppPageTarget(targetId, viewport);
   if (!target) return null;
+  const hostDpr = viewport === "mobile" ? await readHostDeviceScaleFactor() : 1;
   return new Promise((resolveFn) => {
     const ws = new WebSocket(target.wsUrl);
     let settled = false;
@@ -394,7 +449,7 @@ async function captureSingleCdpFrame(targetId = "", viewport = ""): Promise<Buff
           JSON.stringify({
             id: 9,
             method: "Emulation.setDeviceMetricsOverride",
-            params: { width: 390, height: 844, deviceScaleFactor: 2, mobile: true },
+            params: { width: 390, height: 844, deviceScaleFactor: hostDpr, mobile: true },
           }),
         );
       }
@@ -429,6 +484,7 @@ async function streamCdpViewport(
     sendJson(response, { error: "CDP browser offline" }, 503);
     return;
   }
+  const hostDpr = viewport === "mobile" ? await readHostDeviceScaleFactor() : 1;
   response.writeHead(200, {
     "Content-Type": "multipart/x-mixed-replace; boundary=cdpframe",
     "Cache-Control": "no-store, no-cache, must-revalidate",
@@ -471,11 +527,13 @@ async function streamCdpViewport(
     if (closed) return;
     ws.send(JSON.stringify({ id: 1, method: "Page.enable" }));
     if (viewport === "mobile") {
+      // Match the host display's native devicePixelRatio so Chromium's Page.startScreencast
+      // reports exact deviceWidth=390, deviceHeight=844 with zero right-edge crop or shift.
       ws.send(
         JSON.stringify({
           id: 4,
           method: "Emulation.setDeviceMetricsOverride",
-          params: { width: 390, height: 844, deviceScaleFactor: 2, mobile: true },
+          params: { width: 390, height: 844, deviceScaleFactor: hostDpr, mobile: true },
         }),
       );
       ws.send(
@@ -493,7 +551,13 @@ async function streamCdpViewport(
         method: "Page.startScreencast",
         params:
           viewport === "mobile"
-            ? { format: "jpeg", quality: 82, maxWidth: 460, maxHeight: 900, everyNthFrame: 1 }
+            ? {
+                format: "jpeg",
+                quality: 82,
+                maxWidth: Math.round(390 * hostDpr),
+                maxHeight: Math.round(844 * hostDpr),
+                everyNthFrame: 1,
+              }
             : { format: "jpeg", quality: 80, maxWidth: 1440, maxHeight: 900, everyNthFrame: 1 },
       }),
     );
