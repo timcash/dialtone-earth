@@ -622,7 +622,7 @@ function updateEditorToolbar(slot: HTMLElement): void {
       ? "saving…"
       : editorDirty
         ? "unsaved changes"
-        : editorStatusMsg || "ready (edits staging only — promote manually to dialtone.earth)";
+        : editorStatusMsg || "ready (edits staging only — click deploy when ready)";
   }
   const saveBtn = slot.querySelector<HTMLButtonElement>("[data-testid='editor-save']");
   const saveTestBtn = slot.querySelector<HTMLButtonElement>("[data-testid='editor-save-test']");
@@ -736,11 +736,11 @@ function renderBottomBar(
         <span>→</span>
         <span class="pipe-step ${stepClass("testing")}">2.STAGING TESTS</span>
         <span>→</span>
-        <span class="pipe-step ${stepClass("staging_ready")}">3.GATE READY</span>
+        <span class="pipe-step ${stepClass("staging_ready")}">3.READY</span>
         <span>→</span>
-        <span class="pipe-step ${stepClass("deployed")}">4.PROMOTE LIVE</span>
+        <span class="pipe-step ${stepClass("deployed")}">4.DEPLOY</span>
         ${pipelineStatus.changed ? `<span class="c-cf">${escapeHtml(pipelineStatus.changed)}</span>` : ""}
-        <span>${escapeHtml(pipelineStatus.message || "Ready — edits stay on staging until you promote to dialtone.earth")}</span>
+        <span>${escapeHtml(pipelineStatus.message || "Ready — edits stay on staging until you deploy to dialtone.earth")}</span>
       </div>
       <div>
         ${
@@ -753,17 +753,17 @@ function renderBottomBar(
     <div class="earth-table-bar">
       <div class="earth-bar-left">
         <span class="tbl-brand">TEST.DIALTONE.EARTH</span>
-        <span class="tbl-pill ${cdpStatus.connected ? "is-live" : ""}" data-testid="cdp-status">
+        <span class="tbl-pill ${cdpStatus.connected ? "is-live" : "is-warn"}" data-testid="cdp-status">
           ${cdpStatus.connected ? `CDP :${cdpStatus.port}` : "CDP OFF"}
         </span>
-        <span class="tbl-pill ${stagingEnv.preview?.ok ? "is-live" : ""}" data-testid="test-mesh-pill" title="Isolated Dialtone Iroh mesh test channel (${escapeHtml(stagingEnv.preview?.preview_url || "http://127.0.0.1:5175/")})">
+        <span class="tbl-pill ${stagingEnv.preview?.ok ? "is-live" : "is-warn"}" data-testid="test-mesh-pill" title="Isolated Dialtone Iroh mesh test channel (${escapeHtml(stagingEnv.preview?.preview_url || "http://127.0.0.1:5175/")})">
           ${
             stagingEnv.preview?.ok
               ? `TEST MESH ${(stagingEnv.preview.nodes || []).filter((n) => n.reachable).length}/${(stagingEnv.preview.nodes || []).length}`
               : "TEST MESH OFF"
           }
         </span>
-        <span class="tbl-pill ${failed === 0 && passed > 0 ? "is-live" : ""}" data-testid="staging-gate-pill">
+        <span class="tbl-pill ${failed > 0 ? "is-err" : passed > 0 ? "is-live" : ""}" data-testid="staging-gate-pill">
           ${failed > 0 ? `GATE BLOCKED (${failed} fail)` : passed > 0 ? `GATE PASS (${passed}/${tests.length})` : "GATE PENDING"}
         </span>
       </div>
@@ -784,10 +784,10 @@ function renderBottomBar(
         <button type="button" class="tbl-chip" data-testid="add-browser-btn" title="Open an additional projected Chrome browser tab">+ browser</button>
         <button type="button" class="tbl-chip" data-testid="run-browser-suite" ${busy ? "disabled" : ""}>run browser</button>
         <button type="button" class="tbl-chip" data-testid="start-tests" ${busy ? "disabled" : ""}>
-          ${starting ? "starting…" : stage === "deploying" ? "promoting…" : runningTest ? "running…" : "start tests"}
+          ${starting ? "starting…" : stage === "deploying" ? "deploying…" : runningTest ? "running…" : "start tests"}
         </button>
-        <button type="button" class="tbl-chip is-primary" data-testid="promote-live" ${busy || failed > 0 || passed === 0 ? "disabled" : ""} title="Promote verified staging build to https://dialtone.earth/">
-          promote → dialtone.earth
+        <button type="button" class="tbl-chip is-deploy" data-testid="deploy-live" ${busy || failed > 0 || passed === 0 ? "disabled" : ""} title="Deploy verified staging build to https://dialtone.earth/ and release auto-update channel">
+          ${stage === "deploying" ? "deploying…" : "deploy"}
         </button>
         <button type="button" class="tbl-chip ${menuOpen ? "is-active" : ""}" data-testid="open-menu">menu</button>
       </div>
@@ -799,7 +799,7 @@ function renderBottomBar(
     startAllTests().catch(showError);
   });
 
-  bar.querySelector<HTMLButtonElement>("[data-testid='promote-live']")?.addEventListener("click", () => {
+  bar.querySelector<HTMLButtonElement>("[data-testid='deploy-live']")?.addEventListener("click", () => {
     promoteToLive().catch(showError);
   });
 

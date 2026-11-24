@@ -295,7 +295,7 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	if !*deployOnPass {
 		writePipelineState(root, pipelineState{
 			Stage:   "staging_ready",
-			Message: fmt.Sprintf("Staging gate PASS (%d/%d) — click 'promote → dialtone.earth' to publish live", passed, total),
+			Message: fmt.Sprintf("Ready (%d/%d passed) — click deploy to update dialtone.earth", passed, total),
 			Changed: strings.TrimSpace(*triggerFile),
 			Passed:  passed,
 			Failed:  failed,
