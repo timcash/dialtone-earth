@@ -1,5 +1,6 @@
 import { verifySessionCookie } from "./auth.ts";
 import { getOwnerEmail } from "./live.ts";
+import { handleRegistryRoute, renderOwnerCodePortal } from "./registry.ts";
 import type {
   AccessVerificationResult,
   GatewayDeps,
@@ -190,6 +191,20 @@ export async function handleStagingRoute({
     const headers = stagingHeaders(securityHeaders);
     headers.set("Location", "/login");
     return new Response(null, { status: 302, headers });
+  }
+
+  // Owner verified: serve Private Cloudflare R2 Code Portal (/code) & private /api/code/* directly from Edge!
+  if (
+    (url.pathname === "/code" || url.pathname === "/code/") &&
+    (request.method === "GET" || request.method === "HEAD")
+  ) {
+    return renderOwnerCodePortal(env, host, ownerEmail, securityHeaders);
+  }
+  if (url.pathname === "/api/code" || url.pathname.startsWith("/api/code/")) {
+    const codeResp = await handleRegistryRoute(request, env, securityHeaders, nowSec);
+    if (codeResp) {
+      return codeResp;
+    }
   }
 
   // Owner verified: proxy to the enrolled local Test Dashboard origin via /__staging/*

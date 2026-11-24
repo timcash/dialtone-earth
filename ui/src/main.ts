@@ -889,6 +889,8 @@ function renderMenuOverlay(menuEl: HTMLElement, catalog: WorkspaceContent[], ass
                 ? `<button type="button" class="tbl-chip" data-testid="close-browser">close persistent chrome</button>`
                 : `<button type="button" class="tbl-chip is-primary" data-testid="launch-browser">launch persistent chrome</button>`
             }
+            <a class="tbl-chip" href="/logs">logs</a>
+            ${isRemoteHost ? `<a class="tbl-chip" href="/code">code</a>` : ""}
             ${isRemoteHost ? `<a class="tbl-chip" data-testid="remote-sign-out" href="/auth/logout">sign out</a>` : ""}
           </div>
         </section>
@@ -1229,10 +1231,85 @@ async function refreshStagingEnv(): Promise<void> {
   }
 }
 
+async function refreshLogsIndex(): Promise<void> {
+  applyTheme();
+  const response = await fetch("/api/tests", { cache: "no-store", signal: AbortSignal.timeout(4000) });
+  if (!response.ok) throw new Error(`Could not load test logs: HTTP ${response.status}`);
+  const payload = (await response.json()) as { tests?: TestRow[] };
+  if (!Array.isArray(payload.tests)) throw new Error("Malformed /api/tests payload");
+  const serialized = JSON.stringify(payload.tests);
+  if (renderedRun === serialized) return;
+  renderedRun = serialized;
+
+  const passed = payload.tests.filter((t) => normalizeStatus(t.status) === "pass").length;
+  const failed = payload.tests.filter((t) => normalizeStatus(t.status) === "fail").length;
+  const rowsHtml = payload.tests
+    .map((t) => {
+      const st = normalizeStatus(t.status);
+      const href = testLogHref(t["test-id"]);
+      const rawHref = href ? `/api/test-runs/${encodeURIComponent(t["test-id"] || "")}/log` : "";
+      return `
+        <tr>
+          <td><span class="${st === "pass" ? "c-ok" : st === "fail" ? "c-err" : "c-dim"}">${escapeHtml(statusLabel(t.status))}</span></td>
+          <td><strong>${escapeHtml(t.title)}</strong> <span class="c-dim">${escapeHtml(t.name)}</span></td>
+          <td class="c-dim">${escapeHtml(t.section || "")}</td>
+          <td class="c-dim">${escapeHtml(t.source || "—")}</td>
+          <td>${elapsedSeconds(t).toFixed(2)}s</td>
+          <td>${
+            href
+              ? `<a class="c-cf" href="${escapeHtml(href)}">log ↗</a> · <a class="c-dim" href="${escapeHtml(rawHref)}" target="_blank" rel="noreferrer">raw ↗</a>`
+              : `<span class="c-dim">—</span>`
+          }</td>
+        </tr>`;
+    })
+    .join("");
+
+  app.innerHTML = `
+    <div class="log-page-wrap">
+      <main class="log-page">
+        <header>
+          <p>
+            <a class="c-cf" href="${import.meta.env.BASE_URL}">← Test dashboard</a>
+            ${isRemoteHost ? ` · <a class="c-cf" href="/code">code ↗</a> · <a class="c-dim" href="/auth/logout">sign out</a>` : ""}
+          </p>
+          <p class="c-dim">DIALTONE.EARTH / IMMUTABLE TEST LOGS</p>
+          <h1>Test Runs (${passed}/${payload.tests.length} pass${failed > 0 ? ` · ${failed} fail` : ""})</h1>
+        </header>
+        <div class="earth-table-scroll">
+          <table class="earth-table">
+            <thead>
+              <tr><th>STATUS</th><th>TEST</th><th>SECTION</th><th>SOURCE</th><th>TIME</th><th>LOGS</th></tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+        </div>
+      </main>
+    </div>`;
+}
+
 if (location.pathname.replace(/\/$/, "").endsWith("/logs")) {
-  const testId = new URLSearchParams(location.search).get("test-id") || "";
-  if (!testLogHref(testId)) {
+  const params = new URLSearchParams(location.search);
+  const hasTestIdParam = params.has("test-id");
+  const testId = params.get("test-id") || "";
+  if (hasTestIdParam && !testLogHref(testId)) {
     app.innerHTML = `<div class="log-page-wrap"><main class="log-page"><a class="c-cf" href="${import.meta.env.BASE_URL}">← All tests</a><p role="alert">A valid test-id is required.</p></main></div>`;
+  } else if (!hasTestIdParam) {
+    app.innerHTML = `<div class="log-page-wrap"><main class="log-page"><p>Loading test logs…</p></main></div>`;
+    let logsIndexInFlight = false;
+    const refreshIndex = () => {
+      if (logsIndexInFlight || document.visibilityState === "hidden") return;
+      logsIndexInFlight = true;
+      refreshLogsIndex()
+        .catch((error: unknown) => {
+          renderedRun = "";
+          app.innerHTML = `<div class="log-page-wrap"><main class="log-page"><a class="c-cf" href="${import.meta.env.BASE_URL}">← All tests</a><p role="alert">${escapeHtml(error instanceof Error ? error.message : String(error))}</p></main></div>`;
+        })
+        .finally(() => {
+          logsIndexInFlight = false;
+        });
+    };
+    refreshIndex();
+    setInterval(refreshIndex, 1500);
   } else {
     app.innerHTML = `<div class="log-page-wrap"><main class="log-page"><p>Loading test run…</p></main></div>`;
     let logPageInFlight = false;

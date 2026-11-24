@@ -215,6 +215,194 @@ function binaryResp(
   return new Response(obj.body as BodyInit, { status: 200, headers });
 }
 
+function escapeCodeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (ch) => {
+    switch (ch) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      case "'":
+        return "&#039;";
+      default:
+        return ch;
+    }
+  });
+}
+
+function formatCodeBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
+}
+
+export async function renderOwnerCodePortal(
+  env: RegistryEnv,
+  host: string,
+  ownerEmail: string,
+  securityHeaders: Record<string, string>,
+): Promise<Response> {
+  const kv = env.DIALTONE_AUTH_TOKENS;
+  const names = kv ? ((await readJsonKv<string[]>(kv, CODE_INDEX_KEY)) ?? []) : [];
+  const records = kv
+    ? (
+        await Promise.all(
+          names.map((name) => readJsonKv<StoredRepoRecord>(kv, codeRepoKey(name))),
+        )
+      ).filter((r): r is StoredRepoRecord => Boolean(r))
+    : [];
+
+  const repoCards =
+    records.length === 0
+      ? `<section class="panel"><p class="muted">No private repositories pushed to Cloudflare R2 yet. Push with <code>dialtone-earth code push --repo dialtone-earth</code>.</p></section>`
+      : records
+          .map((repo) => {
+            const branches = Object.values(repo.branches || {});
+            const archives = Object.values(repo.archives || {});
+            const history = (repo.history || []).slice(0, 8);
+            const branchRows = branches
+              .map(
+                (b) => `
+                  <tr>
+                    <td><strong>${escapeCodeHtml(b.branch)}</strong></td>
+                    <td><code>${escapeCodeHtml((b.sha || "").slice(0, 10))}</code></td>
+                    <td>${escapeCodeHtml(b.subject || "")}</td>
+                    <td>${escapeCodeHtml(formatCodeBytes(b.bundle_bytes))}</td>
+                    <td>${escapeCodeHtml(b.pushed_at || "")}</td>
+                    <td><a class="chip" href="/api/code/${encodeURIComponent(repo.name)}/bundle?branch=${encodeURIComponent(b.branch)}">bundle ⬇</a></td>
+                  </tr>`,
+              )
+              .join("");
+            const archiveLinks = archives
+              .map(
+                (a) =>
+                  `<a class="chip" href="/api/code/${encodeURIComponent(repo.name)}/archive/${encodeURIComponent(a.filename)}">${escapeCodeHtml(a.filename)} (${escapeCodeHtml(formatCodeBytes(a.bytes))}) ⬇</a>`,
+              )
+              .join("");
+            const historyRows = history
+              .map(
+                (h) => `
+                  <li>
+                    <code>${escapeCodeHtml((h.sha || "").slice(0, 10))}</code>
+                    <span class="tag">${escapeCodeHtml(h.branch)}</span>
+                    <span>${escapeCodeHtml(h.subject || "")}</span>
+                    <span class="muted">${escapeCodeHtml(h.pushed_at || "")}</span>
+                  </li>`,
+              )
+              .join("");
+
+            return `
+              <section class="panel">
+                <div class="panel-head">
+                  <div>
+                    <span class="kicker">PRIVATE R2 REPO</span>
+                    <h2>${escapeCodeHtml(repo.name)}</h2>
+                  </div>
+                  <div class="meta-right">
+                    <span class="pill-ok">HEAD ${escapeCodeHtml((repo.head_sha || "").slice(0, 10))}</span>
+                    <span class="muted">branch: ${escapeCodeHtml(repo.default_branch || "main")}</span>
+                  </div>
+                </div>
+                <p class="subject">${escapeCodeHtml(repo.head_subject || "")}</p>
+                <div class="actions-row">
+                  <a class="chip is-hi" href="/api/code/${encodeURIComponent(repo.name)}/bundle?branch=${encodeURIComponent(repo.default_branch || "main")}">download git bundle ⬇</a>
+                  ${archiveLinks}
+                  <a class="chip" href="/api/code/${encodeURIComponent(repo.name)}" target="_blank" rel="noreferrer">json ↗</a>
+                </div>
+                <pre class="cmd"><code># Clone or pull directly from Cloudflare R2 (owner Bearer token required)
+dialtone-earth code pull --repo ${escapeCodeHtml(repo.name)} --url https://${escapeCodeHtml(host)}
+dialtone-earth code push --repo ${escapeCodeHtml(repo.name)}</code></pre>
+                ${
+                  branchRows
+                    ? `<table>
+                        <thead><tr><th>BRANCH</th><th>SHA</th><th>COMMIT</th><th>BUNDLE</th><th>PUSHED</th><th>DOWNLOAD</th></tr></thead>
+                        <tbody>${branchRows}</tbody>
+                      </table>`
+                    : ""
+                }
+                ${
+                  historyRows
+                    ? `<div class="history-wrap"><div class="kicker">RECENT PUSHES</div><ul class="history">${historyRows}</ul></div>`
+                    : ""
+                }
+              </section>`;
+          })
+          .join("\n");
+
+  const html = `<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>DIALTONE // CODE — ${escapeCodeHtml(host)}</title>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; }
+      :root {
+        --bg: #080808; --panel: #101010; --line: #262626; --line-hi: #444;
+        --ink: #f0f0f0; --muted: #8a8a8a; --ok: #36d66b;
+      }
+      html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--ink); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+      header.topbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: #0c0c0c; position: sticky; top: 0; z-index: 5; }
+      .brand { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 700; letter-spacing: 0.06em; }
+      .pill-ok { font-size: 11px; color: var(--ok); border: 1px solid rgba(54,214,107,0.5); padding: 2px 7px; }
+      nav.nav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+      .chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid var(--line-hi); background: #141414; color: var(--ink); text-decoration: none; font-size: 11px; }
+      .chip:hover { border-color: #fff; background: #1c1c1c; }
+      .chip.is-hi { background: #f0f0f0; color: #000; border-color: #f0f0f0; font-weight: 700; }
+      .chip.is-hi:hover { background: #fff; }
+      main { max-width: 1180px; margin: 0 auto; padding: 18px 16px 40px; display: flex; flex-direction: column; gap: 16px; }
+      .panel { background: var(--panel); border: 1px solid var(--line); padding: 16px; }
+      .panel-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+      .panel-head h2 { margin: 2px 0 0; font-size: 18px; }
+      .kicker { font-size: 10px; letter-spacing: 0.08em; color: var(--muted); }
+      .meta-right { display: flex; align-items: center; gap: 10px; font-size: 11px; }
+      .subject { margin: 10px 0 12px; color: #d6d6d6; font-size: 13px; }
+      .muted { color: var(--muted); font-size: 11px; }
+      .actions-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+      pre.cmd { margin: 0 0 14px; padding: 10px 12px; background: #050505; border: 1px solid var(--line); overflow-x: auto; font-size: 12px; color: #d8d8d8; }
+      table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+      th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+      th { font-size: 10px; letter-spacing: 0.08em; color: var(--muted); }
+      .history-wrap { margin-top: 14px; }
+      ul.history { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+      ul.history li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; padding: 4px 0; border-bottom: 1px solid #1b1b1b; }
+      .tag { font-size: 10px; border: 1px solid var(--line-hi); padding: 1px 5px; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span>DIALTONE // CODE</span>
+        <span class="pill-ok">R2 PRIVATE · ${escapeCodeHtml(ownerEmail)}</span>
+      </div>
+      <nav class="nav">
+        <a class="chip" href="/">test dashboard</a>
+        <a class="chip is-hi" href="/code">code</a>
+        <a class="chip" href="/logs">logs</a>
+        <a class="chip" href="/api/code" target="_blank" rel="noreferrer">api/code ↗</a>
+        <a class="chip" href="/auth/logout">sign out</a>
+      </nav>
+    </header>
+    <main>
+      ${repoCards}
+    </main>
+  </body>
+</html>`;
+
+  const headers = new Headers(securityHeaders);
+  headers.set("Content-Type", "text/html; charset=utf-8");
+  headers.set("Cache-Control", "private, no-store");
+  headers.set("X-Robots-Tag", "noindex, nofollow");
+  return new Response(html, { status: 200, headers });
+}
+
 export async function handleRegistryRoute(
   request: Request,
   env: RegistryEnv,
@@ -234,7 +422,7 @@ export async function handleRegistryRoute(
     return null;
   }
 
-  if (!isPublicLiveHost(url.hostname)) {
+  if (!isPublicLiveHost(url.hostname) && !(isCode && url.hostname.toLowerCase() === "test.dialtone.earth")) {
     return jsonResp(
       { error: "Dialtone registry is served from dialtone.earth" },
       404,

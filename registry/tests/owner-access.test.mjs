@@ -370,7 +370,16 @@ test("test.dialtone.earth staging UI is strictly restricted to timcash@gmail.com
   assert.match(await ownerCfResp.text(), /staging-dashboard-ok/);
   assert.equal(upstreamCalls, 1);
 
-  // 5. Magic-link login for timcash@gmail.com on test.dialtone.earth also unlocks staging UI
+  // 5. Magic-link login for timcash@gmail.com on test.dialtone.earth also unlocks staging UI, /code, and /logs
+  const anonCodePage = await handleGatewayRequest(new Request("https://test.dialtone.earth/code"), env, deps);
+  assert.equal(anonCodePage.status, 302);
+  assert.equal(anonCodePage.headers.get("Location"), "/login");
+  const anonLogsPage = await handleGatewayRequest(new Request("https://test.dialtone.earth/logs"), env, deps);
+  assert.equal(anonLogsPage.status, 302);
+  assert.equal(anonLogsPage.headers.get("Location"), "/login");
+  const anonCodeApi = await handleGatewayRequest(new Request("https://test.dialtone.earth/api/code"), env, deps);
+  assert.equal(anonCodeApi.status, 401);
+
   const ownerMagic = await loginViaMagicLink("https://test.dialtone.earth", "timcash@gmail.com", env, nowSec);
   assert.equal(ownerMagic.sent, true);
   const ownerCookieResp = await handleGatewayRequest(
@@ -380,4 +389,27 @@ test("test.dialtone.earth staging UI is strictly restricted to timcash@gmail.com
   );
   assert.equal(ownerCookieResp.status, 200);
   assert.equal(upstreamCalls, 2);
+
+  const ownerCodePage = await handleGatewayRequest(
+    new Request("https://test.dialtone.earth/code", { headers: { Cookie: ownerMagic.cookie } }),
+    env,
+    deps,
+  );
+  assert.equal(ownerCodePage.status, 200);
+  assert.match(await ownerCodePage.text(), /DIALTONE \/\/ CODE/);
+
+  const ownerCodeApi = await handleGatewayRequest(
+    new Request("https://test.dialtone.earth/api/code", { headers: { Cookie: ownerMagic.cookie } }),
+    env,
+    deps,
+  );
+  assert.equal(ownerCodeApi.status, 200);
+
+  const ownerLogsPage = await handleGatewayRequest(
+    new Request("https://test.dialtone.earth/logs", { headers: { Cookie: ownerMagic.cookie } }),
+    env,
+    deps,
+  );
+  assert.equal(ownerLogsPage.status, 200);
+  assert.equal(upstreamCalls, 3);
 });
