@@ -134,11 +134,13 @@ func testSection(name string) string {
 		"TestDialtoneEarthSimulatedTour":
 		return "Live metal Data & UI"
 	case "TestDialtoneEarthCloudflareGateway",
+		"TestDialtoneEarthCloudflareRegistry",
 		"TestDialtoneEarthRegistrySecurityHeaders",
 		"TestDialtoneEarthOriginBridge",
 		"TestDialtoneEarthRegistryNetworks":
 		return "Cloudflare Gateway & Security"
 	case "TestDialtoneEarthLiveControlCLI",
+		"TestDialtoneEarthRegistryCLI",
 		"TestLintAllSources",
 		"TestBuildArtifacts",
 		"TestDeployLocalBundle",

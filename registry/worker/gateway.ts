@@ -6,6 +6,7 @@ import {
   type MagicLinkEnv,
 } from "./auth.ts";
 import { handleLiveRoute, type LiveControlEnv } from "./live.ts";
+import { handleRegistryRoute, type RegistryEnv } from "./registry.ts";
 import { handleUserUiConfigRoute } from "./user-config.ts";
 import {
   buildRedactedShellAuditLog,
@@ -20,7 +21,7 @@ export interface AssetFetcher {
   fetch(request: Request): Promise<Response>;
 }
 
-export interface GatewayEnv extends MagicLinkEnv, LiveControlEnv {
+export interface GatewayEnv extends MagicLinkEnv, LiveControlEnv, RegistryEnv {
   ASSETS?: AssetFetcher;
   /** Cloudflare Access team domain, e.g. "https://myteam.cloudflareaccess.com" */
   ACCESS_TEAM_DOMAIN?: string;
@@ -118,6 +119,27 @@ export async function handleGatewayRequest(
     );
     if (liveResponse) {
       return liveResponse;
+    }
+  }
+
+  if (
+    url.pathname === "/api/code" ||
+    url.pathname.startsWith("/api/code/") ||
+    url.pathname === "/api/releases" ||
+    url.pathname.startsWith("/api/releases/") ||
+    url.pathname.startsWith("/releases/") ||
+    url.pathname === "/api/plugins" ||
+    url.pathname.startsWith("/api/plugins/")
+  ) {
+    const regNowSec = deps.nowSec ? deps.nowSec() : Math.floor(Date.now() / 1000);
+    const regResponse = await handleRegistryRoute(
+      request,
+      env,
+      SECURITY_HEADERS,
+      regNowSec,
+    );
+    if (regResponse) {
+      return regResponse;
     }
   }
 

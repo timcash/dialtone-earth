@@ -32,6 +32,7 @@ Subcommands:
   status      Show current live site state (public GET /api/live)
   set         Apply live edits to https://dialtone.earth/ (PATCH /api/live)
   reset       Clear all live overrides back to stock defaults (DELETE /api/live)
+  watch       Watch local files and auto-deploy live to https://dialtone.earth/
   init-token  Generate LIVE_CONTROL_TOKEN locally and upload to Cloudflare Worker
 
 Flags for "live set":
@@ -109,6 +110,8 @@ func runLive(args []string, stdout, stderr io.Writer) error {
 		return runLiveSet(args[1:], stdout, stderr)
 	case "reset":
 		return runLiveReset(args[1:], stdout, stderr)
+	case "watch":
+		return runLiveWatch(args[1:], stdout, stderr)
 	case "init-token":
 		return runLiveInitToken(args[1:], stdout, stderr)
 	default:
@@ -338,6 +341,67 @@ func runLiveReset(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
+func runLiveWatch(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("live watch", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	interval := fs.Duration("interval", 1500*time.Millisecond, "File change poll interval")
+	pushCode := fs.Bool("push", false, "Also push git bundle to Cloudflare R2 on each deploy")
+	repo := fs.String("repo", defaultRepoSlug(), "Repository slug when --push is set")
+	baseURL := fs.String("url", defaultLiveSiteURL, "Registry base URL when --push is set")
+	tokenFile := fs.String("token-file", "", "Path to LIVE_CONTROL_TOKEN file when --push is set")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	root, err := projectRoot()
+	if err != nil {
+		return err
+	}
+	watchDirs := []string{
+		filepath.Join(root, "registry", "src"),
+		filepath.Join(root, "registry", "worker"),
+	}
+	snapshot := func() string {
+		var b strings.Builder
+		for _, dir := range watchDirs {
+			_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
+				if walkErr != nil || d.IsDir() {
+					return nil
+				}
+				if info, err := d.Info(); err == nil {
+					fmt.Fprintf(&b, "%s:%d:%d;", path, info.Size(), info.ModTime().UnixNano())
+				}
+				return nil
+			})
+		}
+		return b.String()
+	}
+	last := snapshot()
+	fmt.Fprintf(stdout, "live watch: watching registry/src & registry/worker (every %s) -> https://dialtone.earth/\n", *interval)
+	fmt.Fprintln(stdout, "live watch: save any file to rebuild and publish live immediately (Ctrl+C to stop)")
+	ticker := time.NewTicker(*interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		cur := snapshot()
+		if cur == last {
+			continue
+		}
+		last = cur
+		fmt.Fprintf(stdout, "\n[%s] live watch: change detected — publishing live to https://dialtone.earth/...\n", time.Now().Format("15:04:05"))
+		if err := runDeployLive(stdout, stderr); err != nil {
+			fmt.Fprintf(stderr, "live watch deploy error: %v\n", err)
+			continue
+		}
+		if *pushCode {
+			if tok, err := loadLiveControlToken(*tokenFile); err == nil {
+				if _, err := pushCodeBundle(root, *repo, "", "", *baseURL, tok, true, stdout); err != nil {
+					fmt.Fprintf(stderr, "live watch code push error: %v\n", err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func runLiveInitToken(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("live init-token", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -409,6 +473,13 @@ func runDeployLive(stdout, stderr io.Writer) error {
 	regDir := filepath.Join(root, "registry")
 	if !dirExists(regDir) {
 		return fmt.Errorf("registry directory not found at %s", regDir)
+	}
+	// Sync root install.sh & install.ps1 into registry/public so https://dialtone.earth/install.{sh,ps1} stay current.
+	for _, script := range []string{"install.sh", "install.ps1"} {
+		src := filepath.Join(root, script)
+		if fileExists(src) {
+			_ = copyFile(src, filepath.Join(regDir, "public", script))
+		}
 	}
 	fmt.Fprintln(stdout, "deploy --live: building registry frontend + Worker")
 	buildCmd := exec.Command("pnpm", "run", "build")

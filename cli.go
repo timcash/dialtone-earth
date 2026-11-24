@@ -27,7 +27,10 @@ Actions:
   test      Run the Go tests in cli_test.go
   clean     Remove generated local state
   deploy    Build local bundle (deploy/local) or publish live (--live)
-  live      Modify public https://dialtone.earth/ live without redeploying
+  live      Modify public https://dialtone.earth/ live or watch-deploy
+  code      Store, push, pull, and clone git code on Cloudflare R2
+  release   Tag and publish SHA-256-verified releases on Cloudflare R2
+  plugins   List and publish public Dialtone plugins (e.g. dialtone-shell)
   dev       Start the test dashboard without running tests
   help      Show this help
 
@@ -39,7 +42,10 @@ Flags:
   test --keep-signed-in    Leave Chrome signed into LIVE metal after browser tests
   test --close-browser     Close the persistent CDP Chrome browser and exit
   deploy --live            Build registry/ and deploy live to Cloudflare Workers
-  live <status|set|reset|init-token>  Control public dialtone.earth live (<2s)
+  live <status|set|reset|watch|init-token>  Control or watch-deploy dialtone.earth live
+  code <list|status|push|pull|clone>        Store/sync git bundles directly on Cloudflare R2
+  release <list|tag vX.Y.Z [--build]>       Tag releases & upload SHA-256 binaries to R2
+  plugins <list|info|publish>               Browse/publish public Dialtone plugins (Iroh + R2)
   dev --port <port>        Serve the dashboard on another port
 
 Run an action with "go run . <action>", or with "bin/dialtone-earth <action>" after build.
@@ -73,6 +79,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		err = runDeploy(args[1:], stdout, stderr)
 	case "live":
 		err = runLive(args[1:], stdout, stderr)
+	case "code":
+		err = runCode(args[1:], stdout, stderr)
+	case "release":
+		err = runRelease(args[1:], stdout, stderr)
+	case "plugins":
+		err = runPlugins(args[1:], stdout, stderr)
 	case "dev":
 		err = runDev(args[1:], stdout, stderr)
 	default:

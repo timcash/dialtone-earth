@@ -9,13 +9,13 @@ Install the `dialtone-earth` CLI binary into `~/.local/bin` (macOS/Linux) or `%U
 Linux / macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/timcash/dialtone-earth/main/install.sh | sh
+curl -fsSL https://dialtone.earth/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/timcash/dialtone-earth/main/install.ps1 | iex
+irm https://dialtone.earth/install.ps1 | iex
 ```
 
 ## 2. CLI (`dialtone-earth help`)
@@ -40,6 +40,11 @@ go run . deploy --live                # build registry/ and publish live to http
 go run . live status                  # inspect live overrides on https://dialtone.earth/
 go run . live set --banner "Hello!"   # update https://dialtone.earth/ live without redeploying
 go run . live reset                   # clear live overrides back to stock defaults
+go run . live watch                   # watch files and auto-deploy live to https://dialtone.earth/
+go run . code push --live             # push git bundle + archives to Cloudflare R2 and deploy live
+go run . code list                    # list repos hosted on Cloudflare R2
+go run . release tag v0.6.0 --build   # tag release & upload SHA-256 binaries to Cloudflare R2
+go run . plugins list                 # list public Dialtone plugins (e.g. dialtone-shell)
 go run . clean                        # remove generated artifacts; retain run logs
 ```
 

@@ -112,6 +112,10 @@ func TestDialtoneEarthCloudflareGateway(t *testing.T) {
 	runToolInDir(t, "registry", "node", "--test", "tests/gateway.test.mjs")
 }
 
+func TestDialtoneEarthCloudflareRegistry(t *testing.T) {
+	runToolInDir(t, "registry", "node", "--test", "tests/registry.test.mjs")
+}
+
 func TestDialtoneEarthOriginBridge(t *testing.T) {
 	runToolInDir(t, "registry", "node", "--test", "tests/origin-bridge.test.mjs")
 }

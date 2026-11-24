@@ -10,6 +10,12 @@
       "id": "d806e1d9d36347cc9e4523e62dd6c761"
     }
   ],
+  "r2_buckets": [
+    {
+      "binding": "DIALTONE_REGISTRY",
+      "bucket_name": "dialtone-earth-registry"
+    }
+  ],
   "send_email": [
     {
       "name": "SEND_EMAIL"
@@ -19,6 +25,6 @@
     "directory": "./dist",
     "binding": "ASSETS",
     "not_found_handling": "404-page",
-    "run_worker_first": ["/api/*", "/login", "/auth/*"]
+    "run_worker_first": ["/api/*", "/releases/*", "/login", "/auth/*"]
   }
 }
