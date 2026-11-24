@@ -78,14 +78,39 @@ async function checkHttpEndpoints() {
   const anonMetal = await fetch(`${METAL_ORIGIN}/api/mesh/state`, { signal: AbortSignal.timeout(10_000) });
   assert.equal(anonMetal.status, 401, `Anonymous GET ${METAL_ORIGIN}/api/mesh/state must be 401 (got ${anonMetal.status})`);
 
-  const anonStaging = await fetch(`${STAGING_ORIGIN}/`, {
-    redirect: "manual",
-    signal: AbortSignal.timeout(10_000),
-  });
-  assert.ok(
-    anonStaging.status === 302 || anonStaging.status === 401 || anonStaging.status === 403,
-    `Anonymous GET ${STAGING_ORIGIN}/ must redirect or block (got ${anonStaging.status})`,
-  );
+  for (const path of ["/", "/code", "/logs"]) {
+    const anonStaging = await fetch(`${STAGING_ORIGIN}${path}`, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(10_000),
+    });
+    assert.equal(
+      anonStaging.status,
+      302,
+      `Anonymous GET ${STAGING_ORIGIN}${path} must redirect 302 -> /login (got ${anonStaging.status})`,
+    );
+    assert.equal(
+      anonStaging.headers.get("location"),
+      "/login",
+      `Anonymous GET ${STAGING_ORIGIN}${path} must redirect to /login (got ${anonStaging.headers.get("location")})`,
+    );
+  }
+  for (const apiPath of ["/api/code", "/api/tests"]) {
+    const anonStagingApi = await fetch(`${STAGING_ORIGIN}${apiPath}`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    assert.equal(
+      anonStagingApi.status,
+      401,
+      `Anonymous GET ${STAGING_ORIGIN}${apiPath} must return 401 (got ${anonStagingApi.status})`,
+    );
+  }
+
+  const stagingLogin = await fetch(`${STAGING_ORIGIN}/login`, { signal: AbortSignal.timeout(10_000) });
+  assert.equal(stagingLogin.status, 200, `GET ${STAGING_ORIGIN}/login expected 200, got ${stagingLogin.status}`);
+  const stagingLoginHtml = await stagingLogin.text();
+  assert.ok(stagingLoginHtml.includes('id="auth-globe-stage"'), `${STAGING_ORIGIN}/login missing spinning H3 globe mount`);
+  const authGlobeJs = await fetch(`${STAGING_ORIGIN}/auth-globe.js`, { signal: AbortSignal.timeout(10_000) });
+  assert.equal(authGlobeJs.status, 200, `GET ${STAGING_ORIGIN}/auth-globe.js expected 200, got ${authGlobeJs.status}`);
 
   if (OWNER_TOKEN) {
     const ownerCode = await fetch(`${PROD_ORIGIN}/api/code`, {
@@ -98,8 +123,35 @@ async function checkHttpEndpoints() {
       Array.isArray(ownerJson.repos) && ownerJson.repos.some((r) => r.name === "dialtone-earth"),
       "Owner /api/code missing dialtone-earth repo",
     );
+
+    const ownerCodePortal = await fetch(`${STAGING_ORIGIN}/code`, {
+      headers: { Authorization: `Bearer ${OWNER_TOKEN}` },
+      redirect: "manual",
+      signal: AbortSignal.timeout(10_000),
+    });
+    assert.equal(ownerCodePortal.status, 200, `Owner GET ${STAGING_ORIGIN}/code expected 200, got ${ownerCodePortal.status}`);
+    const codePortalHtml = await ownerCodePortal.text();
+    assert.ok(
+      codePortalHtml.includes("DIALTONE // CODE") && codePortalHtml.includes("dialtone-earth"),
+      `${STAGING_ORIGIN}/code missing private R2 code portal content`,
+    );
+
+    const ownerLogsPage = await fetch(`${STAGING_ORIGIN}/logs`, {
+      headers: { Authorization: `Bearer ${OWNER_TOKEN}` },
+      redirect: "manual",
+      signal: AbortSignal.timeout(10_000),
+    });
+    assert.equal(ownerLogsPage.status, 200, `Owner GET ${STAGING_ORIGIN}/logs expected 200, got ${ownerLogsPage.status}`);
+
+    const ownerTestsApi = await fetch(`${STAGING_ORIGIN}/api/tests`, {
+      headers: { Authorization: `Bearer ${OWNER_TOKEN}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    assert.equal(ownerTestsApi.status, 200, `Owner GET ${STAGING_ORIGIN}/api/tests expected 200, got ${ownerTestsApi.status}`);
+    const testsJson = await ownerTestsApi.json();
+    assert.ok(Array.isArray(testsJson.tests) && testsJson.tests.length > 0, `${STAGING_ORIGIN}/api/tests missing tests list`);
   }
-  console.log("  [PASS] Owner-only security containment verified across production, metal, and staging");
+  console.log("  [PASS] Owner-only security containment & live /code + /logs hosting verified across dialtone.earth, metal & test");
 }
 
 async function openTempBrowserTarget() {

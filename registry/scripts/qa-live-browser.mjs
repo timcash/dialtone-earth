@@ -375,9 +375,20 @@ async function step01SignedOut(cdp) {
     );
   });
 
-  // When --keep-signed-in is active and persistent Chrome is already signed into LIVE metal,
-  // verify unauthenticated containment via fresh cookieless fetch without destroying the live session.
+  // When --keep-signed-in is active, make sure we are on TARGET_ORIGIN before checking
+  // whether persistent Chrome already holds an authenticated LIVE session for this host.
   await dismissOverlays(cdp);
+  if (KEEP_SIGNED_IN && process.env.QA_FORCE_RELOGIN !== "1") {
+    const onTarget = await cdp.eval(`location.href.startsWith(${JSON.stringify(TARGET_ORIGIN)})`);
+    if (!onTarget) {
+      await cdp.send("Page.navigate", { url: `${TARGET_ORIGIN}/` });
+      await cdp.waitFor(
+        `initial ${NETWORK_LABEL} page load`,
+        `document.querySelector('[data-testid="live-badge"]') !== null || document.querySelector('[data-testid="simulated-badge"]') !== null`,
+        15_000,
+      );
+    }
+  }
   if (KEEP_SIGNED_IN && process.env.QA_FORCE_RELOGIN !== "1" && (await isSignedInLive(cdp))) {
     // Reload freshly built/deployed bundle so both wide & mobile tabs verify the latest code.
     await cdp.send("Page.reload", { ignoreCache: true });

@@ -171,4 +171,108 @@ func TestDialtoneEarthLiveOwnerAccessOnCloudflare(t *testing.T) {
 	if respHead.StatusCode != http.StatusOK {
 		t.Fatalf("owner GET /api/code/dialtone-earth returned HTTP %d, want 200", respHead.StatusCode)
 	}
+
+	// 4. Live test.dialtone.earth: anonymous / , /code , /logs must redirect 302 -> /login;
+	//    anonymous /api/code and /api/tests must return 401; /login must load the spinning H3 globe.
+	stagingBase := "https://test.dialtone.earth"
+	noRedirectClient := &http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	for _, pagePath := range []string{"/", "/code", "/logs"} {
+		resp, err := noRedirectClient.Get(stagingBase + pagePath)
+		if err != nil {
+			t.Fatalf("anon GET %s%s failed: %v", stagingBase, pagePath, err)
+		}
+		_ = resp.Body.Close()
+		loc := resp.Header.Get("Location")
+		if resp.StatusCode != http.StatusFound || loc != "/login" {
+			t.Fatalf("LIVE STAGING SECURITY FAILURE: anon GET %s%s returned HTTP %d Location=%q, want 302 /login", stagingBase, pagePath, resp.StatusCode, loc)
+		}
+	}
+	for _, apiPath := range []string{"/api/code", "/api/tests"} {
+		resp, err := noRedirectClient.Get(stagingBase + apiPath)
+		if err != nil {
+			t.Fatalf("anon GET %s%s failed: %v", stagingBase, apiPath, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("LIVE STAGING SECURITY FAILURE: anon GET %s%s returned HTTP %d, want 401", stagingBase, apiPath, resp.StatusCode)
+		}
+	}
+
+	stagingLoginResp, err := client.Get(stagingBase + "/login")
+	if err != nil {
+		t.Fatalf("GET %s/login failed: %v", stagingBase, err)
+	}
+	stagingLoginHTML, _ := io.ReadAll(io.LimitReader(stagingLoginResp.Body, 1<<20))
+	_ = stagingLoginResp.Body.Close()
+	if stagingLoginResp.StatusCode != http.StatusOK ||
+		!strings.Contains(string(stagingLoginHTML), `id="auth-globe-stage"`) ||
+		!strings.Contains(string(stagingLoginHTML), `src="/auth-globe.js"`) {
+		t.Fatalf("GET %s/login missing spinning H3 globe markup (HTTP %d)", stagingBase, stagingLoginResp.StatusCode)
+	}
+	globeResp, err := client.Get(stagingBase + "/auth-globe.js")
+	if err != nil {
+		t.Fatalf("GET %s/auth-globe.js failed: %v", stagingBase, err)
+	}
+	_ = globeResp.Body.Close()
+	if globeResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s/auth-globe.js returned HTTP %d, want 200", stagingBase, globeResp.StatusCode)
+	}
+
+	// 5. Owner-authenticated /code, /api/code, /logs, and /api/tests on https://test.dialtone.earth/
+	//    must serve the private R2 code portal, repo metadata, and live test logs.
+	reqCodePortal, _ := http.NewRequest(http.MethodGet, stagingBase+"/code", nil)
+	reqCodePortal.Header.Set("Authorization", "Bearer "+token)
+	respCodePortal, err := noRedirectClient.Do(reqCodePortal)
+	if err != nil {
+		t.Fatalf("owner GET %s/code failed: %v", stagingBase, err)
+	}
+	codePortalBody, _ := io.ReadAll(io.LimitReader(respCodePortal.Body, 1<<20))
+	_ = respCodePortal.Body.Close()
+	if respCodePortal.StatusCode != http.StatusOK ||
+		!strings.Contains(string(codePortalBody), "DIALTONE // CODE") ||
+		!strings.Contains(string(codePortalBody), "dialtone-earth") ||
+		!strings.Contains(string(codePortalBody), "/api/code/dialtone-earth/bundle") {
+		t.Fatalf("owner GET %s/code failed verification: HTTP %d", stagingBase, respCodePortal.StatusCode)
+	}
+
+	reqStagingCodeApi, _ := http.NewRequest(http.MethodGet, stagingBase+"/api/code", nil)
+	reqStagingCodeApi.Header.Set("Authorization", "Bearer "+token)
+	respStagingCodeApi, err := noRedirectClient.Do(reqStagingCodeApi)
+	if err != nil {
+		t.Fatalf("owner GET %s/api/code failed: %v", stagingBase, err)
+	}
+	stagingCodeApiBody, _ := io.ReadAll(io.LimitReader(respStagingCodeApi.Body, 1<<20))
+	_ = respStagingCodeApi.Body.Close()
+	if respStagingCodeApi.StatusCode != http.StatusOK || !strings.Contains(string(stagingCodeApiBody), `"dialtone-earth"`) {
+		t.Fatalf("owner GET %s/api/code failed: HTTP %d\n%s", stagingBase, respStagingCodeApi.StatusCode, string(stagingCodeApiBody))
+	}
+
+	reqLogsPage, _ := http.NewRequest(http.MethodGet, stagingBase+"/logs", nil)
+	reqLogsPage.Header.Set("Authorization", "Bearer "+token)
+	respLogsPage, err := noRedirectClient.Do(reqLogsPage)
+	if err != nil {
+		t.Fatalf("owner GET %s/logs failed: %v", stagingBase, err)
+	}
+	logsPageBody, _ := io.ReadAll(io.LimitReader(respLogsPage.Body, 1<<20))
+	_ = respLogsPage.Body.Close()
+	if respLogsPage.StatusCode != http.StatusOK || !strings.Contains(strings.ToLower(string(logsPageBody)), "<html") {
+		t.Fatalf("owner GET %s/logs failed: HTTP %d", stagingBase, respLogsPage.StatusCode)
+	}
+
+	reqStagingTests, _ := http.NewRequest(http.MethodGet, stagingBase+"/api/tests", nil)
+	reqStagingTests.Header.Set("Authorization", "Bearer "+token)
+	respStagingTests, err := noRedirectClient.Do(reqStagingTests)
+	if err != nil {
+		t.Fatalf("owner GET %s/api/tests failed: %v", stagingBase, err)
+	}
+	stagingTestsBody, _ := io.ReadAll(io.LimitReader(respStagingTests.Body, 1<<20))
+	_ = respStagingTests.Body.Close()
+	if respStagingTests.StatusCode != http.StatusOK || !strings.Contains(string(stagingTestsBody), `"tests"`) {
+		t.Fatalf("owner GET %s/api/tests failed: HTTP %d", stagingBase, respStagingTests.StatusCode)
+	}
 }
