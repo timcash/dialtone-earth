@@ -105,6 +105,18 @@ type StagingEnvStatus = {
     nodes?: Array<{ node?: string; reachable?: boolean; nodeCount?: number }>;
   };
   release_channels?: Record<string, { tag?: string }>;
+  deploy?: {
+    ready?: boolean;
+    has_changes?: boolean;
+    all_tests_passed?: boolean;
+    tested_matches_current?: boolean;
+    browser_passed?: number;
+    browser_total?: number;
+    current_hash?: string;
+    tested_hash?: string;
+    deployed_hash?: string;
+    reason?: string;
+  };
 };
 
 let selectedLogRun: TestRun | null = null;
@@ -594,6 +606,31 @@ function renderBottomBar(
 
   const shownIds = new Set(assigned.map((a) => a.id));
   const focusedId = assigned[focusedPane]?.id || "";
+  const deployInfo = stagingEnv.deploy;
+  const deployReady = Boolean(deployInfo?.ready) && !busy;
+  const gatePillClass =
+    failed > 0
+      ? "is-err"
+      : deployReady
+        ? "is-live"
+        : deployInfo?.has_changes && !deployInfo.tested_matches_current
+          ? "is-warn"
+          : "";
+  const gatePillText =
+    failed > 0
+      ? `GATE BLOCKED (${failed} fail)`
+      : deployReady
+        ? `READY (${passed}/${tests.length})`
+        : deployInfo && !deployInfo.has_changes
+          ? "UP TO DATE"
+          : deployInfo?.has_changes && !deployInfo.tested_matches_current
+            ? "NEW CHANGES · RUN TESTS"
+            : passed > 0
+              ? `PASSED ${passed}/${tests.length}`
+              : "GATE PENDING";
+  const deployTitle = deployReady
+    ? "Deploy verified changes to https://dialtone.earth/ and release auto-update channel"
+    : deployInfo?.reason || "Deploy unlocks only when new changes pass all tests on the test network";
 
   bar.innerHTML = `
     ${errorMessage ? `<div class="error-banner" role="alert">${escapeHtml(errorMessage)}</div>` : ""}
@@ -630,8 +667,8 @@ function renderBottomBar(
               : "TEST MESH OFF"
           }
         </span>
-        <span class="tbl-pill ${failed > 0 ? "is-err" : passed > 0 ? "is-live" : ""}" data-testid="staging-gate-pill">
-          ${failed > 0 ? `GATE BLOCKED (${failed} fail)` : passed > 0 ? `GATE PASS (${passed}/${tests.length})` : "GATE PENDING"}
+        <span class="tbl-pill ${gatePillClass}" data-testid="staging-gate-pill" title="${escapeHtml(deployTitle)}">
+          ${escapeHtml(gatePillText)}
         </span>
       </div>
       <div class="earth-bar-tabs">
@@ -653,7 +690,7 @@ function renderBottomBar(
         <button type="button" class="tbl-chip" data-testid="start-tests" ${busy ? "disabled" : ""}>
           ${starting ? "starting…" : stage === "deploying" ? "deploying…" : runningTest ? "running…" : "start tests"}
         </button>
-        <button type="button" class="tbl-chip is-deploy" data-testid="deploy-live" ${busy || failed > 0 || passed === 0 ? "disabled" : ""} title="Deploy verified staging build to https://dialtone.earth/ and release auto-update channel">
+        <button type="button" class="tbl-chip is-deploy" data-testid="deploy-live" ${deployReady ? "" : "disabled"} title="${escapeHtml(deployTitle)}">
           ${stage === "deploying" ? "deploying…" : "deploy"}
         </button>
         <button type="button" class="tbl-chip ${menuOpen ? "is-active" : ""}" data-testid="open-menu">menu</button>

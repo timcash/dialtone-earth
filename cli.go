@@ -273,6 +273,7 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	if *deployOnPass {
 		msg += " — will auto-deploy to https://dialtone.earth/ on pass"
 	}
+	runHash := computeStagingFingerprint(root)
 	writePipelineState(root, pipelineState{
 		Stage:   "testing",
 		Message: msg,
@@ -292,14 +293,29 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 		})
 		return testErr
 	}
+	testedHash := ""
+	if strings.TrimSpace(*filter) == "" && allBrowserTestsPassed(&state) {
+		testedHash = runHash
+	}
 	if !*deployOnPass {
+		deployedHash := readDeployedRecord(root).DeployedHash
+		stage := "staging_ready"
+		readyMsg := fmt.Sprintf("Ready (%d/%d passed on test network) — click deploy to update dialtone.earth", passed, total)
+		if testedHash == "" {
+			readyMsg = fmt.Sprintf("Passed %d/%d — run full test-network browser suite to unlock deploy", passed, total)
+		} else if deployedHash != "" && deployedHash == testedHash {
+			stage = "deployed"
+			readyMsg = fmt.Sprintf("All %d/%d passed — up to date with live dialtone.earth (nothing new to deploy)", passed, total)
+		}
 		writePipelineState(root, pipelineState{
-			Stage:   "staging_ready",
-			Message: fmt.Sprintf("Ready (%d/%d passed) — click deploy to update dialtone.earth", passed, total),
-			Changed: strings.TrimSpace(*triggerFile),
-			Passed:  passed,
-			Failed:  failed,
-			Total:   total,
+			Stage:        stage,
+			Message:      readyMsg,
+			Changed:      strings.TrimSpace(*triggerFile),
+			TestedHash:   testedHash,
+			DeployedHash: deployedHash,
+			Passed:       passed,
+			Failed:       failed,
+			Total:        total,
 		})
 		return nil
 	}
@@ -445,18 +461,26 @@ func runDeploy(args []string, stdout, stderr io.Writer) error {
 			return err
 		}
 		promotedRel := promoteTestReleaseChannelToLatest(defaultLiveSiteURL, "", stdout)
+		deployedHash := computeStagingFingerprint(root)
+		versionID := extractWranglerVersionID(deployBuf.String())
+		writeDeployedRecord(root, deployedRecord{
+			DeployedHash: deployedHash,
+			VersionID:    versionID,
+		})
 		if *requirePass {
-			msg := fmt.Sprintf("Promoted from test.dialtone.earth (%d/%d passed) → https://dialtone.earth/", passed, total)
+			msg := fmt.Sprintf("Deployed from test.dialtone.earth (%d/%d passed) → https://dialtone.earth/", passed, total)
 			if promotedRel != "" {
 				msg += fmt.Sprintf(" + dialtone auto-update %s", promotedRel)
 			}
 			writePipelineState(root, pipelineState{
-				Stage:     "deployed",
-				Message:   msg,
-				DeployURL: defaultLiveSiteURL + "/",
-				VersionID: extractWranglerVersionID(deployBuf.String()),
-				Passed:    passed,
-				Total:     total,
+				Stage:        "deployed",
+				Message:      msg,
+				DeployURL:    defaultLiveSiteURL + "/",
+				VersionID:    versionID,
+				TestedHash:   deployedHash,
+				DeployedHash: deployedHash,
+				Passed:       passed,
+				Total:        total,
 			})
 		}
 		return nil

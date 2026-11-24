@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { readdir, readFile, stat } from "node:fs/promises";
+import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { defineConfig, type Plugin } from "vite";
@@ -208,26 +209,9 @@ async function promoteStagingToLive(response: ServerResponse): Promise<void> {
     sendJson(response, { error: "Staging gate blocked: tests or deploy are currently running" }, 409);
     return;
   }
-  const tests = await readTests();
-  const failed = tests.filter((t) => t.status === "fail");
-  const running = tests.filter((t) => t.status === "running");
-  const passed = tests.filter((t) => t.status === "pass");
-  if (running.length > 0) {
-    sendJson(response, { error: `Staging gate blocked: ${running.length} test(s) still running` }, 412);
-    return;
-  }
-  if (failed.length > 0) {
-    sendJson(
-      response,
-      {
-        error: `Staging gate blocked: ${failed.length} test(s) failed (${failed.map((f) => f.name).join(", ")})`,
-      },
-      412,
-    );
-    return;
-  }
-  if (passed.length === 0) {
-    sendJson(response, { error: "Staging gate blocked: 0 tests passed — run tests before promoting" }, 412);
+  const readiness = await evaluateDeployReadiness({});
+  if (!readiness.ready) {
+    sendJson(response, { error: `Deploy blocked: ${readiness.reason}` }, 412);
     return;
   }
   activeRun = spawn("go", ["run", ".", "deploy", "--live", "--require-pass"], {
@@ -240,7 +224,7 @@ async function promoteStagingToLive(response: ServerResponse): Promise<void> {
   activeRun.once("exit", () => {
     activeRun = null;
   });
-  sendJson(response, { promoting: true, passed: passed.length, total: tests.length }, 202);
+  sendJson(response, { promoting: true, passed: readiness.passed, total: readiness.total }, 202);
 }
 
 async function listCdpPageTargets(): Promise<CdpPageTarget[]> {
@@ -688,6 +672,158 @@ function sendError(response: ServerResponse, error: unknown): void {
   sendJson(response, { error: error instanceof Error ? error.message : String(error) }, 500);
 }
 
+async function collectDeployableFiles(root: string): Promise<string[]> {
+  const relPaths: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (entry.name === "node_modules" || entry.name === "dist" || entry.name === ".git") continue;
+        await walk(resolve(dir, entry.name));
+      } else if (entry.isFile()) {
+        relPaths.push(relative(root, resolve(dir, entry.name)).replace(/\\/g, "/"));
+      }
+    }
+  };
+  await walk(resolve(root, "registry", "src"));
+  await walk(resolve(root, "registry", "worker"));
+  for (const single of ["registry/index.html", "registry/wrangler.jsonc", "install.sh", "install.ps1"]) {
+    try {
+      const st = await stat(resolve(root, single));
+      if (st.isFile()) relPaths.push(single);
+    } catch {
+      // optional
+    }
+  }
+  relPaths.sort();
+  return relPaths;
+}
+
+async function computeStagingFingerprint(root: string): Promise<string> {
+  const relPaths = await collectDeployableFiles(root);
+  const hash = createHash("sha256");
+  for (const rel of relPaths) {
+    try {
+      const data = await readFile(resolve(root, rel));
+      hash.update(rel);
+      hash.update("\n");
+      hash.update(data);
+      hash.update("\n");
+    } catch {
+      // skip unreadable
+    }
+  }
+  return hash.digest("hex");
+}
+
+async function readDeployedHash(): Promise<{ deployedHash: string; versionId: string; deployedAt: string }> {
+  try {
+    const raw = await readFile(resolve(logsDir, "deployed.json"), "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (isRecord(parsed)) {
+      return {
+        deployedHash: text(parsed.deployed_hash),
+        versionId: text(parsed.version_id),
+        deployedAt: text(parsed.deployed_at),
+      };
+    }
+  } catch {
+    // not deployed yet
+  }
+  return { deployedHash: "", versionId: "", deployedAt: "" };
+}
+
+type DeployReadiness = {
+  ready: boolean;
+  has_changes: boolean;
+  all_tests_passed: boolean;
+  tested_matches_current: boolean;
+  browser_passed: number;
+  browser_total: number;
+  passed: number;
+  failed: number;
+  running: number;
+  pending: number;
+  total: number;
+  current_hash: string;
+  tested_hash: string;
+  deployed_hash: string;
+  reason: string;
+};
+
+async function evaluateDeployReadiness(
+  releaseChannels: Record<string, unknown>,
+): Promise<DeployReadiness> {
+  const [tests, pipeline, deployed, currentHash] = await Promise.all([
+    readTests(),
+    readPipelineState(),
+    readDeployedHash(),
+    computeStagingFingerprint(commandRoot),
+  ]);
+  const failed = tests.filter((t) => t.status === "fail").length;
+  const running = tests.filter((t) => t.status === "running").length;
+  const pending = tests.filter((t) => t.status === "pending" || !t.status).length;
+  const passed = tests.filter((t) => t.status === "pass").length;
+  const browserTests = tests.filter((t) => t.name.startsWith("TestBrowser"));
+  const browserPassed = browserTests.filter((t) => t.status === "pass").length;
+
+  const testedHash = text(pipeline.tested_hash);
+  const deployedHash = deployed.deployedHash || text(pipeline.deployed_hash);
+
+  const testCh = isRecord(releaseChannels.test) ? text(releaseChannels.test.tag) : "";
+  const latestCh = isRecord(releaseChannels.latest) ? text(releaseChannels.latest.tag) : "";
+  const hasReleaseUpdate = Boolean(testCh && testCh !== latestCh);
+  const hasChanges = (Boolean(currentHash) && currentHash !== deployedHash) || hasReleaseUpdate;
+  const allTestsPassed =
+    tests.length > 0 &&
+    failed === 0 &&
+    running === 0 &&
+    pending === 0 &&
+    passed > 0 &&
+    browserTests.length > 0 &&
+    browserPassed === browserTests.length;
+  const testedMatchesCurrent = Boolean(testedHash) && testedHash === currentHash;
+  const ready = hasChanges && allTestsPassed && testedMatchesCurrent;
+
+  let reason = "ready to deploy";
+  if (!hasChanges) {
+    reason = "up to date — nothing new to deploy";
+  } else if (running > 0) {
+    reason = `${running} test(s) still running`;
+  } else if (failed > 0) {
+    reason = `${failed} test(s) failed — fix before deploying`;
+  } else if (pending > 0 || passed === 0) {
+    reason = "run all tests on test network before deploying";
+  } else if (browserTests.length === 0 || browserPassed < browserTests.length) {
+    reason = `test-network browser suite incomplete (${browserPassed}/${browserTests.length})`;
+  } else if (!testedMatchesCurrent) {
+    reason = "code changed since last passing test-network run — re-run tests";
+  }
+
+  return {
+    ready,
+    has_changes: hasChanges,
+    all_tests_passed: allTestsPassed,
+    tested_matches_current: testedMatchesCurrent,
+    browser_passed: browserPassed,
+    browser_total: browserTests.length,
+    passed,
+    failed,
+    running,
+    pending,
+    total: tests.length,
+    current_hash: currentHash,
+    tested_hash: testedHash,
+    deployed_hash: deployedHash,
+    reason,
+  };
+}
+
 async function readStagingEnvStatus(): Promise<Record<string, unknown>> {
   const previewBase = (process.env.STAGING_PREVIEW_URL || "http://127.0.0.1:5175").replace(/\/+$/, "");
   let preview: Record<string, unknown> = { ok: false, channel: "test", preview_url: `${previewBase}/`, nodes: [] };
@@ -713,9 +849,11 @@ async function readStagingEnvStatus(): Promise<Record<string, unknown>> {
   } catch {
     // offline or not yet deployed
   }
+  const deploy = await evaluateDeployReadiness(releaseChannels);
   return {
     preview,
     release_channels: releaseChannels,
+    deploy,
   };
 }
 
