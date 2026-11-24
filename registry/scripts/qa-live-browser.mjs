@@ -700,8 +700,8 @@ async function step08CameraTsAndReload(cdp) {
     `document.body.innerText.includes(${JSON.stringify(`CAM: ${CAMERA_TARGET_NODE}`)})`,
     10_000,
   );
-  // Allow debounced PUT /api/user/ui-config to commit to KV before hard reload.
-  await sleep(1_400);
+  // Allow debounced PUT /api/user/ui-config to commit to Cloudflare KV before hard reload.
+  await sleep(IS_STAGING_TEST ? 1_400 : 2_200);
 
   await cdp.showBanner(`08 Hard reload -> verifying KV restores 2x2 + CAM: ${CAMERA_TARGET_NODE}`);
   await cdp.send("Page.reload", { ignoreCache: true });

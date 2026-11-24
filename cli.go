@@ -366,7 +366,7 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-const prodVerificationFilter = "^(TestBrowser0[1-9]|TestProductionLiveSmoke|TestDialtoneEarthLiveOwnerAccessOnCloudflare)$"
+const prodVerificationFilter = "^(TestBrowser0[1-9]|TestProductionLiveSmoke$|TestDialtoneEarthLiveOwnerAccessOnCloudflare$)"
 const defaultProdBrowserOrigin = "https://metal.dialtone.earth"
 
 // runTrackedProductionSuite runs the live production test suite (all 9 dual-format

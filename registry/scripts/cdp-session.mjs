@@ -415,7 +415,15 @@ export class CdpClient {
       el.click();
       return true;
     })()`);
-    if (this.mirror) {
+    // Mirror non-mutating UI navigation clicks onto mobile preview so both formats
+    // stay visually synced without racing duplicate PUT /api/user/ui-config KV writes.
+    const isKvMutation =
+      selector.includes("apply-camera-ts") ||
+      selector.includes("cam-preset-") ||
+      selector.includes("layout-") ||
+      selector.includes("cfg-add-") ||
+      selector.includes("cfg-assign");
+    if (this.mirror && !isKvMutation) {
       await this.mirror
         .eval(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (el) el.click(); return Boolean(el); })()`)
         .catch(() => {});
