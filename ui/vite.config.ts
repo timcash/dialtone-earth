@@ -761,7 +761,7 @@ async function evaluateDeployReadiness(
 ): Promise<DeployReadiness> {
   const [tests, pipeline, deployed, currentHash] = await Promise.all([
     readTests(),
-    readPipelineState(),
+    readPipeline(),
     readDeployedHash(),
     computeStagingFingerprint(commandRoot),
   ]);
