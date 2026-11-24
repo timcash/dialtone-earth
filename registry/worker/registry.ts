@@ -1,5 +1,5 @@
-import type { KvNamespaceBinding } from "./auth.ts";
-import { isPublicLiveHost } from "./live.ts";
+import type { KvNamespaceBinding, MagicLinkEnv } from "./auth.ts";
+import { authorizeOwnerRequest, isPublicLiveHost } from "./live.ts";
 
 export interface R2ObjectBodyLike {
   body: ReadableStream | Uint8Array | ArrayBuffer | string;
@@ -26,10 +26,11 @@ export interface R2BucketBinding {
   delete?(key: string): Promise<void>;
 }
 
-export interface RegistryEnv {
+export interface RegistryEnv extends MagicLinkEnv {
   DIALTONE_AUTH_TOKENS?: KvNamespaceBinding;
   DIALTONE_REGISTRY?: R2BucketBinding;
   LIVE_CONTROL_TOKEN?: string;
+  OWNER_EMAIL?: string;
 }
 
 export interface RepoCommitSummary {
@@ -112,28 +113,6 @@ const releasesIndexKey = (repo: string) => `registry:releases:index:${repo}`;
 const releaseRecordKey = (repo: string, tag: string) =>
   `registry:releases:item:${repo}:${tag}`;
 const pluginRecordKey = (name: string) => `registry:plugins:item:${name}`;
-
-function constantTimeEqual(a: string, b: string): boolean {
-  const enc = new TextEncoder();
-  const ab = enc.encode(a);
-  const bb = enc.encode(b);
-  const maxLen = Math.max(ab.length, bb.length);
-  let diff = ab.length ^ bb.length;
-  for (let i = 0; i < maxLen; i += 1) {
-    diff |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
-  }
-  return diff === 0;
-}
-
-function isAuthorizedControl(request: Request, env: RegistryEnv): boolean {
-  const expected = (env.LIVE_CONTROL_TOKEN ?? "").trim();
-  if (!expected) return false;
-  const header = (request.headers.get("Authorization") ?? "").trim();
-  if (!header.toLowerCase().startsWith("bearer ")) return false;
-  const provided = header.slice(7).trim();
-  if (!provided) return false;
-  return constantTimeEqual(provided, expected);
-}
 
 async function sha256Hex(data: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", data);
@@ -252,16 +231,18 @@ export async function handleRegistryRoute(
   const kv = env.DIALTONE_AUTH_TOKENS;
   const r2 = env.DIALTONE_REGISTRY;
   const nowIso = new Date(nowSec * 1000).toISOString();
+  const host = url.hostname.toLowerCase();
 
-  const requireWriteAuth = (): Response | null => {
-    if (!isAuthorizedControl(request, env)) {
+  const requireOwnerAuth = async (needKv = true): Promise<Response | null> => {
+    const auth = await authorizeOwnerRequest(request, env, host, nowSec);
+    if (!auth.ok) {
       return jsonResp(
-        { error: "Bearer LIVE_CONTROL_TOKEN required" },
-        401,
+        { error: auth.error || "Owner authentication required" },
+        auth.status,
         securityHeaders,
       );
     }
-    if (!kv) {
+    if (needKv && !kv) {
       return jsonResp(
         { error: "DIALTONE_AUTH_TOKENS KV binding is not configured" },
         503,
@@ -272,8 +253,15 @@ export async function handleRegistryRoute(
   };
 
   // ===========================================================================
-  // 1. CODE STORAGE (/api/code)
+  // 1. PRIVATE OWNER-ONLY CODE / GIT REPOSITORY STORAGE (/api/code/*)
+  //    Only the owner (timcash@gmail.com session or owner Bearer token) may
+  //    list, inspect, clone, pull, archive, or push git repositories.
   // ===========================================================================
+  if (isCode) {
+    const denied = await requireOwnerAuth(false);
+    if (denied) return denied;
+  }
+
   if (path === "/api/code" && request.method === "GET") {
     if (!kv) return jsonResp({ repos: [] }, 200, securityHeaders);
     const names = (await readJsonKv<string[]>(kv, CODE_INDEX_KEY)) ?? [];
@@ -317,7 +305,7 @@ export async function handleRegistryRoute(
   // PUT /api/code/<repo>/push
   const codePushMatch = /^\/api\/code\/([^/]+)\/push$/.exec(path);
   if (codePushMatch && request.method === "PUT") {
-    const denied = requireWriteAuth();
+    const denied = await requireOwnerAuth(true);
     if (denied) return denied;
     if (!r2) {
       return jsonResp(
@@ -476,7 +464,7 @@ export async function handleRegistryRoute(
       return jsonResp({ error: "Invalid repo or archive filename" }, 400, securityHeaders);
     }
     if (request.method === "PUT") {
-      const denied = requireWriteAuth();
+      const denied = await requireOwnerAuth(true);
       if (denied) return denied;
       if (!r2) {
         return jsonResp({ error: "R2 binding not configured" }, 503, securityHeaders);
@@ -589,7 +577,7 @@ export async function handleRegistryRoute(
       );
     }
     if (request.method === "POST" || request.method === "PUT") {
-      const denied = requireWriteAuth();
+      const denied = await requireOwnerAuth(true);
       if (denied) return denied;
       let body: Record<string, unknown> = {};
       try {
@@ -639,7 +627,7 @@ export async function handleRegistryRoute(
   const relAssetUploadMatch =
     /^\/api\/releases\/([^/]+)\/([^/]+)\/assets\/([^/]+)$/.exec(path);
   if (relAssetUploadMatch && request.method === "PUT") {
-    const denied = requireWriteAuth();
+    const denied = await requireOwnerAuth(true);
     if (denied) return denied;
     if (!r2) {
       return jsonResp({ error: "R2 binding not configured" }, 503, securityHeaders);
@@ -789,7 +777,7 @@ export async function handleRegistryRoute(
       );
     }
     if (request.method === "PUT" || request.method === "POST") {
-      const denied = requireWriteAuth();
+      const denied = await requireOwnerAuth(true);
       if (denied) return denied;
       let body: Record<string, unknown>;
       try {
@@ -839,7 +827,7 @@ export async function handleRegistryRoute(
   const pluginAssetUploadMatch =
     /^\/api\/plugins\/([^/]+)\/assets\/([^/]+)$/.exec(path);
   if (pluginAssetUploadMatch && request.method === "PUT") {
-    const denied = requireWriteAuth();
+    const denied = await requireOwnerAuth(true);
     if (denied) return denied;
     if (!r2) {
       return jsonResp({ error: "R2 binding not configured" }, 503, securityHeaders);

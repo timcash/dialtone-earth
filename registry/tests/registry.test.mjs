@@ -99,14 +99,20 @@ test("Cloudflare R2 + KV registry stores code bundles, releases, and public plug
   assert.equal(pushJson.bundle_sha256, expectedBundleSha);
 
   const listRepos = await (
-    await handleGatewayRequest(new Request("https://dialtone.earth/api/code"), env, deps)
+    await handleGatewayRequest(
+      new Request("https://dialtone.earth/api/code", { headers: authHeader }),
+      env,
+      deps,
+    )
   ).json();
   assert.equal(listRepos.repos.length, 1);
   assert.equal(listRepos.repos[0].name, "dialtone-earth");
   assert.equal(listRepos.repos[0].head_sha, "69b49eed1234567890");
 
   const dlBundle = await handleGatewayRequest(
-    new Request("https://dialtone.earth/api/code/dialtone-earth/bundle"),
+    new Request("https://dialtone.earth/api/code/dialtone-earth/bundle", {
+      headers: authHeader,
+    }),
     env,
     deps,
   );

@@ -1,6 +1,11 @@
-import type { KvNamespaceBinding } from "./auth.ts";
+import {
+  verifySessionCookie,
+  type KvNamespaceBinding,
+  type MagicLinkEnv,
+} from "./auth.ts";
 
 export const LIVE_STATE_KV_KEY = "live-site:dialtone.earth";
+export const DEFAULT_OWNER_EMAIL = "timcash@gmail.com";
 
 export type LiveTheme = "light" | "dark";
 export type LiveView =
@@ -27,10 +32,12 @@ export interface LiveSiteState {
   fullscreen: boolean | null;
 }
 
-export interface LiveControlEnv {
+export interface LiveControlEnv extends MagicLinkEnv {
   DIALTONE_AUTH_TOKENS?: KvNamespaceBinding;
-  /** Bearer token authorizing CLI mutations to public dialtone.earth /api/live */
+  /** Bearer token authorizing owner CLI mutations to dialtone.earth */
   LIVE_CONTROL_TOKEN?: string;
+  /** Single owner email permitted to modify dialtone.earth and access /api/code/* */
+  OWNER_EMAIL?: string;
 }
 
 const VALID_THEMES = new Set<LiveTheme>(["light", "dark"]);
@@ -147,17 +154,45 @@ function constantTimeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-function isAuthorizedLiveControl(
+export function getOwnerEmail(env: LiveControlEnv): string {
+  const configured = (env.OWNER_EMAIL ?? "").trim().toLowerCase();
+  return configured || DEFAULT_OWNER_EMAIL;
+}
+
+export async function authorizeOwnerRequest(
   request: Request,
   env: LiveControlEnv,
-): boolean {
+  host: string,
+  nowSec: number,
+): Promise<{ ok: boolean; status: number; actor?: string; error?: string }> {
   const expected = (env.LIVE_CONTROL_TOKEN ?? "").trim();
-  if (!expected) return false;
   const header = (request.headers.get("Authorization") ?? "").trim();
-  if (!header.toLowerCase().startsWith("bearer ")) return false;
-  const provided = header.slice(7).trim();
-  if (!provided) return false;
-  return constantTimeEqual(provided, expected);
+  if (header.toLowerCase().startsWith("bearer ")) {
+    const provided = header.slice(7).trim();
+    if (expected && provided && constantTimeEqual(provided, expected)) {
+      return { ok: true, status: 200, actor: `token:${getOwnerEmail(env)}` };
+    }
+    return { ok: false, status: 401, error: "Invalid Bearer token" };
+  }
+
+  const session = await verifySessionCookie(request, env, host, nowSec);
+  if (session.valid && session.subject) {
+    const owner = getOwnerEmail(env);
+    if (session.subject.toLowerCase() === owner) {
+      return { ok: true, status: 200, actor: session.subject.toLowerCase() };
+    }
+    return {
+      ok: false,
+      status: 403,
+      error: `Forbidden: only ${owner} may access or modify dialtone.earth`,
+    };
+  }
+
+  return {
+    ok: false,
+    status: 401,
+    error: `Owner authentication required (${getOwnerEmail(env)} session or Bearer LIVE_CONTROL_TOKEN)`,
+  };
 }
 
 function liveJsonResponse(
@@ -228,10 +263,11 @@ export async function handleLiveRoute(
     );
   }
 
-  if (!isAuthorizedLiveControl(request, env)) {
+  const ownerAuth = await authorizeOwnerRequest(request, env, url.hostname.toLowerCase(), nowSec);
+  if (!ownerAuth.ok) {
     return liveJsonResponse(
-      { error: "Bearer LIVE_CONTROL_TOKEN required" },
-      401,
+      { error: ownerAuth.error || "Owner authentication required" },
+      ownerAuth.status,
       securityHeaders,
     );
   }

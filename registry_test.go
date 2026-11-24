@@ -6,8 +6,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDialtoneEarthRegistryCLI(t *testing.T) {
@@ -16,6 +18,10 @@ func TestDialtoneEarthRegistryCLI(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/code":
+			if r.Header.Get("Authorization") != "Bearer "+secret {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"repos":[{"name":"dialtone-earth","default_branch":"main","head_sha":"abcdef123456","head_subject":"cloudflare vcs","tags":["v0.6.0"]}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/releases/dialtone-earth":
@@ -39,6 +45,7 @@ func TestDialtoneEarthRegistryCLI(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	t.Setenv("DIALTONE_LIVE_TOKEN", secret)
 	var stdout, stderr bytes.Buffer
 	if code := Run([]string{"code", "list", "--url", srv.URL}, &stdout, &stderr); code != 0 {
 		t.Fatalf("code list failed (%d): %s", code, stderr.String())
@@ -73,5 +80,95 @@ func TestDialtoneEarthRegistryCLI(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "dialtone-shell") || !strings.Contains(stdout.String(), "dialtone/shell/1") {
 		t.Fatalf("unexpected plugins list output:\n%s", stdout.String())
+	}
+}
+
+func TestDialtoneEarthLiveOwnerAccessOnCloudflare(t *testing.T) {
+	if os.Getenv("DIALTONE_LIVE_CLOUDFLARE_E2E") != "1" {
+		t.Skip("set DIALTONE_LIVE_CLOUDFLARE_E2E=1 (or run `dialtone-earth test --browser`) to verify live owner-only security on https://dialtone.earth/")
+	}
+	base := "https://dialtone.earth"
+	client := &http.Client{Timeout: 15 * time.Second}
+
+	// 1. Anonymous & forged credentials must be rejected (401) across private git repo and all write endpoints.
+	deniedChecks := []struct {
+		method string
+		path   string
+		auth   string
+		body   string
+	}{
+		{http.MethodGet, "/api/code", "", ""},
+		{http.MethodGet, "/api/code/dialtone-earth", "", ""},
+		{http.MethodGet, "/api/code/dialtone-earth/bundle", "", ""},
+		{http.MethodGet, "/api/code/dialtone-earth/archive/main.tar.gz", "", ""},
+		{http.MethodGet, "/api/code", "Bearer invalid-attacker-token", ""},
+		{http.MethodPut, "/api/code/dialtone-earth/push", "Bearer invalid-attacker-token", "hijack"},
+		{http.MethodPatch, "/api/live", "", `{"banner":"hijack"}`},
+		{http.MethodPatch, "/api/live", "Bearer invalid-attacker-token", `{"banner":"hijack"}`},
+		{http.MethodPost, "/api/releases/dialtone-earth/v9.9.9", "", `{"sha":"deadbeef1234"}`},
+		{http.MethodPut, "/api/plugins/unauthorized-probe", "", `{"version":"1.0.0"}`},
+	}
+	for _, chk := range deniedChecks {
+		var bodyReader io.Reader
+		if chk.body != "" {
+			bodyReader = strings.NewReader(chk.body)
+		}
+		req, err := http.NewRequest(chk.method, base+chk.path, bodyReader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if chk.auth != "" {
+			req.Header.Set("Authorization", chk.auth)
+		}
+		if chk.body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s request failed: %v", chk.method, chk.path, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("LIVE SECURITY FAILURE: %s %s (auth=%q) returned HTTP %d, want 401", chk.method, chk.path, chk.auth, resp.StatusCode)
+		}
+	}
+
+	// 2. Apex /login must be enabled for timcash@gmail.com magic-link login.
+	loginResp, err := client.Get(base + "/login")
+	if err != nil {
+		t.Fatalf("GET /login failed: %v", err)
+	}
+	loginHTML, _ := io.ReadAll(io.LimitReader(loginResp.Body, 1<<20))
+	_ = loginResp.Body.Close()
+	if loginResp.StatusCode != http.StatusOK || !strings.Contains(string(loginHTML), `name="email"`) {
+		t.Fatalf("GET /login unexpected status=%d (magic-link login form not enabled on dialtone.earth)", loginResp.StatusCode)
+	}
+
+	// 3. Owner token (timcash@gmail.com) CAN read the private git repo and bundle on https://dialtone.earth/.
+	token, err := loadLiveControlToken("")
+	if err != nil {
+		t.Fatalf("local owner token required for positive live verification: %v", err)
+	}
+	reqList, _ := http.NewRequest(http.MethodGet, base+"/api/code", nil)
+	reqList.Header.Set("Authorization", "Bearer "+token)
+	respList, err := client.Do(reqList)
+	if err != nil {
+		t.Fatalf("owner GET /api/code failed: %v", err)
+	}
+	rawList, _ := io.ReadAll(io.LimitReader(respList.Body, 1<<20))
+	_ = respList.Body.Close()
+	if respList.StatusCode != http.StatusOK || !strings.Contains(string(rawList), `"dialtone-earth"`) {
+		t.Fatalf("owner GET /api/code failed: HTTP %d\n%s", respList.StatusCode, string(rawList))
+	}
+
+	reqHead, _ := http.NewRequest(http.MethodGet, base+"/api/code/dialtone-earth", nil)
+	reqHead.Header.Set("Authorization", "Bearer "+token)
+	respHead, err := client.Do(reqHead)
+	if err != nil {
+		t.Fatalf("owner GET /api/code/dialtone-earth failed: %v", err)
+	}
+	_ = respHead.Body.Close()
+	if respHead.StatusCode != http.StatusOK {
+		t.Fatalf("owner GET /api/code/dialtone-earth returned HTTP %d, want 200", respHead.StatusCode)
 	}
 }

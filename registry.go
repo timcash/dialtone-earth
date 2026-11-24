@@ -196,12 +196,17 @@ func runCodeList(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("code list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	baseURL := fs.String("url", defaultLiveSiteURL, "Registry base URL")
+	tokenFile := fs.String("token-file", "", "Path to LIVE_CONTROL_TOKEN file")
 	jsonOut := fs.Bool("json", false, "Emit raw JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	token, err := loadLiveControlToken(*tokenFile)
+	if err != nil {
+		return err
+	}
 	endpoint := strings.TrimRight(*baseURL, "/") + "/api/code"
-	raw, _, err := registryHTTPDo(http.MethodGet, endpoint, "", nil, nil)
+	raw, _, err := registryHTTPDo(http.MethodGet, endpoint, token, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -241,12 +246,17 @@ func runCodeStatus(args []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	repo := fs.String("repo", defaultRepoSlug(), "Repository slug")
 	baseURL := fs.String("url", defaultLiveSiteURL, "Registry base URL")
+	tokenFile := fs.String("token-file", "", "Path to LIVE_CONTROL_TOKEN file")
 	jsonOut := fs.Bool("json", false, "Emit raw JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	token, err := loadLiveControlToken(*tokenFile)
+	if err != nil {
+		return err
+	}
 	endpoint := strings.TrimRight(*baseURL, "/") + "/api/code/" + url.PathEscape(*repo)
-	raw, _, err := registryHTTPDo(http.MethodGet, endpoint, "", nil, nil)
+	raw, _, err := registryHTTPDo(http.MethodGet, endpoint, token, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -408,11 +418,16 @@ func runCodePull(args []string, stdout, stderr io.Writer) error {
 	repo := fs.String("repo", defaultRepoSlug(), "Repository slug")
 	branch := fs.String("branch", "main", "Git branch to pull")
 	baseURL := fs.String("url", defaultLiveSiteURL, "Registry base URL")
+	tokenFile := fs.String("token-file", "", "Path to LIVE_CONTROL_TOKEN file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	token, err := loadLiveControlToken(*tokenFile)
+	if err != nil {
+		return err
+	}
 	endpoint := strings.TrimRight(*baseURL, "/") + "/api/code/" + url.PathEscape(*repo) + "/bundle?branch=" + url.QueryEscape(*branch)
-	raw, _, err := registryHTTPDo(http.MethodGet, endpoint, "", nil, nil)
+	raw, _, err := registryHTTPDo(http.MethodGet, endpoint, token, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -445,11 +460,16 @@ func runCodeClone(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("code clone", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	baseURL := fs.String("url", defaultLiveSiteURL, "Registry base URL")
+	tokenFile := fs.String("token-file", "", "Path to LIVE_CONTROL_TOKEN file")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() < 1 || fs.NArg() > 2 {
 		return errors.New("usage: dialtone-earth code clone <repo> [dir]")
+	}
+	token, err := loadLiveControlToken(*tokenFile)
+	if err != nil {
+		return err
 	}
 	repo := fs.Arg(0)
 	targetDir := repo
@@ -457,7 +477,7 @@ func runCodeClone(args []string, stdout, stderr io.Writer) error {
 		targetDir = fs.Arg(1)
 	}
 	endpoint := strings.TrimRight(*baseURL, "/") + "/api/code/" + url.PathEscape(repo) + "/bundle"
-	raw, respHeaders, err := registryHTTPDo(http.MethodGet, endpoint, "", nil, nil)
+	raw, respHeaders, err := registryHTTPDo(http.MethodGet, endpoint, token, nil, nil)
 	if err != nil {
 		return err
 	}

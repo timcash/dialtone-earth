@@ -171,6 +171,8 @@ func testSection(name string) string {
 		return "Live metal Data & UI"
 	case "TestDialtoneEarthCloudflareGateway",
 		"TestDialtoneEarthCloudflareRegistry",
+		"TestDialtoneEarthOwnerOnlyAccess",
+		"TestDialtoneEarthLiveOwnerAccessOnCloudflare",
 		"TestDialtoneEarthRegistrySecurityHeaders",
 		"TestDialtoneEarthOriginBridge",
 		"TestDialtoneEarthRegistryNetworks":
