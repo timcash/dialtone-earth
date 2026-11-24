@@ -557,6 +557,29 @@ func runDeployLive(stdout, stderr io.Writer) error {
 	return nil
 }
 
+func runProductionSmokeVerification(root string, stdout, stderr io.Writer) error {
+	regDir := filepath.Join(root, "registry")
+	script := filepath.Join(regDir, "scripts", "qa-prod-smoke.mjs")
+	if !fileExists(script) {
+		return fmt.Errorf("production smoke script not found at %s", script)
+	}
+	fmt.Fprintln(stdout, "prod-verify: running live production smoke suite against https://dialtone.earth/")
+	cmd := exec.Command("node", "scripts/qa-prod-smoke.mjs")
+	cmd.Dir = regDir
+	env := os.Environ()
+	if tok, err := loadLiveControlToken(""); err == nil && tok != "" {
+		env = append(env, "DIALTONE_LIVE_TOKEN="+tok)
+	}
+	cmd.Env = env
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("live production smoke verification failed: %w", err)
+	}
+	fmt.Fprintln(stdout, "prod-verify: live production https://dialtone.earth/ verified (4/4 checks passed)")
+	return nil
+}
+
 func cloudflareWranglerEnv() []string {
 	env := os.Environ()
 	hasAccount := false

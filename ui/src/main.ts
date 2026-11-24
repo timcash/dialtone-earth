@@ -578,10 +578,10 @@ function renderBottomBar(
 ): void {
   const passed = tests.filter((t) => normalizeStatus(t.status) === "pass").length;
   const failed = tests.filter((t) => normalizeStatus(t.status) === "fail").length;
-  const busy = starting || Boolean(runningTest) || pipelineStatus.stage === "deploying";
   const stage = pipelineStatus.stage || "idle";
+  const busy = starting || Boolean(runningTest) || stage === "deploying" || stage === "verifying_prod";
 
-  const stepClass = (step: "edit" | "testing" | "staging_ready" | "deployed"): string => {
+  const stepClass = (step: "edit" | "testing" | "staging_ready" | "deploying" | "verifying_prod"): string => {
     const order: Record<string, number> = {
       idle: 0,
       edit: 1,
@@ -590,18 +590,19 @@ function renderBottomBar(
       passed: 3,
       staging_ready: 3,
       deploying: 4,
-      deployed: 4,
+      verifying_prod: 5,
+      deployed: 6,
     };
     const rank = order[stage] ?? 0;
-    const target = { edit: 1, testing: 2, staging_ready: 3, deployed: 4 }[step];
+    const target = { edit: 1, testing: 2, staging_ready: 3, deploying: 4, verifying_prod: 5 }[step];
     if (stage === "failed" && step === "testing") return "failed";
-    if (stage === step || (stage === "deploying" && step === "deployed")) return "active";
-    if (rank > target || (stage === "deployed" && step === "deployed")) return "done";
+    if (stage === step) return "active";
+    if (rank > target) return "done";
     return "";
   };
 
   const bannerCls =
-    stage === "deployed" || stage === "staging_ready" || stage === "testing" || stage === "edit"
+    stage === "deployed" || stage === "staging_ready" || stage === "testing" || stage === "edit" || stage === "verifying_prod"
       ? "is-live"
       : stage === "deploying"
         ? "is-warn"
@@ -645,7 +646,9 @@ function renderBottomBar(
         <span>→</span>
         <span class="pipe-step ${stepClass("staging_ready")}">3.READY</span>
         <span>→</span>
-        <span class="pipe-step ${stepClass("deployed")}">4.DEPLOY</span>
+        <span class="pipe-step ${stepClass("deploying")}">4.DEPLOY</span>
+        <span>→</span>
+        <span class="pipe-step ${stepClass("verifying_prod")}">5.PROD VERIFY</span>
         ${pipelineStatus.changed ? `<span class="c-cf">${escapeHtml(pipelineStatus.changed)}</span>` : ""}
         <span>${escapeHtml(pipelineStatus.message || "Ready — edits stay on staging until you deploy to dialtone.earth")}</span>
       </div>
@@ -678,10 +681,10 @@ function renderBottomBar(
         <button type="button" class="tbl-chip" data-testid="add-browser-btn" title="Open an additional projected Chrome browser tab">+ browser</button>
         <button type="button" class="tbl-chip" data-testid="run-browser-suite" ${busy ? "disabled" : ""}>run browser</button>
         <button type="button" class="tbl-chip" data-testid="start-tests" ${busy ? "disabled" : ""}>
-          ${starting ? "starting…" : stage === "deploying" ? "deploying…" : runningTest ? "running…" : "start tests"}
+          ${starting ? "starting…" : stage === "deploying" ? "deploying…" : stage === "verifying_prod" ? "verifying…" : runningTest ? "running…" : "start tests"}
         </button>
         <button type="button" class="tbl-chip is-deploy" data-testid="deploy-live" ${deployReady ? "" : "disabled"} title="${escapeHtml(deployTitle)}">
-          ${stage === "deploying" ? "deploying…" : "deploy"}
+          ${stage === "deploying" ? "deploying…" : stage === "verifying_prod" ? "verifying prod…" : "deploy"}
         </button>
         <button type="button" class="tbl-chip ${menuOpen ? "is-active" : ""}" data-testid="open-menu">menu</button>
       </div>

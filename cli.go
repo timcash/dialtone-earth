@@ -463,12 +463,38 @@ func runDeploy(args []string, stdout, stderr io.Writer) error {
 		promotedRel := promoteTestReleaseChannelToLatest(defaultLiveSiteURL, "", stdout)
 		deployedHash := computeStagingFingerprint(root)
 		versionID := extractWranglerVersionID(deployBuf.String())
+		if *requirePass {
+			writePipelineState(root, pipelineState{
+				Stage:      "verifying_prod",
+				Message:    "Deployed to https://dialtone.earth/ — running live production verification...",
+				DeployURL:  defaultLiveSiteURL + "/",
+				VersionID:  versionID,
+				TestedHash: deployedHash,
+				Passed:     passed,
+				Total:      total,
+			})
+		}
+		if err := runProductionSmokeVerification(root, stdout, stderr); err != nil {
+			if *requirePass {
+				writePipelineState(root, pipelineState{
+					Stage:      "failed",
+					Message:    fmt.Sprintf("Deployed, but live production verification failed: %v", err),
+					DeployURL:  defaultLiveSiteURL + "/",
+					VersionID:  versionID,
+					TestedHash: deployedHash,
+					Passed:     passed,
+					Total:      total,
+				})
+			}
+			return err
+		}
 		writeDeployedRecord(root, deployedRecord{
 			DeployedHash: deployedHash,
 			VersionID:    versionID,
+			VerifiedProd: true,
 		})
 		if *requirePass {
-			msg := fmt.Sprintf("Deployed from test.dialtone.earth (%d/%d passed) → https://dialtone.earth/", passed, total)
+			msg := fmt.Sprintf("Live on https://dialtone.earth/ & production verified (%d/%d staging + 4/4 prod checks)", passed, total)
 			if promotedRel != "" {
 				msg += fmt.Sprintf(" + dialtone auto-update %s", promotedRel)
 			}

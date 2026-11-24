@@ -45,6 +45,7 @@ var deployedFile = filepath.Join("logs", "deployed.json")
 type deployedRecord struct {
 	DeployedHash string `json:"deployed_hash"`
 	VersionID    string `json:"version_id,omitempty"`
+	VerifiedProd bool   `json:"verified_prod,omitempty"`
 	DeployedAt   string `json:"deployed_at"`
 }
 
