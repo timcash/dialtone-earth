@@ -15,6 +15,7 @@ const statePath = resolve(process.env.DIALTONE_EARTH_STATE_PATH || resolve(comma
 const logsDir = dirname(statePath);
 const cdpPort = Number(process.env.DIALTONE_CDP_PORT || 9222);
 const SAFE_FILTER_RE = /^[\^$A-Za-z0-9_.|*-]+$/;
+const SAFE_TARGET_ID_RE = /^[A-Za-z0-9_-]{4,80}$/;
 let activeRun: ChildProcess | null = null;
 
 type TestRecord = {
@@ -34,6 +35,13 @@ type RunOptions = {
   deployOnPass: boolean;
   filter: string;
   dashboardUrl: string;
+};
+
+type CdpPageTarget = {
+  id: string;
+  title: string;
+  url: string;
+  wsUrl: string;
 };
 
 function testApiPlugin(): Plugin {
@@ -80,15 +88,24 @@ function testApiPlugin(): Plugin {
             .catch((error: unknown) => sendError(response, error));
           return;
         }
+        if (pathname === "/api/cdp/new-tab" && request.method === "POST") {
+          const rawTargetUrl = (parsedUrl.searchParams.get("url") || "https://dialtone.earth/").trim();
+          createNewCdpTab(rawTargetUrl)
+            .then((created) => sendJson(response, created, 201))
+            .catch((error: unknown) => sendError(response, error));
+          return;
+        }
         if (pathname === "/api/cdp/stream" && request.method === "GET") {
-          streamCdpViewport(request, response).catch((error: unknown) => {
+          const targetId = (parsedUrl.searchParams.get("targetId") || "").trim();
+          streamCdpViewport(request, response, targetId).catch((error: unknown) => {
             if (!response.headersSent) sendError(response, error);
             else response.end();
           });
           return;
         }
         if (pathname === "/api/cdp/frame" && request.method === "GET") {
-          captureSingleCdpFrame()
+          const targetId = (parsedUrl.searchParams.get("targetId") || "").trim();
+          captureSingleCdpFrame(targetId)
             .then((jpeg) => {
               if (!jpeg) {
                 sendJson(response, { error: "No active CDP browser page" }, 503);
@@ -174,29 +191,104 @@ function startTests(response: ServerResponse, opts: RunOptions): void {
   sendJson(response, { started: true, pid: activeRun.pid ?? null, browser: opts.browser, filter: opts.filter || null }, 202);
 }
 
-async function findActiveAppPageTarget(): Promise<{ url: string; wsUrl: string } | null> {
+async function listCdpPageTargets(): Promise<CdpPageTarget[]> {
   try {
     const listResp = await fetch(`http://127.0.0.1:${cdpPort}/json/list`, {
       signal: AbortSignal.timeout(900),
     });
-    if (!listResp.ok) return null;
+    if (!listResp.ok) return [];
     const list: unknown = await listResp.json();
-    const pages = Array.isArray(list)
-      ? list.filter((t): t is Record<string, unknown> => isRecord(t) && t.type === "page" && typeof t.webSocketDebuggerUrl === "string")
-      : [];
-    const target =
-      pages.find((t) => text(t.url).includes("dialtone.earth")) ||
-      pages.find((t) => !text(t.url).includes("127.0.0.1:5174") && !text(t.url).startsWith("devtools://")) ||
-      pages[0];
-    if (!target) return null;
-    return { url: text(target.url), wsUrl: text(target.webSocketDebuggerUrl) };
+    if (!Array.isArray(list)) return [];
+    return list
+      .filter(
+        (t): t is Record<string, unknown> =>
+          isRecord(t) &&
+          t.type === "page" &&
+          typeof t.id === "string" &&
+          typeof t.webSocketDebuggerUrl === "string" &&
+          !text(t.url).startsWith("devtools://") &&
+          !text(t.url).startsWith("http://127.0.0.1:5174"),
+      )
+      .map((t) => ({
+        id: text(t.id),
+        title: text(t.title, text(t.url)),
+        url: text(t.url),
+        wsUrl: text(t.webSocketDebuggerUrl),
+      }));
   } catch {
-    return null;
+    return [];
   }
 }
 
-async function captureSingleCdpFrame(): Promise<Buffer | null> {
-  const target = await findActiveAppPageTarget();
+async function findActiveAppPageTarget(targetId = ""): Promise<CdpPageTarget | null> {
+  const pages = await listCdpPageTargets();
+  if (pages.length === 0) return null;
+  if (targetId && SAFE_TARGET_ID_RE.test(targetId)) {
+    const exact = pages.find((p) => p.id === targetId);
+    if (exact) return exact;
+  }
+  return pages.find((t) => t.url.includes("metal.dialtone.earth")) || pages.find((t) => t.url.includes("dialtone.earth")) || pages[0];
+}
+
+async function createNewCdpTab(rawUrl: string): Promise<Record<string, unknown>> {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error("Invalid URL for new projected browser tab");
+  }
+  const allowed =
+    parsed.protocol === "https:" ||
+    (parsed.protocol === "http:" && (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost"));
+  if (!allowed) {
+    throw new Error("Only https:// or loopback http:// URLs are allowed");
+  }
+  const versionResp = await fetch(`http://127.0.0.1:${cdpPort}/json/version`, {
+    signal: AbortSignal.timeout(1_200),
+  });
+  if (!versionResp.ok) {
+    throw new Error("Persistent Chrome CDP is offline — launch browser first");
+  }
+  const version: unknown = await versionResp.json();
+  const browserWsUrl = isRecord(version) ? text(version.webSocketDebuggerUrl) : "";
+  if (!browserWsUrl) {
+    throw new Error("Browser WebSocket URL unavailable");
+  }
+  const targetId = await new Promise<string>((resolveFn, rejectFn) => {
+    const ws = new WebSocket(browserWsUrl);
+    const timer = setTimeout(() => {
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
+      rejectFn(new Error("Timed out creating CDP target"));
+    }, 3_000);
+    ws.addEventListener("open", () => {
+      ws.send(JSON.stringify({ id: 1, method: "Target.createTarget", params: { url: parsed.toString() } }));
+    });
+    ws.addEventListener("message", (event) => {
+      try {
+        const msg = JSON.parse(String(event.data)) as { id?: number; result?: { targetId?: string }; error?: { message?: string } };
+        if (msg.id !== 1) return;
+        clearTimeout(timer);
+        ws.close();
+        if (msg.error) rejectFn(new Error(msg.error.message || "Target.createTarget failed"));
+        else resolveFn(msg.result?.targetId || "");
+      } catch {
+        // ignore
+      }
+    });
+    ws.addEventListener("error", () => {
+      clearTimeout(timer);
+      rejectFn(new Error("CDP browser WebSocket error"));
+    });
+  });
+  return { ok: true, targetId, url: parsed.toString() };
+}
+
+async function captureSingleCdpFrame(targetId = ""): Promise<Buffer | null> {
+  const target = await findActiveAppPageTarget(targetId);
   if (!target) return null;
   return new Promise((resolveFn) => {
     const ws = new WebSocket(target.wsUrl);
@@ -233,8 +325,12 @@ async function captureSingleCdpFrame(): Promise<Buffer | null> {
   });
 }
 
-async function streamCdpViewport(request: IncomingMessage, response: ServerResponse): Promise<void> {
-  const target = await findActiveAppPageTarget();
+async function streamCdpViewport(
+  request: IncomingMessage,
+  response: ServerResponse,
+  targetId = "",
+): Promise<void> {
+  const target = await findActiveAppPageTarget(targetId);
   if (!target) {
     sendJson(response, { error: "CDP browser offline" }, 503);
     return;
@@ -253,9 +349,7 @@ async function streamCdpViewport(request: IncomingMessage, response: ServerRespo
   const writeFrame = (base64Jpeg: string) => {
     if (closed || response.writableEnded) return;
     const buf = Buffer.from(base64Jpeg, "base64");
-    response.write(
-      `--cdpframe\r\nContent-Type: image/jpeg\r\nContent-Length: ${buf.length}\r\n\r\n`,
-    );
+    response.write(`--cdpframe\r\nContent-Type: image/jpeg\r\nContent-Length: ${buf.length}\r\n\r\n`);
     response.write(buf);
     response.write("\r\n");
   };
@@ -338,25 +432,22 @@ async function readCdpStatus(): Promise<Record<string, unknown>> {
       signal: AbortSignal.timeout(900),
     });
     if (!versionResp.ok) {
-      return { connected: false, port: cdpPort, pid: null, app_url: text(meta?.app_url) };
+      return { connected: false, port: cdpPort, pid: null, app_url: text(meta?.app_url), targets: [] };
     }
     const version: unknown = await versionResp.json();
-    const listResp = await fetch(`http://127.0.0.1:${cdpPort}/json/list`, {
-      signal: AbortSignal.timeout(900),
-    });
-    const list: unknown = listResp.ok ? await listResp.json() : [];
-    const pages = Array.isArray(list) ? list.filter((t) => isRecord(t) && t.type === "page") : [];
-    const appPage = pages.find((t) => text(t.url).includes("dialtone.earth")) || pages[0];
+    const pages = await listCdpPageTargets();
+    const appPage = pages.find((t) => t.url.includes("metal.dialtone.earth")) || pages[0];
     return {
       connected: true,
       port: cdpPort,
       pid: typeof meta?.pid === "number" ? meta.pid : null,
       browser: isRecord(version) ? text(version.Browser) : "",
-      app_url: isRecord(appPage) ? text(appPage.url) : text(meta?.app_url),
+      app_url: appPage ? appPage.url : text(meta?.app_url),
       page_count: pages.length,
+      targets: pages.map((p) => ({ id: p.id, title: p.title, url: p.url })),
     };
   } catch {
-    return { connected: false, port: cdpPort, pid: null, app_url: text(meta?.app_url) };
+    return { connected: false, port: cdpPort, pid: null, app_url: text(meta?.app_url), targets: [] };
   }
 }
 
