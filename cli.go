@@ -50,7 +50,16 @@ Flags:
   plugins <list|info|publish>               Browse/publish public Dialtone plugins (Iroh + R2)
   dev --port <port>        Serve the dashboard on another port
 
-Run an action with "go run . <action>", or with "bin/dialtone-earth <action>" after build.
+How the Cloudflare + Iroh workflow works (zero GitHub, zero Tailscale):
+  code push [--live]                      Pack git bundle + archives to Cloudflare R2 (and deploy live)
+  code pull / code clone <repo> [dir]     Sync or clone a repository directly from dialtone.earth R2
+  release tag v0.6.0 --build --live       Tag HEAD, cross-compile 6 binaries + .sha256 to R2, deploy live
+  plugins list / plugins info <name>      Discover public Dialtone plugins & live iroh-blobs:// tickets
+  plugins publish <name> --from-local     Publish an installed local Dialtone plugin to dialtone.earth
+  live watch                              Watch edits -> run synced CDP browser tests -> deploy on pass
+
+Run "<action> --help" (e.g. "dialtone-earth code help", "live help", "release help", "plugins help")
+for full subcommand flags. Run with "go run . <action>", ".\dialtone-earth.ps1 <action>", or "bin/dialtone-earth <action>".
 `
 
 func Run(args []string, stdout, stderr io.Writer) int {

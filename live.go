@@ -49,6 +49,15 @@ Flags for "live set":
   --url <url>         Target site base URL (default: https://dialtone.earth)
   --token-file <path> Path to LIVE_CONTROL_TOKEN file (or set DIALTONE_LIVE_TOKEN)
   --json              Emit raw JSON response
+
+Flags for "live watch":
+  --test              Run synced tests on every file save before deploying (default: true)
+  --browser           Drive persistent CDP Chrome projected into http://127.0.0.1:5174/ (default: true)
+  --keep-signed-in    Preserve the authenticated LIVE metal session in Chrome (default: true)
+  --deploy-on-pass    Deploy live to https://dialtone.earth/ when all tests pass (default: true)
+  --push              Also push git bundle + source archives to Cloudflare R2 on pass
+  --filter <regexp>   Optional Go test filter regexp (empty runs all tests)
+  --interval <dur>    File change poll interval (default: 1.2s)
 `
 
 type liveSiteState struct {
