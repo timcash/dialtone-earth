@@ -814,6 +814,14 @@ export async function connectAppSession(opts = {}) {
       });
       await mirror.send("Page.enable");
       await mirror.send("Runtime.enable");
+      const rawDpr = await cdp.eval("window.devicePixelRatio || 1").catch(() => 1);
+      const hostDpr = Number.isFinite(Number(rawDpr)) && Number(rawDpr) > 0 && Number(rawDpr) <= 4 ? Number(rawDpr) : 1;
+      await mirror.send("Emulation.setDeviceMetricsOverride", {
+        width: 390,
+        height: 844,
+        deviceScaleFactor: hostDpr,
+        mobile: true,
+      });
       if (!String(mobileTarget.url || "").startsWith(targetOrigin)) {
         await mirror.send("Page.navigate", { url: `${targetOrigin}/#mobile-preview` });
         await sleep(600);
