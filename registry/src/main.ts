@@ -1570,6 +1570,7 @@ function renderBottomBar(): void {
   const isLive = state.session.authenticated && !primaryNet.simulated;
   const liveCtrl = !isLive ? state.liveSite : null;
   const step = state.tourSteps[state.tourStepIndex] ?? state.tourSteps[0];
+  const inTourMode = state.tourSteps.length > 1 && (!isLive || state.tourPlaying);
 
   const liveBannerBar = state.liveError
     ? `<div class="tbl-banner-bar is-warn">${escapeHtml(state.liveError)}</div>`
@@ -1577,11 +1578,18 @@ function renderBottomBar(): void {
       ? `<div class="tbl-banner-bar is-live" data-testid="live-cli-banner"><strong>REV #${liveCtrl.revision}</strong> ${escapeHtml(liveCtrl.banner)}</div>`
       : "";
 
+  const tourNavHtml = inTourMode
+    ? `<div class="bottom-tour-nav" data-testid="bottom-tour-nav">
+        <button type="button" class="tbl-chip" data-action="prev-step" data-testid="tour-prev" title="Previous tour step" aria-label="Previous tour step">◀</button>
+        <button type="button" class="tbl-chip" data-action="next-step" data-testid="tour-next" title="Next tour step" aria-label="Next tour step">▶</button>
+      </div>`
+    : "";
+
   const ccKicker = step
-    ? `CC ${state.tourStepIndex + 1}/${state.tourSteps.length} · ${step.label}`
+    ? `CC ${state.tourStepIndex + 1}/${state.tourSteps.length}`
     : isLive
       ? `LIVE · ${primaryNet.slug}`
-      : "DIALTONE // EARTH";
+      : "CC";
   const ccHeadline = liveCtrl?.headline || step?.headline || primaryNet.slug;
   const ccBody = liveCtrl?.subline || step?.caption || "";
 
@@ -1589,10 +1597,12 @@ function renderBottomBar(): void {
     <div class="earth-table-frame">
       ${liveBannerBar}
       <div class="earth-table-bar">
+        ${tourNavHtml}
         <div class="bottom-cc" id="tour-captions" data-testid="tour-captions" aria-live="polite">
           <span class="bottom-cc-kicker">${escapeHtml(ccKicker)}</span>
-          <strong class="bottom-cc-headline">${escapeHtml(ccHeadline)}</strong>
-          ${ccBody ? `<span class="bottom-cc-body">${escapeHtml(ccBody)}</span>` : ""}
+          <span class="bottom-cc-text">
+            <strong class="bottom-cc-headline">${escapeHtml(ccHeadline)}</strong>${ccBody ? `<span class="bottom-cc-sep"> — </span><span class="bottom-cc-body">${escapeHtml(ccBody)}</span>` : ""}
+          </span>
         </div>
         <div class="earth-bar-right">
           <button type="button" class="tbl-chip ${state.configOpen ? "is-active" : ""}" data-action="open-config" data-testid="open-config">menu</button>

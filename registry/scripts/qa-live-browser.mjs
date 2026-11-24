@@ -393,16 +393,24 @@ async function step01SignedOut(cdp) {
         // best-effort mobile reload
       }
     }
-    const layoutCheck = await cdp.eval(`(() => ({
-      globeHeaders: document.querySelectorAll('.globe-pane .earth-pane-head').length,
-      globeMeta: document.querySelectorAll('.globe-pane [data-testid="globe-meta-overlay"]').length,
-      bottomButtons: document.querySelectorAll('#bottom-table-dock .earth-table-bar button, #bottom-table-dock .earth-table-bar a').length,
-      bottomCaptions: document.querySelectorAll('#bottom-table-dock [data-testid="tour-captions"]').length,
-    }))()`);
+    const layoutCheck = await cdp.eval(`(() => {
+      const globeHeaders = document.querySelectorAll('.globe-pane .earth-pane-head').length;
+      const globeMeta = document.querySelectorAll('.globe-pane [data-testid="globe-meta-overlay"]').length;
+      const bottomActionBtns = document.querySelectorAll('#bottom-table-dock .earth-bar-right button, #bottom-table-dock .earth-bar-right a').length;
+      const bottomCaptions = document.querySelectorAll('#bottom-table-dock [data-testid="tour-captions"]').length;
+      const ccRect = document.querySelector('#bottom-table-dock [data-testid="tour-captions"]')?.getBoundingClientRect();
+      const menuRect = document.querySelector('#bottom-table-dock [data-testid="open-config"]')?.getBoundingClientRect();
+      const navRect = document.querySelector('#bottom-table-dock [data-testid="bottom-tour-nav"]')?.getBoundingClientRect();
+      const ccOverlapsMenu = Boolean(ccRect && menuRect && ccRect.right > menuRect.left + 1);
+      const navOverlapsCc = Boolean(navRect && ccRect && navRect.right > ccRect.left + 1);
+      return { globeHeaders, globeMeta, bottomActionBtns, bottomCaptions, ccOverlapsMenu, navOverlapsCc };
+    })()`);
     assert.equal(layoutCheck.globeHeaders, 0, "3D globe pane must have 0 title/button header bars");
     assert.equal(layoutCheck.globeMeta, 1, "3D globe pane must render right-side metadata overlay");
-    assert.equal(layoutCheck.bottomButtons, 1, `Bottom bar must have only the menu button (got ${layoutCheck.bottomButtons})`);
+    assert.equal(layoutCheck.bottomActionBtns, 1, `Bottom bar right side must have only the menu button (got ${layoutCheck.bottomActionBtns})`);
     assert.equal(layoutCheck.bottomCaptions, 1, "Bottom bar must contain closed captions");
+    assert.equal(layoutCheck.ccOverlapsMenu, false, "Closed captions must not overlap menu button");
+    assert.equal(layoutCheck.navOverlapsCc, false, "Tour nav buttons must not overlap closed captions");
     const anonHome = await fetch(`${TARGET_ORIGIN}/`);
     assert.equal(anonHome.status, 200, "signed-out GET / should return 200");
     const anonHtml = await anonHome.text();
@@ -730,8 +738,8 @@ async function step08CameraTsAndReload(cdp) {
 async function step09SignOut(cdp) {
   if (KEEP_SIGNED_IN) {
     await ensureSignedIn(cdp);
-    await cdp.showBanner(`DONE! Chrome kept open & signed into LIVE ${NETWORK_LABEL} for inspection`);
-    console.log(`  [PASS 09] --keep-signed-in active: leaving persistent Chrome open on LIVE ${NETWORK_LABEL}`);
+    await cdp.clearOverlays();
+    console.log(`  [PASS 09] --keep-signed-in active: leaving persistent Chrome clean & open on LIVE ${NETWORK_LABEL}`);
     return;
   }
   await dismissOverlays(cdp);

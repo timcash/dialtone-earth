@@ -206,18 +206,27 @@ async function checkLiveBrowserRender() {
 
     const desktopCheck = await cdp.eval(`(() => {
       const tabs = document.querySelectorAll('.earth-bar-tabs [data-pick-content]').length;
-      const bottomButtons = document.querySelectorAll('#bottom-table-dock .earth-table-bar button, #bottom-table-dock .earth-table-bar a').length;
+      const bottomActionBtns = document.querySelectorAll('#bottom-table-dock .earth-bar-right button, #bottom-table-dock .earth-bar-right a').length;
+      const tourNavBtns = document.querySelectorAll('#bottom-table-dock [data-testid="bottom-tour-nav"] button').length;
       const bottomCaptions = document.querySelectorAll('#bottom-table-dock [data-testid="tour-captions"]').length;
       const globeHeaders = document.querySelectorAll('.globe-pane .earth-pane-head').length;
       const globeOverlay = document.querySelectorAll('.globe-pane [data-testid="globe-meta-overlay"]').length;
+      const ccRect = document.querySelector('#bottom-table-dock [data-testid="tour-captions"]')?.getBoundingClientRect();
+      const menuRect = document.querySelector('#bottom-table-dock [data-testid="open-config"]')?.getBoundingClientRect();
+      const navRect = document.querySelector('#bottom-table-dock [data-testid="bottom-tour-nav"]')?.getBoundingClientRect();
+      const ccOverlapsMenu = Boolean(ccRect && menuRect && ccRect.right > menuRect.left + 1);
+      const navOverlapsCc = Boolean(navRect && ccRect && navRect.right > ccRect.left + 1);
       const menuBtn = document.querySelector('[data-testid="open-config"]')?.textContent?.trim() || "";
       const hasSim = document.body.innerText.includes("SIM");
       const leaked = document.body.innerText.includes("legion") || document.body.innerText.includes("test-alpha");
-      return { tabs, bottomButtons, bottomCaptions, globeHeaders, globeOverlay, menuBtn, hasSim, leaked };
+      return { tabs, bottomActionBtns, tourNavBtns, bottomCaptions, globeHeaders, globeOverlay, ccOverlapsMenu, navOverlapsCc, menuBtn, hasSim, leaked };
     })()`);
     assert.equal(desktopCheck.tabs, 0, `Expected 0 bottom-bar window-set tabs on production, got ${desktopCheck.tabs}`);
-    assert.equal(desktopCheck.bottomButtons, 1, `Expected only menu button on bottom bar, got ${desktopCheck.bottomButtons}`);
+    assert.equal(desktopCheck.bottomActionBtns, 1, `Expected only menu button on bottom bar right, got ${desktopCheck.bottomActionBtns}`);
+    assert.equal(desktopCheck.tourNavBtns, 2, `Expected ◀ ▶ tour buttons on bottom left in tour mode, got ${desktopCheck.tourNavBtns}`);
     assert.equal(desktopCheck.bottomCaptions, 1, "Expected closed captions on bottom bar");
+    assert.equal(desktopCheck.ccOverlapsMenu, false, "Closed captions must not overlap menu button");
+    assert.equal(desktopCheck.navOverlapsCc, false, "Tour buttons must not overlap closed captions");
     assert.equal(desktopCheck.globeHeaders, 0, "Expected 0 header bars on 3D globe pane");
     assert.equal(desktopCheck.globeOverlay, 1, "Expected right-side metadata overlay inside 3D globe");
     assert.equal(desktopCheck.hasSim, true, "Production signed-out landing should show SIM badge");

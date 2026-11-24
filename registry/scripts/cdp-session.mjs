@@ -244,12 +244,13 @@ export class CdpClient {
           Object.assign(el.style, {
             position: "fixed",
             top: "8px",
-            right: "10px",
+            left: "10px",
+            maxWidth: "min(460px, calc(100vw - 20px))",
             zIndex: "2147483647",
             background: "rgba(10, 10, 10, 0.94)",
             color: "#ffffff",
             border: "1.5px solid #ffffff",
-            padding: "5px 10px",
+            padding: "4px 9px",
             fontFamily: 'ui-monospace, "SFMono-Regular", Consolas, monospace',
             fontSize: "11px",
             fontWeight: "700",
@@ -264,6 +265,22 @@ export class CdpClient {
       })()`);
     } catch {
       // ignore during page navigation
+    }
+  }
+
+  async clearOverlays() {
+    if (this.mirror) {
+      await this.mirror.clearOverlays().catch(() => {});
+    }
+    try {
+      await this.eval(`(() => {
+        for (const id of ["__cdp_qa_banner", "__cdp_spotlight_box", "__cdp_spotlight_label"]) {
+          document.getElementById(id)?.remove();
+        }
+        return true;
+      })()`);
+    } catch {
+      // ignore
     }
   }
 
