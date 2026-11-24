@@ -246,14 +246,15 @@ type testState struct {
 }
 
 type testEntry struct {
-	Name      string `json:"name"`
-	Title     string `json:"title"`
-	Section   string `json:"section,omitempty"`
-	Source    string `json:"source,omitempty"`
-	Status    string `json:"status"`
-	Elapsed   string `json:"elapsed"`
-	Timestamp string `json:"timestamp"`
-	TestID    string `json:"test-id"`
+	Name        string `json:"name"`
+	Title       string `json:"title"`
+	Section     string `json:"section,omitempty"`
+	Source      string `json:"source,omitempty"`
+	Status      string `json:"status"`
+	Elapsed     string `json:"elapsed"`
+	LastElapsed string `json:"last_elapsed,omitempty"`
+	Timestamp   string `json:"timestamp"`
+	TestID      string `json:"test-id"`
 }
 
 type testRunRecord struct {
@@ -361,18 +362,17 @@ func testSection(name string) string {
 	}
 }
 
+func previousElapsedForEntry(prev testEntry) string {
+	if (prev.Status == "pass" || prev.Status == "fail") && strings.TrimSpace(prev.Elapsed) != "" && strings.TrimSpace(prev.Elapsed) != "0" {
+		return strings.TrimSpace(prev.Elapsed)
+	}
+	if strings.TrimSpace(prev.LastElapsed) != "" && strings.TrimSpace(prev.LastElapsed) != "0" {
+		return strings.TrimSpace(prev.LastElapsed)
+	}
+	return ""
+}
+
 func buildInitialTestState(root string, selectedNames []string, filter string) testState {
-	if strings.TrimSpace(filter) == "" {
-		return newTestState(selectedNames)
-	}
-	allNames, err := listTestNames(root, "")
-	if err != nil || len(allNames) == 0 {
-		return newTestState(selectedNames)
-	}
-	selected := make(map[string]bool, len(selectedNames))
-	for _, n := range selectedNames {
-		selected[n] = true
-	}
 	previous := map[string]testEntry{}
 	if raw, err := os.ReadFile(filepath.Join(root, stateFile)); err == nil {
 		var prevState testState
@@ -382,17 +382,40 @@ func buildInitialTestState(root string, selectedNames []string, filter string) t
 			}
 		}
 	}
+	if strings.TrimSpace(filter) == "" {
+		state := newTestState(selectedNames)
+		for i := range state.Tests {
+			if prev, ok := previous[state.Tests[i].Name]; ok {
+				state.Tests[i].LastElapsed = previousElapsedForEntry(prev)
+			}
+		}
+		return state
+	}
+	allNames, err := listTestNames(root, "")
+	if err != nil || len(allNames) == 0 {
+		state := newTestState(selectedNames)
+		for i := range state.Tests {
+			if prev, ok := previous[state.Tests[i].Name]; ok {
+				state.Tests[i].LastElapsed = previousElapsedForEntry(prev)
+			}
+		}
+		return state
+	}
+	selected := make(map[string]bool, len(selectedNames))
+	for _, n := range selectedNames {
+		selected[n] = true
+	}
 	state := newTestState(allNames)
 	for i := range state.Tests {
 		name := state.Tests[i].Name
-		if selected[name] {
-			continue
-		}
 		if prev, ok := previous[name]; ok {
-			state.Tests[i].Status = prev.Status
-			state.Tests[i].Elapsed = prev.Elapsed
-			state.Tests[i].Timestamp = prev.Timestamp
-			state.Tests[i].TestID = prev.TestID
+			state.Tests[i].LastElapsed = previousElapsedForEntry(prev)
+			if !selected[name] {
+				state.Tests[i].Status = prev.Status
+				state.Tests[i].Elapsed = prev.Elapsed
+				state.Tests[i].Timestamp = prev.Timestamp
+				state.Tests[i].TestID = prev.TestID
+			}
 		}
 	}
 	return state

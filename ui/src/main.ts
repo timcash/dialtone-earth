@@ -1,6 +1,7 @@
 import "./style.css";
 import {
   classifyTestSection,
+  computeTestProgress,
   elapsedSeconds,
   normalizeStatus,
   parseStructuredLogLine,
@@ -15,6 +16,7 @@ type TestRow = {
   source?: string;
   status: string;
   elapsed: string;
+  last_elapsed?: string;
   timestamp: string;
   "test-id"?: string;
 };
@@ -497,6 +499,65 @@ function renderBrowserPaneBody(
   }
 }
 
+const LAST_ELAPSED_STORAGE_KEY = "dialtone.test.lastElapsed.v1";
+
+function loadLastElapsedCache(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(LAST_ELAPSED_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      const n = Number(v);
+      if (Number.isFinite(n) && n > 0) out[k] = n;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+const lastElapsedCache: Record<string, number> = loadLastElapsedCache();
+
+function persistLastElapsedCache(): void {
+  try {
+    localStorage.setItem(LAST_ELAPSED_STORAGE_KEY, JSON.stringify(lastElapsedCache));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+function syncLastElapsedCache(rows: TestRow[]): void {
+  let dirty = false;
+  for (const row of rows) {
+    const serverLast = Number.parseFloat(String(row.last_elapsed ?? "0"));
+    if (Number.isFinite(serverLast) && serverLast > 0) {
+      if (lastElapsedCache[row.name] !== serverLast) {
+        lastElapsedCache[row.name] = serverLast;
+        dirty = true;
+      }
+      continue;
+    }
+    const st = normalizeStatus(row.status);
+    if (st === "pass" || st === "fail") {
+      const el = Number.parseFloat(String(row.elapsed ?? "0"));
+      if (Number.isFinite(el) && el > 0 && lastElapsedCache[row.name] !== el) {
+        lastElapsedCache[row.name] = el;
+        dirty = true;
+      }
+    }
+  }
+  if (dirty) persistLastElapsedCache();
+}
+
+function formatProgressTime(prog: { elapsed: number; lastSec: number; overtime: boolean }, status: string): string {
+  const cur = `${prog.elapsed.toFixed(2)}s`;
+  if (prog.lastSec > 0 && (status === "running" || prog.overtime)) {
+    return `${cur} / ${prog.lastSec.toFixed(2)}s`;
+  }
+  return cur;
+}
+
 function renderTestsTableBody(slot: HTMLElement, browserOnly: boolean): void {
   const prevScroll = slot.querySelector<HTMLElement>(".earth-table-scroll")?.scrollTop ?? 0;
   const rows = browserOnly ? tests.filter((t) => t.name.startsWith("TestBrowser")) : tests;
@@ -524,7 +585,9 @@ function renderTestsTableBody(slot: HTMLElement, browserOnly: boolean): void {
           ${rows
             .map((test) => {
               const status = normalizeStatus(test.status);
-              const elapsed = elapsedSeconds(test).toFixed(2);
+              const elapsed = elapsedSeconds(test);
+              const prog = { ...computeTestProgress(test, lastElapsedCache[test.name] || 0), elapsed };
+              const timeLabel = formatProgressTime(prog, status);
               const logHref = testLogHref(test["test-id"], import.meta.env.BASE_URL);
               const dotClass =
                 status === "pass"
@@ -532,34 +595,42 @@ function renderTestsTableBody(slot: HTMLElement, browserOnly: boolean): void {
                   : status === "fail"
                     ? "is-high"
                     : status === "running"
-                      ? "is-low is-pulsing"
+                      ? prog.overtime
+                        ? "is-high is-pulsing"
+                        : "is-low is-pulsing"
                       : status === "skip"
                         ? "is-med"
                         : "is-idle";
               const statusColor =
-                status === "pass" || status === "running"
+                status === "pass"
                   ? "c-ok"
-                  : status === "fail"
-                    ? "c-err"
-                    : status === "skip"
-                      ? "c-warn"
-                      : "c-dim";
+                  : status === "running"
+                    ? prog.overtime
+                      ? "c-err"
+                      : "c-ok"
+                    : status === "fail"
+                      ? "c-err"
+                      : status === "skip"
+                        ? "c-warn"
+                        : "c-dim";
               const rowClass = [
                 "is-clickable",
+                "test-progress-row",
                 status === "running" ? "is-running-row" : "",
                 status === "fail" ? "is-fail-row" : "",
+                prog.overtime ? "is-overtime" : "",
                 test["test-id"] && test["test-id"] === selectedTestId ? "is-selected" : "",
               ]
                 .filter(Boolean)
                 .join(" ");
               const sec = classifyTestSection(test);
               return `
-                <tr class="${rowClass}" data-status="${status}" data-testid="test-row" data-test-name="${escapeHtml(test.name)}" data-test-id="${escapeHtml(test["test-id"] || "")}">
+                <tr class="${rowClass}" style="--row-progress:${prog.percent.toFixed(1)}%" data-status="${status}" data-testid="test-row" data-test-name="${escapeHtml(test.name)}" data-test-id="${escapeHtml(test["test-id"] || "")}">
                   <td class="${statusColor} c-strong"><span class="tbl-dot ${dotClass}"></span>${escapeHtml(statusLabel(test.status).toUpperCase())}</td>
                   <td><span class="c-strong">${escapeHtml(test.title)}</span> <span class="c-dim">${escapeHtml(test.name)}</span></td>
                   <td class="c-dim">${escapeHtml(sec)}</td>
                   <td class="c-cf">${escapeHtml(test.source || "—")}</td>
-                  <td class="c-dim"><time>${elapsed}s</time></td>
+                  <td class="c-dim"><time>${timeLabel}</time></td>
                   <td>
                     <span class="row-actions">
                       <button type="button" class="row-btn" data-run-single="${escapeHtml(test.name)}" data-testid="run-test-${escapeHtml(test.name)}" ${busy ? "disabled" : ""}>run</button>
@@ -1031,6 +1102,7 @@ async function refreshTests(): Promise<void> {
   }
   const changed = !loaded || JSON.stringify(tests) !== JSON.stringify(payload.tests) || errorMessage !== "";
   tests = payload.tests;
+  syncLastElapsedCache(tests);
   loaded = true;
   errorMessage = "";
   if (changed) renderWorkspace();
@@ -1374,13 +1446,28 @@ if (location.pathname.replace(/\/$/, "").endsWith("/logs")) {
     }
   });
   setInterval(() => {
-    const runningTest = tests.find((test) => normalizeStatus(test.status) === "running");
-    if (runningTest) {
+    const now = Date.now();
+    for (const runningTest of tests) {
+      if (normalizeStatus(runningTest.status) !== "running") continue;
+      const prog = computeTestProgress(runningTest, lastElapsedCache[runningTest.name] || 0, now);
       const row = app.querySelector<HTMLElement>(`tr[data-test-name="${CSS.escape(runningTest.name)}"]`);
-      const time = row?.querySelector("time");
-      if (time) time.textContent = `${elapsedSeconds(runningTest).toFixed(2)}s`;
+      if (!row) continue;
+      row.style.setProperty("--row-progress", `${prog.percent.toFixed(1)}%`);
+      row.classList.toggle("is-overtime", prog.overtime);
+      const time = row.querySelector("time");
+      if (time) time.textContent = formatProgressTime(prog, "running");
+      const statusCell = row.querySelector("td:first-child");
+      if (statusCell) {
+        statusCell.classList.toggle("c-err", prog.overtime);
+        statusCell.classList.toggle("c-ok", !prog.overtime);
+        const dot = statusCell.querySelector(".tbl-dot");
+        if (dot) {
+          dot.classList.toggle("is-high", prog.overtime);
+          dot.classList.toggle("is-low", !prog.overtime);
+        }
+      }
     }
-  }, 150);
+  }, 100);
 
   if (isRemoteHost) {
     // On https://test.dialtone.earth/ (proxied via Cloudflare Worker), drive live

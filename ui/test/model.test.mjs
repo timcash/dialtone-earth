@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   classifyTestSection,
+  computeTestProgress,
   elapsedSeconds,
   groupTestsBySection,
   normalizeStatus,
@@ -91,4 +92,31 @@ test("synced browser tests classify into Synced Live Browser (CDP) section first
   const groups = groupTestsBySection(rows);
   assert.equal(groups[0].title, "Synced Live Browser (CDP)");
   assert.equal(groups[0].tests.length, 2);
+});
+
+test("computeTestProgress fills against last_elapsed and marks overtime red when exceeded", () => {
+  const start = "2026-01-01T00:00:00.000Z";
+  const under = computeTestProgress(
+    { status: "running", timestamp: start, elapsed: "0", last_elapsed: "10" },
+    0,
+    Date.parse("2026-01-01T00:00:05.000Z"),
+  );
+  assert.equal(under.percent, 50);
+  assert.equal(under.overtime, false);
+
+  const over = computeTestProgress(
+    { status: "running", timestamp: start, elapsed: "0", last_elapsed: "10" },
+    0,
+    Date.parse("2026-01-01T00:00:12.500Z"),
+  );
+  assert.equal(over.percent, 100);
+  assert.equal(over.overtime, true);
+
+  const passedFast = computeTestProgress({ status: "pass", elapsed: "4.5", last_elapsed: "10" });
+  assert.equal(passedFast.percent, 100);
+  assert.equal(passedFast.overtime, false);
+
+  const passedSlow = computeTestProgress({ status: "pass", elapsed: "11.2", last_elapsed: "10" });
+  assert.equal(passedSlow.percent, 100);
+  assert.equal(passedSlow.overtime, true);
 });

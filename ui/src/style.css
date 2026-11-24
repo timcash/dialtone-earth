@@ -325,13 +325,40 @@ code {
   cursor: pointer;
 }
 
+.earth-table tbody tr.test-progress-row {
+  --row-progress: 0%;
+  --row-fill: transparent;
+  --row-bar: transparent;
+  background-image:
+    linear-gradient(90deg, var(--row-fill) var(--row-progress), transparent var(--row-progress)),
+    linear-gradient(90deg, var(--row-bar) var(--row-progress), transparent var(--row-progress));
+  background-size: 100% 100%, 100% 2px;
+  background-position: left top, left bottom;
+  background-repeat: no-repeat;
+  transition: background-image 120ms linear;
+}
+
+.earth-table tbody tr.test-progress-row[data-status="pass"] {
+  --row-fill: rgba(255, 255, 255, 0.045);
+  --row-bar: rgba(255, 255, 255, 0.24);
+}
+
+.earth-table tbody tr.test-progress-row[data-status="pass"].is-overtime {
+  --row-fill: rgba(239, 65, 54, 0.14);
+  --row-bar: var(--err);
+}
+
 .earth-table tbody tr.is-clickable:hover td,
 .earth-table tbody tr.is-selected td {
-  background: rgba(128, 128, 128, 0.16);
+  background: rgba(128, 128, 128, 0.14);
+}
+
+.earth-table tbody tr.is-running-row {
+  --row-fill: rgba(255, 255, 255, 0.14);
+  --row-bar: var(--fg);
 }
 
 .earth-table tbody tr.is-running-row td {
-  background: rgba(255, 255, 255, 0.09);
   color: var(--fg);
 }
 
@@ -339,8 +366,23 @@ code {
   box-shadow: inset 3px 0 0 var(--fg);
 }
 
-.earth-table tbody tr.is-fail-row td {
-  background: rgba(239, 65, 54, 0.14);
+.earth-table tbody tr.is-running-row.is-overtime {
+  --row-fill: rgba(239, 65, 54, 0.28);
+  --row-bar: var(--err);
+}
+
+.earth-table tbody tr.is-running-row.is-overtime td:first-child {
+  box-shadow: inset 3px 0 0 var(--err);
+}
+
+.earth-table tbody tr.is-overtime time {
+  color: var(--err);
+  font-weight: 700;
+}
+
+.earth-table tbody tr.is-fail-row {
+  --row-fill: rgba(239, 65, 54, 0.22);
+  --row-bar: var(--err);
 }
 
 .earth-table tbody tr.is-fail-row td:first-child {
