@@ -59,12 +59,18 @@ type LayoutPref = "auto" | SplitLayout;
 
 type WorkspaceContent = {
   id: string;
-  kind: "tests-all" | "tests-browser" | "log" | "browser";
+  kind: "tests-all" | "tests-browser" | "log" | "editor" | "browser";
   label: string;
   sourceTag: string;
   sourceClass: "is-ch" | "is-cf" | "is-warn";
   targetId?: string;
   url?: string;
+};
+
+type EditableFileInfo = {
+  path: string;
+  bytes: number;
+  mtime: string;
 };
 
 const SPLIT_LAYOUTS: Array<{ id: SplitLayout; label: string; panes: number; title: string }> = [
@@ -88,7 +94,7 @@ let errorMessage = "";
 let starting = false;
 let useBrowser = true;
 let keepSignedIn = true;
-let deployOnPass = true;
+let deployOnPass = false;
 let theme: "dark" | "light" = (localStorage.getItem("dt_test_theme") as "dark" | "light") || "dark";
 let layoutPref: LayoutPref = (localStorage.getItem("dt_test_layout") as LayoutPref) || "auto";
 let paneContents: string[] = loadSavedPanes();
@@ -98,6 +104,15 @@ let menuOpen = false;
 let selectedTestId = "";
 let selectedLogRun: TestRun | null = null;
 let newBrowserUrlDraft = "https://dialtone.earth/";
+
+// Live staging code editor state (preserved across test-state polls!)
+let editableFiles: EditableFileInfo[] = [];
+let editorFilePath = "registry/src/live-adapter.ts";
+let editorLoadedPath = "";
+let editorContent = "";
+let editorDirty = false;
+let editorSaving = false;
+let editorStatusMsg = "";
 
 let cdpStatus: CdpStatus = { connected: false, port: 9222, targets: [] };
 let pipelineStatus: PipelineStatus = { stage: "idle", message: "Ready" };
@@ -156,6 +171,7 @@ function shortHostLabel(rawUrl: string): string {
 function availableContents(): WorkspaceContent[] {
   const items: WorkspaceContent[] = [
     { id: "tests:all", kind: "tests-all", label: "db:tests", sourceTag: "GO+DB", sourceClass: "is-ch" },
+    { id: "edit:code", kind: "editor", label: "edit:code", sourceTag: "EDIT", sourceClass: "is-warn" },
     { id: "tests:browser", kind: "tests-browser", label: "cdp:suite", sourceTag: "CDP", sourceClass: "is-ch" },
     { id: "log:active", kind: "log", label: "run:log", sourceTag: "LOG", sourceClass: "is-cf" },
   ];
@@ -285,6 +301,8 @@ function renderWorkspace(): void {
         : content.url || "https://metal.dialtone.earth/";
     } else if (content.kind === "log") {
       statsText = selectedLogRun ? `${selectedLogRun.name} (${statusLabel(selectedLogRun.status)})` : "select any test row";
+    } else if (content.kind === "editor") {
+      statsText = `${editorFilePath}${editorDirty ? " · unsaved" : ""}${editorStatusMsg ? ` · ${editorStatusMsg}` : ""}`;
     }
 
     const maxLabel = maximizedPane !== null ? "restore" : "max";
@@ -317,12 +335,18 @@ function renderWorkspace(): void {
     });
 
     if (content.kind === "browser") {
+      bodySlot.removeAttribute("data-mounted-editor");
       renderBrowserPaneBody(bodySlot, content, isDemoPane, runningTest);
+    } else if (content.kind === "editor") {
+      bodySlot.removeAttribute("data-mounted-stream");
+      renderEditorPaneBody(bodySlot);
     } else if (content.kind === "tests-all" || content.kind === "tests-browser") {
       bodySlot.removeAttribute("data-mounted-stream");
+      bodySlot.removeAttribute("data-mounted-editor");
       renderTestsTableBody(bodySlot, content.kind === "tests-browser");
     } else {
       bodySlot.removeAttribute("data-mounted-stream");
+      bodySlot.removeAttribute("data-mounted-editor");
       renderLogPaneBody(bodySlot);
     }
   });
@@ -518,6 +542,139 @@ function renderLogPaneBody(slot: HTMLElement): void {
   `;
 }
 
+function renderEditorPaneBody(slot: HTMLElement): void {
+  if (editableFiles.length === 0) {
+    void loadEditableFiles();
+  } else if (editorLoadedPath !== editorFilePath) {
+    void loadEditorFile(editorFilePath);
+  }
+
+  const mountKey = `${editorLoadedPath}:${editableFiles.length}`;
+  if (slot.getAttribute("data-mounted-editor") !== mountKey) {
+    slot.setAttribute("data-mounted-editor", mountKey);
+    const options = (editableFiles.length > 0 ? editableFiles : [{ path: editorFilePath, bytes: 0, mtime: "" }])
+      .map(
+        (f) =>
+          `<option value="${escapeHtml(f.path)}" ${f.path === editorFilePath ? "selected" : ""}>${escapeHtml(f.path)}</option>`,
+      )
+      .join("");
+    slot.innerHTML = `
+      <div class="editor-pane-body" data-testid="staging-editor-pane">
+        <div class="editor-toolbar">
+          <div class="pane-head-left">
+            <select class="editor-select" data-testid="editor-file-select">${options}</select>
+            <span class="c-dim" data-editor-status></span>
+          </div>
+          <div class="pane-head-right">
+            <button type="button" class="tbl-chip" data-testid="editor-save">save</button>
+            <button type="button" class="tbl-chip is-primary" data-testid="editor-save-test">save &amp; test</button>
+          </div>
+        </div>
+        <textarea class="editor-textarea" data-testid="editor-textarea" spellcheck="false"></textarea>
+      </div>
+    `;
+    const textarea = slot.querySelector<HTMLTextAreaElement>("[data-testid='editor-textarea']")!;
+    textarea.value = editorContent;
+    textarea.addEventListener("input", () => {
+      editorContent = textarea.value;
+      editorDirty = true;
+      editorStatusMsg = "";
+      updateEditorToolbar(slot);
+    });
+
+    const select = slot.querySelector<HTMLSelectElement>("[data-testid='editor-file-select']")!;
+    select.addEventListener("change", () => {
+      editorFilePath = select.value;
+      editorDirty = false;
+      editorStatusMsg = "";
+      void loadEditorFile(editorFilePath);
+    });
+
+    slot.querySelector<HTMLButtonElement>("[data-testid='editor-save']")?.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      saveEditorFile(false).catch(showError);
+    });
+
+    slot.querySelector<HTMLButtonElement>("[data-testid='editor-save-test']")?.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      saveEditorFile(true).catch(showError);
+    });
+  }
+
+  updateEditorToolbar(slot);
+}
+
+function updateEditorToolbar(slot: HTMLElement): void {
+  const statusEl = slot.querySelector<HTMLElement>("[data-editor-status]");
+  if (statusEl) {
+    statusEl.textContent = editorSaving
+      ? "saving…"
+      : editorDirty
+        ? "unsaved changes"
+        : editorStatusMsg || "ready (edits staging only — promote manually to dialtone.earth)";
+  }
+  const saveBtn = slot.querySelector<HTMLButtonElement>("[data-testid='editor-save']");
+  const saveTestBtn = slot.querySelector<HTMLButtonElement>("[data-testid='editor-save-test']");
+  if (saveBtn) saveBtn.disabled = editorSaving;
+  if (saveTestBtn) saveTestBtn.disabled = editorSaving;
+}
+
+async function loadEditableFiles(): Promise<void> {
+  try {
+    const resp = await fetch("/api/staging/files", { cache: "no-store" });
+    if (!resp.ok) return;
+    const data = (await resp.json()) as { files?: EditableFileInfo[] };
+    if (Array.isArray(data.files) && data.files.length > 0) {
+      editableFiles = data.files;
+      if (!editableFiles.some((f) => f.path === editorFilePath)) {
+        editorFilePath = editableFiles[0].path;
+      }
+      await loadEditorFile(editorFilePath);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function loadEditorFile(path: string): Promise<void> {
+  try {
+    const resp = await fetch(`/api/staging/file?path=${encodeURIComponent(path)}`, { cache: "no-store" });
+    if (!resp.ok) return;
+    const data = (await resp.json()) as { path?: string; content?: string };
+    if (typeof data.content === "string") {
+      editorFilePath = data.path || path;
+      editorLoadedPath = editorFilePath;
+      editorContent = data.content;
+      editorDirty = false;
+      renderWorkspace();
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function saveEditorFile(runTestsAfter: boolean): Promise<void> {
+  editorSaving = true;
+  editorStatusMsg = "";
+  renderWorkspace();
+  const resp = await fetch(`/api/staging/file?path=${encodeURIComponent(editorFilePath)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+    body: editorContent,
+  });
+  const data = (await resp.json()) as { ok?: boolean; error?: string };
+  editorSaving = false;
+  if (!resp.ok) {
+    throw new Error(data.error || `Could not save ${editorFilePath}: HTTP ${resp.status}`);
+  }
+  editorDirty = false;
+  editorStatusMsg = runTestsAfter ? "saved — running staging tests" : "saved to staging";
+  renderWorkspace();
+  if (runTestsAfter) {
+    await startFilteredTests("", useBrowser, false);
+  }
+}
+
 function renderBottomBar(
   bar: HTMLElement,
   catalog: WorkspaceContent[],
@@ -529,18 +686,27 @@ function renderBottomBar(
   const busy = starting || Boolean(runningTest) || pipelineStatus.stage === "deploying";
   const stage = pipelineStatus.stage || "idle";
 
-  const stepClass = (step: "edit" | "testing" | "deploying" | "deployed"): string => {
-    const order: Record<string, number> = { idle: 0, edit: 1, testing: 2, passed: 2, failed: 2, deploying: 3, deployed: 4 };
+  const stepClass = (step: "edit" | "testing" | "staging_ready" | "deployed"): string => {
+    const order: Record<string, number> = {
+      idle: 0,
+      edit: 1,
+      testing: 2,
+      failed: 2,
+      passed: 3,
+      staging_ready: 3,
+      deploying: 4,
+      deployed: 4,
+    };
     const rank = order[stage] ?? 0;
-    const target = { edit: 1, testing: 2, deploying: 3, deployed: 4 }[step];
+    const target = { edit: 1, testing: 2, staging_ready: 3, deployed: 4 }[step];
     if (stage === "failed" && step === "testing") return "failed";
-    if (stage === step) return "active";
+    if (stage === step || (stage === "deploying" && step === "deployed")) return "active";
     if (rank > target || (stage === "deployed" && step === "deployed")) return "done";
     return "";
   };
 
   const bannerCls =
-    stage === "deployed" || stage === "testing" || stage === "edit"
+    stage === "deployed" || stage === "staging_ready" || stage === "testing" || stage === "edit"
       ? "is-live"
       : stage === "deploying"
         ? "is-warn"
@@ -557,13 +723,13 @@ function renderBottomBar(
       <div class="pipe-steps">
         <span class="pipe-step ${stepClass("edit")}">1.EDIT</span>
         <span>→</span>
-        <span class="pipe-step ${stepClass("testing")}">2.TESTS</span>
+        <span class="pipe-step ${stepClass("testing")}">2.STAGING TESTS</span>
         <span>→</span>
-        <span class="pipe-step ${stepClass("deploying")}">3.DEPLOY</span>
+        <span class="pipe-step ${stepClass("staging_ready")}">3.GATE READY</span>
         <span>→</span>
-        <span class="pipe-step ${stepClass("deployed")}">4.LIVE</span>
+        <span class="pipe-step ${stepClass("deployed")}">4.PROMOTE LIVE</span>
         ${pipelineStatus.changed ? `<span class="c-cf">${escapeHtml(pipelineStatus.changed)}</span>` : ""}
-        <span>${escapeHtml(pipelineStatus.message || "Ready")}</span>
+        <span>${escapeHtml(pipelineStatus.message || "Ready — edits stay on staging until you promote to dialtone.earth")}</span>
       </div>
       <div>
         ${

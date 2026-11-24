@@ -51,10 +51,10 @@ Flags for "live set":
   --json              Emit raw JSON response
 
 Flags for "live watch":
-  --test              Run synced tests on every file save before deploying (default: true)
-  --browser           Drive persistent CDP Chrome projected into http://127.0.0.1:5174/ (default: true)
+  --test              Run synced staging tests on every file save (default: true)
+  --browser           Drive persistent CDP Chrome projected into test.dialtone.earth (default: true)
   --keep-signed-in    Preserve the authenticated LIVE metal session in Chrome (default: true)
-  --deploy-on-pass    Deploy live to https://dialtone.earth/ when all tests pass (default: true)
+  --deploy-on-pass    Opt-in auto-deploy on pass (default: false — promote manually from test.dialtone.earth)
   --push              Also push git bundle + source archives to Cloudflare R2 on pass
   --filter <regexp>   Optional Go test filter regexp (empty runs all tests)
   --interval <dur>    File change poll interval (default: 1.2s)
@@ -357,7 +357,7 @@ func runLiveWatch(args []string, stdout, stderr io.Writer) error {
 	runTests := fs.Bool("test", true, "Run synced tests before deploying live")
 	browser := fs.Bool("browser", true, "Run with persistent CDP Chrome browser synced to the test dashboard")
 	keepSignedIn := fs.Bool("keep-signed-in", true, "Keep persistent CDP Chrome signed into LIVE metal")
-	deployOnPass := fs.Bool("deploy-on-pass", true, "Auto-deploy to https://dialtone.earth/ when all tests pass")
+	deployOnPass := fs.Bool("deploy-on-pass", false, "Opt-in auto-deploy to https://dialtone.earth/ on pass (default false: promote from test.dialtone.earth)")
 	filter := fs.String("filter", "", "Optional Go test filter regexp (empty runs all tests)")
 	pushCode := fs.Bool("push", false, "Also push git bundle to Cloudflare R2 on pass")
 	repo := fs.String("repo", defaultRepoSlug(), "Repository slug when --push is set")

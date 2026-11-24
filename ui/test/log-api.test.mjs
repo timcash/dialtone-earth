@@ -110,4 +110,12 @@ test("the dashboard serves generated state and per-execution logs", async (conte
   // Staging promotion gate must refuse (412) while tests are running or failing
   const blockedPromote = await fetch(`${base}/api/promote`, { method: "POST" });
   assert.equal(blockedPromote.status, 412);
+
+  // Live staging file editor lists allowlisted sources and blocks path traversal / logs
+  const filesResp = await fetch(`${base}/api/staging/files`);
+  assert.equal(filesResp.status, 200);
+  const filesJson = await filesResp.json();
+  assert.ok(Array.isArray(filesJson.files) && filesJson.files.some((f) => f.path === "registry/src/live-adapter.ts"));
+  const badRead = await fetch(`${base}/api/staging/file?path=${encodeURIComponent("logs/state.json")}`);
+  assert.equal(badRead.status, 400);
 });

@@ -86,6 +86,30 @@ function testApiPlugin(): Plugin {
           promoteStagingToLive(response).catch((error: unknown) => sendError(response, error));
           return;
         }
+        if (pathname === "/api/staging/files" && request.method === "GET") {
+          runStagingEditor(["list"], null, response);
+          return;
+        }
+        if (pathname === "/api/staging/file" && request.method === "GET") {
+          const relPath = (parsedUrl.searchParams.get("path") || "").trim();
+          if (!relPath) {
+            sendJson(response, { error: "Missing path parameter" }, 400);
+            return;
+          }
+          runStagingEditor(["read", relPath], null, response);
+          return;
+        }
+        if (pathname === "/api/staging/file" && request.method === "PUT") {
+          const relPath = (parsedUrl.searchParams.get("path") || "").trim();
+          if (!relPath) {
+            sendJson(response, { error: "Missing path parameter" }, 400);
+            return;
+          }
+          readRequestText(request)
+            .then((bodyText) => runStagingEditor(["write", relPath], bodyText, response))
+            .catch((error: unknown) => sendError(response, error));
+          return;
+        }
         if (pathname === "/api/cdp/status" && request.method === "GET") {
           readCdpStatus()
             .then((status) => sendJson(response, status))
@@ -233,6 +257,56 @@ async function promoteStagingToLive(response: ServerResponse): Promise<void> {
     activeRun = null;
   });
   sendJson(response, { promoting: true, passed: passed.length, total: tests.length }, 202);
+}
+
+async function readRequestText(request: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of request) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.length;
+    if (total > 512 * 1024) {
+      throw new Error("Request body too large (max 512 KiB)");
+    }
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function runStagingEditor(args: string[], stdinText: string | null, response: ServerResponse): void {
+  const script = resolve(commandRoot, "registry", "scripts", "staging-editor.mjs");
+  const child = spawn("node", [script, ...args], {
+    cwd: commandRoot,
+    env: process.env,
+    stdio: [stdinText !== null ? "pipe" : "ignore", "pipe", "pipe"],
+  });
+  let out = "";
+  let errOut = "";
+  child.stdout?.on("data", (chunk: Buffer) => {
+    out += chunk.toString("utf8");
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    errOut += chunk.toString("utf8");
+  });
+  if (stdinText !== null && child.stdin) {
+    child.stdin.end(stdinText, "utf8");
+  }
+  child.once("exit", (code) => {
+    if (code === 0) {
+      try {
+        sendJson(response, JSON.parse(out));
+      } catch {
+        sendJson(response, { ok: true });
+      }
+    } else {
+      const msg = errOut.trim() || "Staging editor failed";
+      const status = /Invalid|not editable|escapes/i.test(msg) ? 400 : 500;
+      sendJson(response, { error: msg }, status);
+    }
+  });
+  child.once("error", (error) => {
+    sendError(response, error);
+  });
 }
 
 async function listCdpPageTargets(): Promise<CdpPageTarget[]> {
