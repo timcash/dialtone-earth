@@ -294,7 +294,16 @@ func pushCodeBundle(dir, repo, branch, tag, baseURL, token string, includeArchiv
 	defer os.RemoveAll(tmpDir)
 
 	bundlePath := filepath.Join(tmpDir, repo+".bundle")
-	if _, err := runGitOutput(dir, "bundle", "create", bundlePath, "--all"); err != nil {
+	bundleArgs := []string{"bundle", "create", bundlePath, "HEAD"}
+	if _, err := runGitOutput(dir, "rev-parse", "-q", "--verify", "refs/heads/"+branch); err == nil {
+		bundleArgs = append(bundleArgs, "refs/heads/"+branch)
+	}
+	if tag != "" {
+		if _, err := runGitOutput(dir, "rev-parse", "-q", "--verify", "refs/tags/"+tag); err == nil {
+			bundleArgs = append(bundleArgs, "refs/tags/"+tag)
+		}
+	}
+	if _, err := runGitOutput(dir, bundleArgs...); err != nil {
 		return "", err
 	}
 	bundleData, err := os.ReadFile(bundlePath)
@@ -853,7 +862,7 @@ func runPluginsPublish(args []string, stdout, stderr io.Writer) error {
 		}
 		if shareOut, err := exec.Command(dtBin, "plugin", "share", ln).CombinedOutput(); err == nil {
 			for _, tok := range strings.Fields(string(shareOut)) {
-				if strings.HasPrefix(tok, "blob") {
+				if strings.HasPrefix(tok, "iroh-blobs://") || strings.HasPrefix(tok, "blob") {
 					payload["iroh_ticket"] = strings.TrimSpace(tok)
 					break
 				}
