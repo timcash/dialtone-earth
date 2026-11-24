@@ -242,6 +242,14 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	}
 	var extraEnv []string
 	if *browser {
+		// Rebuild registry/dist so any live edits from test.dialtone.earth are served by the isolated staging preview (127.0.0.1:5175).
+		regDir := filepath.Join(root, "registry")
+		if dirExists(regDir) {
+			fmt.Fprintln(stdout, "test --browser: rebuilding staging preview (registry/dist) for isolated test channel")
+			if err := runExternal(regDir, stdout, stderr, "pnpm", "run", "build"); err != nil {
+				return fmt.Errorf("staging preview build failed: %w", err)
+			}
+		}
 		if err := ensurePersistentBrowserSession(root, cdpScript, *cdpPort, *dashboardURL, stdout, stderr); err != nil {
 			return err
 		}
@@ -436,10 +444,15 @@ func runDeploy(args []string, stdout, stderr io.Writer) error {
 			}
 			return err
 		}
+		promotedRel := promoteTestReleaseChannelToLatest(defaultLiveSiteURL, "", stdout)
 		if *requirePass {
+			msg := fmt.Sprintf("Promoted from test.dialtone.earth (%d/%d passed) → https://dialtone.earth/", passed, total)
+			if promotedRel != "" {
+				msg += fmt.Sprintf(" + dialtone auto-update %s", promotedRel)
+			}
 			writePipelineState(root, pipelineState{
 				Stage:     "deployed",
-				Message:   fmt.Sprintf("Promoted from test.dialtone.earth (%d/%d passed) → https://dialtone.earth/", passed, total),
+				Message:   msg,
 				DeployURL: defaultLiveSiteURL + "/",
 				VersionID: extractWranglerVersionID(deployBuf.String()),
 				Passed:    passed,

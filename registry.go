@@ -41,17 +41,22 @@ Flags:
 
 const releaseUsage = `usage: dialtone-earth release <subcommand> [flags]
 
-Tag and publish SHA-256-verified releases directly on Cloudflare R2 (zero GitHub dependency).
+Tag, publish, and promote SHA-256-verified releases & auto-update channels on Cloudflare R2.
 
 Subcommands:
-  list              List tagged releases for a repository
-  tag <vX.Y.Z>      Tag HEAD, push bundle, optionally cross-compile & upload binaries (--build)
+  list                  List tagged releases for a repository
+  tag <vX.Y.Z>          Tag HEAD, push bundle, optionally cross-compile & upload binaries (--build)
+  channel list          Show active release channels (e.g. test, latest) for a repository
+  channel set <ch> <tag>  Point a release channel (e.g. test) at a tagged release
+  channel promote       Promote channel 'test' -> 'latest' so auto-updating dialtone nodes upgrade
 
 Flags:
-  --repo <name>        Repository slug (default: current directory name)
+  --repo <name>        Repository slug (default: current directory name, or dialtone)
   --notes <text>       Release notes stored in Cloudflare KV
   --build              Cross-compile dialtone-earth binaries (win/linux/darwin) & upload to R2
   --live               After tagging, immediately deploy live to https://dialtone.earth/
+  --from <channel>     Source channel for 'channel promote' (default: test)
+  --to <channel>       Target channel for 'channel promote' (default: latest)
   --url <url>          Registry base URL (default: https://dialtone.earth)
   --token-file <path>  Path to LIVE_CONTROL_TOKEN file (or set DIALTONE_LIVE_TOKEN)
   --json               Emit raw JSON response
@@ -125,6 +130,8 @@ func runRelease(args []string, stdout, stderr io.Writer) error {
 		return runReleaseList(args[1:], stdout, stderr)
 	case "tag":
 		return runReleaseTag(args[1:], stdout, stderr)
+	case "channel":
+		return runReleaseChannel(args[1:], stdout, stderr)
 	default:
 		fmt.Fprint(stderr, releaseUsage)
 		return fmt.Errorf("unknown release subcommand %q", args[0])
@@ -709,6 +716,193 @@ func runReleaseTag(args []string, stdout, stderr io.Writer) error {
 		return runDeployLive(stdout, stderr)
 	}
 	return nil
+}
+
+func runReleaseChannel(args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 || isHelp(args[0]) {
+		fmt.Fprint(stdout, releaseUsage)
+		return nil
+	}
+	switch args[0] {
+	case "list":
+		fs := flag.NewFlagSet("release channel list", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		repo := fs.String("repo", "dialtone", "Repository slug")
+		baseURL := fs.String("url", defaultLiveSiteURL, "Registry base URL")
+		jsonOut := fs.Bool("json", false, "Emit raw JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		endpoint := strings.TrimRight(*baseURL, "/") + "/api/releases/" + url.PathEscape(*repo) + "/channels"
+		raw, _, err := registryHTTPDo(http.MethodGet, endpoint, "", nil, nil)
+		if err != nil {
+			return err
+		}
+		if *jsonOut {
+			_, err = stdout.Write(append(bytes.TrimSpace(raw), '\n'))
+			return err
+		}
+		var payload struct {
+			Repo     string `json:"repo"`
+			Channels map[string]struct {
+				Tag         string `json:"tag"`
+				UpdatedAt   string `json:"updated_at"`
+				PromotedBy  string `json:"promoted_by"`
+				ReleaseBase string `json:"release_base"`
+			} `json:"channels"`
+		}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			return err
+		}
+		if len(payload.Channels) == 0 {
+			fmt.Fprintf(stdout, "release channel: no channels configured yet for %s\n", *repo)
+			return nil
+		}
+		for ch, rec := range payload.Channels {
+			fmt.Fprintf(stdout, "%-10s %-12s (%s)  %s\n", ch, rec.Tag, rec.PromotedBy, rec.ReleaseBase)
+		}
+		return nil
+
+	case "set":
+		var pos []string
+		var flagArgs []string
+		for i := 1; i < len(args); i++ {
+			if !strings.HasPrefix(args[i], "-") {
+				pos = append(pos, args[i])
+				continue
+			}
+			flagArgs = append(flagArgs, args[i])
+			if !strings.Contains(args[i], "=") && args[i] != "--json" && i+1 < len(args) {
+				i++
+				flagArgs = append(flagArgs, args[i])
+			}
+		}
+		fs := flag.NewFlagSet("release channel set", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		repo := fs.String("repo", "dialtone", "Repository slug")
+		baseURL := fs.String("url", defaultLiveSiteURL, "Registry base URL")
+		tokenFile := fs.String("token-file", "", "Path to LIVE_CONTROL_TOKEN file")
+		jsonOut := fs.Bool("json", false, "Emit raw JSON")
+		if err := fs.Parse(flagArgs); err != nil {
+			return err
+		}
+		if len(pos) != 2 {
+			return errors.New("usage: dialtone-earth release channel set <channel> <vX.Y.Z> [--repo dialtone]")
+		}
+		token, err := loadLiveControlToken(*tokenFile)
+		if err != nil {
+			return err
+		}
+		body, _ := json.Marshal(map[string]string{"tag": pos[1], "promoted_by": "dialtone-earth-cli"})
+		endpoint := strings.TrimRight(*baseURL, "/") + "/api/releases/" + url.PathEscape(*repo) + "/channel/" + url.PathEscape(pos[0])
+		raw, _, err := registryHTTPDo(http.MethodPost, endpoint, token, bytes.NewReader(body), map[string]string{
+			"Content-Type": "application/json",
+		})
+		if err != nil {
+			return err
+		}
+		if *jsonOut {
+			_, err = stdout.Write(append(bytes.TrimSpace(raw), '\n'))
+			return err
+		}
+		fmt.Fprintf(stdout, "release channel: %s[%s] -> %s\n", *repo, pos[0], pos[1])
+		return nil
+
+	case "promote":
+		fs := flag.NewFlagSet("release channel promote", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		repo := fs.String("repo", "dialtone", "Repository slug")
+		fromCh := fs.String("from", "test", "Source channel")
+		toCh := fs.String("to", "latest", "Target channel")
+		baseURL := fs.String("url", defaultLiveSiteURL, "Registry base URL")
+		tokenFile := fs.String("token-file", "", "Path to LIVE_CONTROL_TOKEN file")
+		jsonOut := fs.Bool("json", false, "Emit raw JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		token, err := loadLiveControlToken(*tokenFile)
+		if err != nil {
+			return err
+		}
+		body, _ := json.Marshal(map[string]string{
+			"from_channel": *fromCh,
+			"promoted_by":  "dialtone-earth-promote",
+		})
+		endpoint := strings.TrimRight(*baseURL, "/") + "/api/releases/" + url.PathEscape(*repo) + "/channel/" + url.PathEscape(*toCh)
+		raw, _, err := registryHTTPDo(http.MethodPost, endpoint, token, bytes.NewReader(body), map[string]string{
+			"Content-Type": "application/json",
+		})
+		if err != nil {
+			return err
+		}
+		if *jsonOut {
+			_, err = stdout.Write(append(bytes.TrimSpace(raw), '\n'))
+			return err
+		}
+		var res struct {
+			Channel struct {
+				Tag string `json:"tag"`
+			} `json:"channel"`
+			ManifestURL string `json:"manifest_url"`
+		}
+		_ = json.Unmarshal(raw, &res)
+		fmt.Fprintf(stdout, "release channel promote: %s %s -> %s (%s)  %s\n", *repo, *fromCh, *toCh, res.Channel.Tag, res.ManifestURL)
+		return nil
+
+	default:
+		return fmt.Errorf("unknown release channel subcommand %q (expected list, set, or promote)", args[0])
+	}
+}
+
+// promoteTestReleaseChannelToLatest promotes any staged dialtone release on
+// channel 'test' to 'latest' on Cloudflare R2 so fleet nodes with auto-update
+// enabled automatically upgrade once test.dialtone.earth promotes live.
+func promoteTestReleaseChannelToLatest(baseURL, tokenFile string, stdout io.Writer) string {
+	base := strings.TrimRight(baseURL, "/")
+	if base == "" {
+		base = defaultLiveSiteURL
+	}
+	raw, _, err := registryHTTPDo(http.MethodGet, base+"/api/releases/dialtone/channels", "", nil, nil)
+	if err != nil {
+		fmt.Fprintf(stdout, "promote: skipped dialtone auto-update channel check (%v)\n", err)
+		return ""
+	}
+	var payload struct {
+		Channels map[string]struct {
+			Tag string `json:"tag"`
+		} `json:"channels"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	testTag := strings.TrimSpace(payload.Channels["test"].Tag)
+	latestTag := strings.TrimSpace(payload.Channels["latest"].Tag)
+	if testTag == "" {
+		fmt.Fprintln(stdout, "promote: no staged dialtone release on channel 'test' (site promoted only)")
+		return ""
+	}
+	if testTag == latestTag {
+		fmt.Fprintf(stdout, "promote: dialtone auto-update channel 'latest' is already at %s\n", latestTag)
+		return latestTag
+	}
+	token, err := loadLiveControlToken(tokenFile)
+	if err != nil {
+		fmt.Fprintf(stdout, "promote: skipped dialtone channel promote (%v)\n", err)
+		return ""
+	}
+	body, _ := json.Marshal(map[string]string{
+		"from_channel": "test",
+		"promoted_by":  "test.dialtone.earth",
+	})
+	_, _, err = registryHTTPDo(http.MethodPost, base+"/api/releases/dialtone/channel/latest", token, bytes.NewReader(body), map[string]string{
+		"Content-Type": "application/json",
+	})
+	if err != nil {
+		fmt.Fprintf(stdout, "promote: warning: failed to promote dialtone test -> latest (%v)\n", err)
+		return ""
+	}
+	fmt.Fprintf(stdout, "promote: dialtone auto-update channel 'test' (%s) -> 'latest' (auto-updating fleet nodes will upgrade)\n", testTag)
+	return testTag
 }
 
 // ---------------------------------------------------------------------------

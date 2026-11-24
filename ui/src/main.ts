@@ -102,8 +102,19 @@ let focusedPane = 0;
 let maximizedPane: number | null = null;
 let menuOpen = false;
 let selectedTestId = "";
+type StagingEnvStatus = {
+  preview?: {
+    ok?: boolean;
+    channel?: string;
+    preview_url?: string;
+    nodes?: Array<{ node?: string; reachable?: boolean; nodeCount?: number }>;
+  };
+  release_channels?: Record<string, { tag?: string }>;
+};
+
 let selectedLogRun: TestRun | null = null;
-let newBrowserUrlDraft = "https://dialtone.earth/";
+let newBrowserUrlDraft = "http://127.0.0.1:5175/";
+let stagingEnv: StagingEnvStatus = {};
 
 // Live staging code editor state (preserved across test-state polls!)
 let editableFiles: EditableFileInfo[] = [];
@@ -745,6 +756,13 @@ function renderBottomBar(
         <span class="tbl-pill ${cdpStatus.connected ? "is-live" : ""}" data-testid="cdp-status">
           ${cdpStatus.connected ? `CDP :${cdpStatus.port}` : "CDP OFF"}
         </span>
+        <span class="tbl-pill ${stagingEnv.preview?.ok ? "is-live" : ""}" data-testid="test-mesh-pill" title="Isolated Dialtone Iroh mesh test channel (${escapeHtml(stagingEnv.preview?.preview_url || "http://127.0.0.1:5175/")})">
+          ${
+            stagingEnv.preview?.ok
+              ? `TEST MESH ${(stagingEnv.preview.nodes || []).filter((n) => n.reachable).length}/${(stagingEnv.preview.nodes || []).length}`
+              : "TEST MESH OFF"
+          }
+        </span>
         <span class="tbl-pill ${failed === 0 && passed > 0 ? "is-live" : ""}" data-testid="staging-gate-pill">
           ${failed > 0 ? `GATE BLOCKED (${failed} fail)` : passed > 0 ? `GATE PASS (${passed}/${tests.length})` : "GATE PENDING"}
         </span>
@@ -790,7 +808,7 @@ function renderBottomBar(
   });
 
   bar.querySelector<HTMLButtonElement>("[data-testid='add-browser-btn']")?.addEventListener("click", () => {
-    openExtraProjectedBrowser("https://dialtone.earth/").catch(showError);
+    openExtraProjectedBrowser("http://127.0.0.1:5175/").catch(showError);
   });
 
   bar.querySelector<HTMLButtonElement>("[data-testid='open-menu']")?.addEventListener("click", () => {
@@ -1247,6 +1265,17 @@ async function refreshLogPage(testId: string): Promise<void> {
     </div>`;
 }
 
+async function refreshStagingEnv(): Promise<void> {
+  try {
+    const response = await fetch("/api/staging/env", { cache: "no-store" });
+    if (!response.ok) return;
+    stagingEnv = (await response.json()) as StagingEnvStatus;
+    renderWorkspace();
+  } catch {
+    // ignore transient poll errors
+  }
+}
+
 if (location.pathname.replace(/\/$/, "").endsWith("/logs")) {
   const testId = new URLSearchParams(location.search).get("test-id") || "";
   if (!testLogHref(testId)) {
@@ -1266,6 +1295,7 @@ if (location.pathname.replace(/\/$/, "").endsWith("/logs")) {
   refreshTests().catch(showError);
   void refreshPipeline();
   void refreshCdpStatus();
+  void refreshStagingEnv();
   setInterval(() => {
     refreshTests().catch(showError);
     void refreshPipeline();
@@ -1273,6 +1303,7 @@ if (location.pathname.replace(/\/$/, "").endsWith("/logs")) {
   }, 500);
   setInterval(() => {
     void refreshCdpStatus();
+    void refreshStagingEnv();
   }, 1500);
   setInterval(() => {
     const runningTest = tests.find((test) => normalizeStatus(test.status) === "running");

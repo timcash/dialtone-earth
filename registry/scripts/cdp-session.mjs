@@ -16,7 +16,7 @@ export const DEFAULT_META_PATH = resolve(
   process.env.DIALTONE_CDP_META || join(REPO_ROOT, "logs", "cdp.json"),
 );
 export const DEFAULT_TARGET_ORIGIN = (
-  process.env.QA_ORIGIN || "https://metal.dialtone.earth"
+  process.env.QA_ORIGIN || "http://127.0.0.1:5175"
 ).replace(/\/+$/, "");
 export const DEFAULT_DASHBOARD_URL =
   (process.env.DIALTONE_DASHBOARD_URL || "http://127.0.0.1:5174").replace(/\/+$/, "") + "/";
@@ -64,11 +64,12 @@ export function findDialtoneBinary() {
   return null;
 }
 
-export function runDialtone(bin, args, timeoutMs = 20_000) {
+export function runDialtone(bin, args, timeoutMs = 20_000, envOverrides = null) {
   return execFileSync(bin, args, {
     encoding: "utf8",
     timeout: timeoutMs,
     stdio: ["ignore", "pipe", "pipe"],
+    ...(envOverrides ? { env: { ...process.env, ...envOverrides } } : {}),
   });
 }
 

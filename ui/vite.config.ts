@@ -86,6 +86,12 @@ function testApiPlugin(): Plugin {
           promoteStagingToLive(response).catch((error: unknown) => sendError(response, error));
           return;
         }
+        if (pathname === "/api/staging/env" && request.method === "GET") {
+          readStagingEnvStatus()
+            .then((envStatus) => sendJson(response, envStatus))
+            .catch((error: unknown) => sendError(response, error));
+          return;
+        }
         if (pathname === "/api/staging/files" && request.method === "GET") {
           runStagingEditor(["list"], null, response);
           return;
@@ -117,7 +123,7 @@ function testApiPlugin(): Plugin {
           return;
         }
         if (pathname === "/api/cdp/new-tab" && request.method === "POST") {
-          const rawTargetUrl = (parsedUrl.searchParams.get("url") || "https://dialtone.earth/").trim();
+          const rawTargetUrl = (parsedUrl.searchParams.get("url") || "http://127.0.0.1:5175/").trim();
           createNewCdpTab(rawTargetUrl)
             .then((created) => sendJson(response, created, 201))
             .catch((error: unknown) => sendError(response, error));
@@ -689,6 +695,37 @@ function sendJson(response: ServerResponse, payload: unknown, status = 200): voi
 
 function sendError(response: ServerResponse, error: unknown): void {
   sendJson(response, { error: error instanceof Error ? error.message : String(error) }, 500);
+}
+
+async function readStagingEnvStatus(): Promise<Record<string, unknown>> {
+  const previewBase = (process.env.STAGING_PREVIEW_URL || "http://127.0.0.1:5175").replace(/\/+$/, "");
+  let preview: Record<string, unknown> = { ok: false, channel: "test", preview_url: `${previewBase}/`, nodes: [] };
+  try {
+    const resp = await fetch(`${previewBase}/api/staging-test/status`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (resp.ok) {
+      preview = (await resp.json()) as Record<string, unknown>;
+    }
+  } catch {
+    // preview offline
+  }
+  let releaseChannels: Record<string, unknown> = {};
+  try {
+    const chResp = await fetch("https://dialtone.earth/api/releases/dialtone/channels", {
+      signal: AbortSignal.timeout(2_500),
+    });
+    if (chResp.ok) {
+      const data = (await chResp.json()) as { channels?: Record<string, unknown> };
+      releaseChannels = data.channels || {};
+    }
+  } catch {
+    // offline or not yet deployed
+  }
+  return {
+    preview,
+    release_channels: releaseChannels,
+  };
 }
 
 export default defineConfig({

@@ -105,6 +105,7 @@ const TAG_RE = /^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9][A-Za-z0-9.-]*)?$/;
 const ASSET_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SHA_RE = /^[0-9a-f]{7,64}$/i;
 const PLUGIN_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const CHANNEL_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/;
 
 const CODE_INDEX_KEY = "registry:code:index";
 const PLUGINS_INDEX_KEY = "registry:plugins:index";
@@ -112,7 +113,20 @@ const codeRepoKey = (repo: string) => `registry:code:repo:${repo}`;
 const releasesIndexKey = (repo: string) => `registry:releases:index:${repo}`;
 const releaseRecordKey = (repo: string, tag: string) =>
   `registry:releases:item:${repo}:${tag}`;
+const releaseChannelsIndexKey = (repo: string) =>
+  `registry:releases:channels:${repo}`;
+const releaseChannelKey = (repo: string, channel: string) =>
+  `registry:releases:channel:${repo}:${channel}`;
 const pluginRecordKey = (name: string) => `registry:plugins:item:${name}`;
+
+export interface ReleaseChannelRecord {
+  repo: string;
+  channel: string;
+  tag: string;
+  sha: string;
+  updated_at: string;
+  promoted_by: string;
+}
 
 async function sha256Hex(data: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", data);
@@ -536,8 +550,212 @@ export async function handleRegistryRoute(
   }
 
   // ===========================================================================
-  // 2. RELEASES & TAGS (/api/releases/<repo>... & /releases/<repo>/download/...)
+  // 2. RELEASES, CHANNELS & AUTO-UPDATE FEEDS
+  //    - /api/releases/<repo>
+  //    - /api/releases/<repo>/channels
+  //    - /api/releases/<repo>/channel/<channel>  (GET public, POST/PUT owner-only)
+  //    - /api/releases/<repo>/<tag>
+  //    - /api/releases/<repo>/<tag>/assets/<asset>
+  //    - /releases/<repo>/latest/download/<asset>
+  //    - /releases/<repo>/channel/<channel>/latest/download/<asset>
+  //    - /releases/<repo>/channel/<channel>/download/<tag>/<asset>
+  //    - /releases/<repo>/download/<tag>/<asset>
   // ===========================================================================
+  const resolveAssetContentType = (name: string): string => {
+    if (name.endsWith(".json")) return "application/json; charset=utf-8";
+    if (name.endsWith(".sig") || name.endsWith(".sha256") || name.endsWith(".txt")) {
+      return "text/plain; charset=utf-8";
+    }
+    return "application/octet-stream";
+  };
+
+  const resolveLatestTagForRepo = async (
+    repo: string,
+    channel?: string,
+  ): Promise<string | null> => {
+    if (!kv) return null;
+    const chName = (channel || "latest").toLowerCase();
+    const explicit = await readJsonKv<ReleaseChannelRecord>(
+      kv,
+      releaseChannelKey(repo, chName),
+    );
+    if (explicit?.tag && TAG_RE.test(explicit.tag)) {
+      return explicit.tag;
+    }
+    if (channel && chName !== "latest" && chName !== "stable") {
+      // Explicit non-default channel (e.g. "test") must be published explicitly.
+      return null;
+    }
+    // Fallback for "latest": pick most recently created release tag.
+    const tags = (await readJsonKv<string[]>(kv, releasesIndexKey(repo))) ?? [];
+    if (tags.length === 0) return null;
+    const recs = (
+      await Promise.all(
+        tags.map((t) => readJsonKv<StoredReleaseRecord>(kv, releaseRecordKey(repo, t))),
+      )
+    ).filter((r): r is StoredReleaseRecord => Boolean(r));
+    recs.sort((a, b) => b.created_at.localeCompare(a.created_at));
+    return recs[0]?.tag ?? null;
+  };
+
+  const serveReleaseAsset = async (
+    repo: string,
+    tag: string,
+    rawAsset: string,
+  ): Promise<Response> => {
+    if (!REPO_RE.test(repo) || !TAG_RE.test(tag)) {
+      return jsonResp({ error: "Invalid repo or tag" }, 400, securityHeaders);
+    }
+    if (rawAsset.endsWith(".sha256")) {
+      const asset = rawAsset.slice(0, -".sha256".length);
+      if (!ASSET_RE.test(asset) || !kv) {
+        return textResp("Not found\n", 404, securityHeaders);
+      }
+      const rec = await readJsonKv<StoredReleaseRecord>(kv, releaseRecordKey(repo, tag));
+      const entry = rec?.assets?.[asset];
+      if (!entry?.sha256) {
+        return textResp("Not found\n", 404, securityHeaders);
+      }
+      return textResp(`${entry.sha256}  ${asset}\n`, 200, securityHeaders);
+    }
+    if (!ASSET_RE.test(rawAsset) || !r2) {
+      return jsonResp({ error: "Release asset not found" }, 404, securityHeaders);
+    }
+    const key = `releases/${repo}/${tag}/${rawAsset}`;
+    const obj = await r2.get(key);
+    if (!obj) return jsonResp({ error: "Release asset not found" }, 404, securityHeaders);
+    return binaryResp(
+      obj,
+      resolveAssetContentType(rawAsset),
+      rawAsset,
+      obj.customMetadata?.sha256 || "",
+      securityHeaders,
+      { "X-Dialtone-Release-Tag": tag },
+    );
+  };
+
+  // GET /api/releases/<repo>/channels
+  const relChannelsListMatch = /^\/api\/releases\/([^/]+)\/channels$/.exec(path);
+  if (relChannelsListMatch && request.method === "GET") {
+    const repo = relChannelsListMatch[1];
+    if (!REPO_RE.test(repo)) {
+      return jsonResp({ error: "Invalid repo name" }, 400, securityHeaders);
+    }
+    if (!kv) return jsonResp({ repo, channels: {} }, 200, securityHeaders);
+    const names = (await readJsonKv<string[]>(kv, releaseChannelsIndexKey(repo))) ?? [];
+    const entries = await Promise.all(
+      names.map((ch) => readJsonKv<ReleaseChannelRecord>(kv, releaseChannelKey(repo, ch))),
+    );
+    const channels: Record<string, ReleaseChannelRecord & { manifest_url: string; release_base: string }> = {};
+    for (const rec of entries) {
+      if (!rec) continue;
+      const base =
+        rec.channel === "latest" || rec.channel === "stable"
+          ? `${url.origin}/releases/${repo}`
+          : `${url.origin}/releases/${repo}/channel/${rec.channel}`;
+      channels[rec.channel] = {
+        ...rec,
+        release_base: base,
+        manifest_url: `${base}/latest/download/dialtone-release.json`,
+      };
+    }
+    return jsonResp({ repo, channels }, 200, securityHeaders);
+  }
+
+  // GET / POST / PUT /api/releases/<repo>/channel/<channel>
+  const relChannelMatch = /^\/api\/releases\/([^/]+)\/channel\/([^/]+)$/.exec(path);
+  if (relChannelMatch) {
+    const repo = relChannelMatch[1];
+    const channel = relChannelMatch[2].toLowerCase();
+    if (!REPO_RE.test(repo) || !CHANNEL_RE.test(channel)) {
+      return jsonResp({ error: "Invalid repo or channel name" }, 400, securityHeaders);
+    }
+    if (request.method === "GET") {
+      if (!kv) return jsonResp({ error: "Channel not found" }, 404, securityHeaders);
+      const rec = await readJsonKv<ReleaseChannelRecord>(kv, releaseChannelKey(repo, channel));
+      if (!rec) {
+        return jsonResp({ error: `No release published on channel ${channel}` }, 404, securityHeaders);
+      }
+      const base =
+        channel === "latest" || channel === "stable"
+          ? `${url.origin}/releases/${repo}`
+          : `${url.origin}/releases/${repo}/channel/${channel}`;
+      return jsonResp(
+        {
+          ...rec,
+          release_base: base,
+          manifest_url: `${base}/latest/download/dialtone-release.json`,
+        },
+        200,
+        securityHeaders,
+      );
+    }
+    if (request.method === "POST" || request.method === "PUT") {
+      const denied = await requireOwnerAuth(true);
+      if (denied) return denied;
+      let body: Record<string, unknown> = {};
+      try {
+        body = (await request.json()) as Record<string, unknown>;
+      } catch {
+        // empty JSON allowed if invalid
+      }
+      let targetTag = cleanText(body.tag, 64);
+      const fromChannel = cleanText(body.from_channel, 32).toLowerCase();
+      if (!targetTag && fromChannel) {
+        if (!CHANNEL_RE.test(fromChannel)) {
+          return jsonResp({ error: "Invalid from_channel" }, 400, securityHeaders);
+        }
+        const sourceRec = await readJsonKv<ReleaseChannelRecord>(
+          kv!,
+          releaseChannelKey(repo, fromChannel),
+        );
+        if (!sourceRec?.tag) {
+          return jsonResp(
+            { error: `Source channel ${fromChannel} has no active release` },
+            404,
+            securityHeaders,
+          );
+        }
+        targetTag = sourceRec.tag;
+      }
+      if (!TAG_RE.test(targetTag)) {
+        return jsonResp({ error: "Valid tag (vX.Y.Z) or from_channel is required" }, 400, securityHeaders);
+      }
+      const rel = await readJsonKv<StoredReleaseRecord>(kv!, releaseRecordKey(repo, targetTag));
+      if (!rel) {
+        return jsonResp(
+          { error: `Release ${repo}@${targetTag} not found` },
+          404,
+          securityHeaders,
+        );
+      }
+      const rec: ReleaseChannelRecord = {
+        repo,
+        channel,
+        tag: targetTag,
+        sha: rel.sha || "",
+        updated_at: nowIso,
+        promoted_by: cleanText(body.promoted_by || (fromChannel ? `promote:${fromChannel}` : "owner"), 80),
+      };
+      await kv!.put(releaseChannelKey(repo, channel), JSON.stringify(rec));
+      await addToIndex(kv!, releaseChannelsIndexKey(repo), channel);
+      const base =
+        channel === "latest" || channel === "stable"
+          ? `${url.origin}/releases/${repo}`
+          : `${url.origin}/releases/${repo}/channel/${channel}`;
+      return jsonResp(
+        {
+          ok: true,
+          channel: rec,
+          release_base: base,
+          manifest_url: `${base}/latest/download/dialtone-release.json`,
+        },
+        200,
+        securityHeaders,
+      );
+    }
+  }
+
   const relListMatch = /^\/api\/releases\/([^/]+)$/.exec(path);
   if (relListMatch && request.method === "GET") {
     const repo = relListMatch[1];
@@ -690,42 +908,62 @@ export async function handleRegistryRoute(
     );
   }
 
-  // Public installer-compatible download endpoint:
-  // GET /releases/<repo>/download/<tag>/<asset> (and <asset>.sha256)
+  // Public dialtone auto-updater & installer download endpoints:
+  //   GET /releases/<repo>/latest/download/<asset>
+  //   GET /releases/<repo>/channel/<channel>/latest/download/<asset>
+  //   GET /releases/<repo>/channel/<channel>/download/<tag>/<asset>
+  //   GET /releases/<repo>/download/<tag>/<asset>  (and <asset>.sha256)
+  const relChannelLatestMatch =
+    /^\/releases\/([^/]+)\/channel\/([^/]+)\/latest\/download\/([^/]+)$/.exec(path);
+  if (relChannelLatestMatch && request.method === "GET") {
+    const repo = relChannelLatestMatch[1];
+    const channel = relChannelLatestMatch[2].toLowerCase();
+    const rawAsset = relChannelLatestMatch[3];
+    if (!REPO_RE.test(repo) || !CHANNEL_RE.test(channel)) {
+      return jsonResp({ error: "Invalid repo or channel" }, 400, securityHeaders);
+    }
+    const tag = await resolveLatestTagForRepo(repo, channel);
+    if (!tag) {
+      return jsonResp({ error: `No release published on channel ${channel}` }, 404, securityHeaders);
+    }
+    return serveReleaseAsset(repo, tag, rawAsset);
+  }
+
+  const relChannelTagMatch =
+    /^\/releases\/([^/]+)\/channel\/([^/]+)\/download\/([^/]+)\/([^/]+)$/.exec(path);
+  if (relChannelTagMatch && request.method === "GET") {
+    const repo = relChannelTagMatch[1];
+    const channel = relChannelTagMatch[2].toLowerCase();
+    const tag = relChannelTagMatch[3];
+    const rawAsset = relChannelTagMatch[4];
+    if (!REPO_RE.test(repo) || !CHANNEL_RE.test(channel)) {
+      return jsonResp({ error: "Invalid repo or channel" }, 400, securityHeaders);
+    }
+    return serveReleaseAsset(repo, tag, rawAsset);
+  }
+
+  const relLatestDownloadMatch =
+    /^\/releases\/([^/]+)\/latest\/download\/([^/]+)$/.exec(path);
+  if (relLatestDownloadMatch && request.method === "GET") {
+    const repo = relLatestDownloadMatch[1];
+    const rawAsset = relLatestDownloadMatch[2];
+    if (!REPO_RE.test(repo)) {
+      return jsonResp({ error: "Invalid repo" }, 400, securityHeaders);
+    }
+    const tag = await resolveLatestTagForRepo(repo);
+    if (!tag) {
+      return jsonResp({ error: "No release published" }, 404, securityHeaders);
+    }
+    return serveReleaseAsset(repo, tag, rawAsset);
+  }
+
   const relDownloadMatch =
     /^\/releases\/([^/]+)\/download\/([^/]+)\/([^/]+)$/.exec(path);
   if (relDownloadMatch && request.method === "GET") {
     const repo = relDownloadMatch[1];
     const tag = relDownloadMatch[2];
     const rawAsset = relDownloadMatch[3];
-    if (!REPO_RE.test(repo) || !TAG_RE.test(tag)) {
-      return jsonResp({ error: "Invalid repo or tag" }, 400, securityHeaders);
-    }
-    if (rawAsset.endsWith(".sha256")) {
-      const asset = rawAsset.slice(0, -".sha256".length);
-      if (!ASSET_RE.test(asset) || !kv) {
-        return textResp("Not found\n", 404, securityHeaders);
-      }
-      const rec = await readJsonKv<StoredReleaseRecord>(kv, releaseRecordKey(repo, tag));
-      const entry = rec?.assets?.[asset];
-      if (!entry?.sha256) {
-        return textResp("Not found\n", 404, securityHeaders);
-      }
-      return textResp(`${entry.sha256}  ${asset}\n`, 200, securityHeaders);
-    }
-    if (!ASSET_RE.test(rawAsset) || !r2) {
-      return jsonResp({ error: "Release asset not found" }, 404, securityHeaders);
-    }
-    const key = `releases/${repo}/${tag}/${rawAsset}`;
-    const obj = await r2.get(key);
-    if (!obj) return jsonResp({ error: "Release asset not found" }, 404, securityHeaders);
-    return binaryResp(
-      obj,
-      "application/octet-stream",
-      rawAsset,
-      obj.customMetadata?.sha256 || "",
-      securityHeaders,
-    );
+    return serveReleaseAsset(repo, tag, rawAsset);
   }
 
   // ===========================================================================
