@@ -363,7 +363,7 @@ func testSection(name string) string {
 }
 
 func previousElapsedForEntry(prev testEntry) string {
-	if (prev.Status == "pass" || prev.Status == "fail") && strings.TrimSpace(prev.Elapsed) != "" && strings.TrimSpace(prev.Elapsed) != "0" {
+	if prev.Status == "pass" && strings.TrimSpace(prev.Elapsed) != "" && strings.TrimSpace(prev.Elapsed) != "0" {
 		return strings.TrimSpace(prev.Elapsed)
 	}
 	if strings.TrimSpace(prev.LastElapsed) != "" && strings.TrimSpace(prev.LastElapsed) != "0" {

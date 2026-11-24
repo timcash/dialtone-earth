@@ -539,7 +539,7 @@ function syncLastElapsedCache(rows: TestRow[]): void {
       continue;
     }
     const st = normalizeStatus(row.status);
-    if (st === "pass" || st === "fail") {
+    if (st === "pass") {
       const el = Number.parseFloat(String(row.elapsed ?? "0"));
       if (Number.isFinite(el) && el > 0 && lastElapsedCache[row.name] !== el) {
         lastElapsedCache[row.name] = el;
@@ -552,7 +552,7 @@ function syncLastElapsedCache(rows: TestRow[]): void {
 
 function formatProgressTime(prog: { elapsed: number; lastSec: number; overtime: boolean }, status: string): string {
   const cur = `${prog.elapsed.toFixed(2)}s`;
-  if (prog.lastSec > 0 && (status === "running" || prog.overtime)) {
+  if (prog.lastSec > 0 && (status === "running" || (status === "pass" && prog.overtime))) {
     return `${cur} / ${prog.lastSec.toFixed(2)}s`;
   }
   return cur;
