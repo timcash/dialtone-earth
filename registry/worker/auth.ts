@@ -244,6 +244,21 @@ export async function handleAuthRoute(
     );
   }
 
+  if (pathname === "/auth/auto-verify.js") {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return methodNotAllowed(securityHeaders);
+    }
+    const js = `document.addEventListener("DOMContentLoaded",function(){var f=document.querySelector('form[data-auto-submit="1"]');if(f)f.submit();});\n`;
+    return new Response(js, {
+      status: 200,
+      headers: {
+        ...securityHeaders,
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Cache-Control": "private, no-store",
+      },
+    });
+  }
+
   if (pathname === "/auth/verify") {
     if (request.method !== "GET" && request.method !== "HEAD") {
       return methodNotAllowed(securityHeaders);
@@ -676,6 +691,7 @@ function renderVerifyPage(opts: {
     );
   }
 
+  const autoSubmit = opts.host.toLowerCase() === "test.dialtone.earth";
   return renderAuthShell(
     "dialtone.earth",
     `
@@ -687,10 +703,10 @@ function renderVerifyPage(opts: {
         </div>
       </div>
       <p class="identity">${escapeHtml(opts.email ?? "")}</p>
-      <form method="POST" action="/api/auth/verify" class="auth-form">
+      <form method="POST" action="/api/auth/verify" class="auth-form"${autoSubmit ? ' data-auto-submit="1"' : ""}>
         <input type="hidden" name="token" value="${escapeHtml(opts.token)}" />
-        <button type="submit">Continue to ${escapeHtml(opts.host)}</button>
-      </form>
+        <button type="submit">${autoSubmit ? `Signing in to ${escapeHtml(opts.host)}…` : `Continue to ${escapeHtml(opts.host)}`}</button>
+      </form>${autoSubmit ? '\n      <script src="/auth/auto-verify.js" defer></script>' : ""}
     `,
   );
 }

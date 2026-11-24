@@ -416,6 +416,19 @@ function renderWorkspace(): void {
   }
 }
 
+const isRemoteHost =
+  typeof location !== "undefined" &&
+  location.hostname !== "127.0.0.1" &&
+  location.hostname !== "localhost" &&
+  location.hostname !== "::1";
+
+function buildFrameUrl(content: WorkspaceContent, bust: number): string {
+  const qs = new URLSearchParams({ v: String(streamNonce), t: String(bust) });
+  if (content.viewport) qs.set("viewport", content.viewport);
+  if (content.targetId && content.viewport !== "mobile") qs.set("targetId", content.targetId);
+  return `/api/cdp/frame?${qs.toString()}`;
+}
+
 function renderBrowserPaneBody(
   slot: HTMLElement,
   content: WorkspaceContent,
@@ -438,13 +451,16 @@ function renderBrowserPaneBody(
       if (content.viewport) qs.set("viewport", content.viewport);
       if (content.targetId && content.viewport !== "mobile") qs.set("targetId", content.targetId);
       const imgCls = content.viewport === "mobile" ? "browser-stream-img is-mobile" : "browser-stream-img";
+      const initialSrc = isRemoteHost ? buildFrameUrl(content, Date.now()) : `/api/cdp/stream?${qs.toString()}`;
       slot.innerHTML = `
         <div class="browser-pane-body">
           <div class="browser-stage">
             <img
               data-testid="${content.viewport === "mobile" ? "cdp-mobile-stream" : "cdp-live-stream"}"
+              data-remote-viewport="${escapeHtml(content.viewport || "")}"
+              data-remote-target="${escapeHtml(content.viewport !== "mobile" ? content.targetId || "" : "")}"
               class="${imgCls}"
-              src="/api/cdp/stream?${qs.toString()}"
+              src="${initialSrc}"
               alt="Projected Chrome browser ${escapeHtml(content.label)}"
             />
           </div>
@@ -873,6 +889,7 @@ function renderMenuOverlay(menuEl: HTMLElement, catalog: WorkspaceContent[], ass
                 ? `<button type="button" class="tbl-chip" data-testid="close-browser">close persistent chrome</button>`
                 : `<button type="button" class="tbl-chip is-primary" data-testid="launch-browser">launch persistent chrome</button>`
             }
+            ${isRemoteHost ? `<a class="tbl-chip" data-testid="remote-sign-out" href="/auth/logout">sign out</a>` : ""}
           </div>
         </section>
       </div>
@@ -1287,4 +1304,49 @@ if (location.pathname.replace(/\/$/, "").endsWith("/logs")) {
       if (time) time.textContent = `${elapsedSeconds(runningTest).toFixed(2)}s`;
     }
   }, 150);
+
+  if (isRemoteHost) {
+    // On https://test.dialtone.earth/ (proxied via Cloudflare Worker), drive live
+    // wide & mobile panes with flicker-free preloaded JPEG frames instead of infinite
+    // MJPEG streams so Cloudflare Edge and mobile browsers never stall.
+    let remoteFramesInFlight = false;
+    const refreshRemoteFrames = async () => {
+      if (remoteFramesInFlight || !cdpStatus.connected || document.visibilityState === "hidden") return;
+      const imgs = Array.from(app.querySelectorAll<HTMLImageElement>("img[data-remote-viewport]"));
+      if (imgs.length === 0) return;
+      remoteFramesInFlight = true;
+      try {
+        await Promise.all(
+          imgs.map(
+            (img) =>
+              new Promise<void>((resolve) => {
+                const vp = img.getAttribute("data-remote-viewport") || "";
+                const tid = img.getAttribute("data-remote-target") || "";
+                const qs = new URLSearchParams({ v: String(streamNonce), t: String(Date.now()) });
+                if (vp) qs.set("viewport", vp);
+                if (tid && vp !== "mobile") qs.set("targetId", tid);
+                const nextUrl = `/api/cdp/frame?${qs.toString()}`;
+                const loader = new Image();
+                const timer = setTimeout(resolve, 4000);
+                loader.onload = () => {
+                  clearTimeout(timer);
+                  if (img.isConnected) img.src = nextUrl;
+                  resolve();
+                };
+                loader.onerror = () => {
+                  clearTimeout(timer);
+                  resolve();
+                };
+                loader.src = nextUrl;
+              }),
+          ),
+        );
+      } finally {
+        remoteFramesInFlight = false;
+      }
+    };
+    setInterval(() => {
+      void refreshRemoteFrames();
+    }, 650);
+  }
 }

@@ -94,6 +94,17 @@ export async function handleStagingRoute({
     return null;
   }
 
+  // Allow public favicon for /login and /auth/verify without triggering a login redirect.
+  if (
+    (url.pathname === "/favicon.svg" || url.pathname === "/favicon.ico") &&
+    (request.method === "GET" || request.method === "HEAD") &&
+    env.ASSETS
+  ) {
+    const assetResp = await env.ASSETS.fetch(request);
+    const outHeaders = stagingHeaders(securityHeaders, assetResp.headers.get("Content-Type"));
+    return new Response(assetResp.body, { status: assetResp.status, headers: outHeaders });
+  }
+
   const ownerEmail = getOwnerEmail(env);
   let authorizedOwner = false;
   let forbiddenSubject: string | null = null;
