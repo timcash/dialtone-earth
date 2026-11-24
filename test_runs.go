@@ -69,6 +69,52 @@ func countStateTotals(state *testState) (passed, failed, total int) {
 	return passed, failed, total
 }
 
+func verifyStagingGate(root string) (int, int, error) {
+	raw, err := os.ReadFile(filepath.Join(root, stateFile))
+	if err != nil {
+		return 0, 0, fmt.Errorf("staging gate blocked: no test state found at %s (run tests first)", stateFile)
+	}
+	var state testState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return 0, 0, fmt.Errorf("staging gate blocked: invalid %s: %w", stateFile, err)
+	}
+	if len(state.Tests) == 0 {
+		return 0, 0, errors.New("staging gate blocked: test list is empty")
+	}
+	byName := make(map[string]string, len(state.Tests))
+	var passed, failed, running int
+	for _, t := range state.Tests {
+		byName[t.Name] = t.Status
+		switch t.Status {
+		case "pass":
+			passed++
+		case "fail":
+			failed++
+		case "running":
+			running++
+		}
+	}
+	if running > 0 {
+		return passed, len(state.Tests), fmt.Errorf("staging gate blocked: %d test(s) still running", running)
+	}
+	if failed > 0 {
+		return passed, len(state.Tests), fmt.Errorf("staging gate blocked: %d test(s) failed — fix before promoting to dialtone.earth", failed)
+	}
+	if passed == 0 {
+		return 0, len(state.Tests), errors.New("staging gate blocked: 0 tests passed — run tests before promoting")
+	}
+	for _, required := range []string{
+		"TestDialtoneEarthOwnerOnlyAccess",
+		"TestDialtoneEarthCloudflareRegistry",
+		"TestUIUnitTests",
+	} {
+		if st, exists := byName[required]; exists && st != "pass" {
+			return passed, len(state.Tests), fmt.Errorf("staging gate blocked: required test %s is %q (must be pass)", required, st)
+		}
+	}
+	return passed, len(state.Tests), nil
+}
+
 type testState struct {
 	GeneratedAt string      `json:"generated_at"`
 	Tests       []testEntry `json:"tests"`

@@ -392,6 +392,7 @@ func runDeploy(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("deploy", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	live := flags.Bool("live", false, "Build registry/ and publish live to Cloudflare Workers (https://dialtone.earth/)")
+	requirePass := flags.Bool("require-pass", false, "Enforce staging test gate: refuse deploy unless all recorded tests pass")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -399,7 +400,53 @@ func runDeploy(args []string, stdout, stderr io.Writer) error {
 		return errors.New("deploy accepts no positional arguments; use --live to publish to Cloudflare")
 	}
 	if *live {
-		return runDeployLive(stdout, stderr)
+		root, err := projectRoot()
+		if err != nil {
+			return err
+		}
+		var passed, total int
+		if *requirePass {
+			passed, total, err = verifyStagingGate(root)
+			if err != nil {
+				writePipelineState(root, pipelineState{
+					Stage:   "failed",
+					Message: err.Error(),
+					Passed:  passed,
+					Total:   total,
+				})
+				return err
+			}
+			writePipelineState(root, pipelineState{
+				Stage:     "deploying",
+				Message:   fmt.Sprintf("Staging gate passed (%d/%d) — promoting to https://dialtone.earth/...", passed, total),
+				DeployURL: defaultLiveSiteURL + "/",
+				Passed:    passed,
+				Total:     total,
+			})
+		}
+		var deployBuf bytes.Buffer
+		if err := runDeployLive(io.MultiWriter(stdout, &deployBuf), stderr); err != nil {
+			if *requirePass {
+				writePipelineState(root, pipelineState{
+					Stage:   "failed",
+					Message: fmt.Sprintf("Staging promotion failed: %v", err),
+					Passed:  passed,
+					Total:   total,
+				})
+			}
+			return err
+		}
+		if *requirePass {
+			writePipelineState(root, pipelineState{
+				Stage:     "deployed",
+				Message:   fmt.Sprintf("Promoted from test.dialtone.earth (%d/%d passed) → https://dialtone.earth/", passed, total),
+				DeployURL: defaultLiveSiteURL + "/",
+				VersionID: extractWranglerVersionID(deployBuf.String()),
+				Passed:    passed,
+				Total:     total,
+			})
+		}
+		return nil
 	}
 	root, err := projectRoot()
 	if err != nil {

@@ -7,6 +7,7 @@ import {
 } from "./auth.ts";
 import { handleLiveRoute, type LiveControlEnv } from "./live.ts";
 import { handleRegistryRoute, type RegistryEnv } from "./registry.ts";
+import { handleStagingRoute } from "./staging.ts";
 import { handleUserUiConfigRoute } from "./user-config.ts";
 import {
   buildRedactedShellAuditLog,
@@ -106,6 +107,22 @@ export async function handleGatewayRequest(
     );
     if (authResponse) {
       return authResponse;
+    }
+  }
+
+  if (host === "test.dialtone.earth") {
+    const stagingNowSec = deps.nowSec ? deps.nowSec() : Math.floor(Date.now() / 1000);
+    const stagingResp = await handleStagingRoute({
+      request,
+      env,
+      securityHeaders: SECURITY_HEADERS,
+      deps,
+      verifyJwt,
+      fetchImpl,
+      nowSec: stagingNowSec,
+    });
+    if (stagingResp) {
+      return stagingResp;
     }
   }
 

@@ -295,3 +295,89 @@ test("only timcash@gmail.com can log into dialtone.earth, modify the site, and a
   assert.equal(ownerBundle.status, 200);
   assert.deepEqual(new Uint8Array(await ownerBundle.arrayBuffer()), bundlePayload);
 });
+
+test("test.dialtone.earth staging UI is strictly restricted to timcash@gmail.com and proxies only after owner auth", async () => {
+  const nowSec = 1_795_495_000;
+  let upstreamCalls = 0;
+  const env = {
+    DIALTONE_AUTH_TOKENS: createMemoryKv(),
+    DIALTONE_REGISTRY: createMemoryR2(),
+    SESSION_SIGNING_KEY: "super-secret-signing-key-for-staging-owner-tests-256bit",
+    LIVE_CONTROL_TOKEN: "owner-cli-bearer-secret-token-2026",
+    OWNER_EMAIL: "timcash@gmail.com",
+    MESH_ORIGIN_TOKEN: "staging-origin-secret-token-1234",
+    MESH_ORIGINS_MAP: JSON.stringify({
+      "test.dialtone.earth": "https://staging-origin.example",
+    }),
+    ACCESS_TEAM_DOMAIN: "https://oakleon.cloudflareaccess.com",
+    ACCESS_AUD_MAP: JSON.stringify({
+      "test.dialtone.earth": "aud-test-staging-123",
+    }),
+    MAGIC_LINK_FROM: "login@dialtone.earth",
+    MAGIC_LINK_ALLOWLIST: JSON.stringify({
+      "test.dialtone.earth": ["timcash@gmail.com"],
+    }),
+  };
+
+  const deps = {
+    nowSec: () => nowSec,
+    fetchImpl: async (url, init) => {
+      upstreamCalls += 1;
+      assert.ok(String(url).startsWith("https://staging-origin.example/__staging/"));
+      assert.equal(init.headers.get("Authorization"), "Bearer staging-origin-secret-token-1234");
+      assert.equal(init.headers.get("X-Dialtone-Staging-Owner"), "timcash@gmail.com");
+      return new Response("<html>staging-dashboard-ok</html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    },
+    verifyJwt: async (jwt) => {
+      if (jwt === "cf-jwt-timcash") return { valid: true, subject: "timcash@gmail.com" };
+      if (jwt === "cf-jwt-intruder") return { valid: true, subject: "intruder@example.com" };
+      return { valid: false, reason: "invalid_jwt" };
+    },
+  };
+
+  // 1. Anonymous HTML -> 302 /login (0 upstream calls)
+  const anonHtml = await handleGatewayRequest(new Request("https://test.dialtone.earth/"), env, deps);
+  assert.equal(anonHtml.status, 302);
+  assert.equal(anonHtml.headers.get("Location"), "/login");
+
+  // 2. Anonymous API -> 401 (0 upstream calls)
+  const anonApi = await handleGatewayRequest(new Request("https://test.dialtone.earth/api/tests"), env, deps);
+  assert.equal(anonApi.status, 401);
+
+  // 3. Cloudflare Access JWT for intruder@example.com -> 403 Forbidden (0 upstream calls)
+  const intruderResp = await handleGatewayRequest(
+    new Request("https://test.dialtone.earth/", {
+      headers: { "Cf-Access-Jwt-Assertion": "cf-jwt-intruder" },
+    }),
+    env,
+    deps,
+  );
+  assert.equal(intruderResp.status, 403);
+  assert.equal(upstreamCalls, 0);
+
+  // 4. Cloudflare Access JWT for timcash@gmail.com -> 200 OK proxied staging UI!
+  const ownerCfResp = await handleGatewayRequest(
+    new Request("https://test.dialtone.earth/", {
+      headers: { "Cf-Access-Jwt-Assertion": "cf-jwt-timcash" },
+    }),
+    env,
+    deps,
+  );
+  assert.equal(ownerCfResp.status, 200);
+  assert.match(await ownerCfResp.text(), /staging-dashboard-ok/);
+  assert.equal(upstreamCalls, 1);
+
+  // 5. Magic-link login for timcash@gmail.com on test.dialtone.earth also unlocks staging UI
+  const ownerMagic = await loginViaMagicLink("https://test.dialtone.earth", "timcash@gmail.com", env, nowSec);
+  assert.equal(ownerMagic.sent, true);
+  const ownerCookieResp = await handleGatewayRequest(
+    new Request("https://test.dialtone.earth/", { headers: { Cookie: ownerMagic.cookie } }),
+    env,
+    deps,
+  );
+  assert.equal(ownerCookieResp.status, 200);
+  assert.equal(upstreamCalls, 2);
+});

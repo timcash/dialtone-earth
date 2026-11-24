@@ -82,6 +82,10 @@ function testApiPlugin(): Plugin {
             .catch((error: unknown) => sendError(response, error));
           return;
         }
+        if (pathname === "/api/promote" && request.method === "POST") {
+          promoteStagingToLive(response).catch((error: unknown) => sendError(response, error));
+          return;
+        }
         if (pathname === "/api/cdp/status" && request.method === "GET") {
           readCdpStatus()
             .then((status) => sendJson(response, status))
@@ -189,6 +193,46 @@ function startTests(response: ServerResponse, opts: RunOptions): void {
     activeRun = null;
   });
   sendJson(response, { started: true, pid: activeRun.pid ?? null, browser: opts.browser, filter: opts.filter || null }, 202);
+}
+
+async function promoteStagingToLive(response: ServerResponse): Promise<void> {
+  if (activeRun?.exitCode === null) {
+    sendJson(response, { error: "Staging gate blocked: tests or deploy are currently running" }, 409);
+    return;
+  }
+  const tests = await readTests();
+  const failed = tests.filter((t) => t.status === "fail");
+  const running = tests.filter((t) => t.status === "running");
+  const passed = tests.filter((t) => t.status === "pass");
+  if (running.length > 0) {
+    sendJson(response, { error: `Staging gate blocked: ${running.length} test(s) still running` }, 412);
+    return;
+  }
+  if (failed.length > 0) {
+    sendJson(
+      response,
+      {
+        error: `Staging gate blocked: ${failed.length} test(s) failed (${failed.map((f) => f.name).join(", ")})`,
+      },
+      412,
+    );
+    return;
+  }
+  if (passed.length === 0) {
+    sendJson(response, { error: "Staging gate blocked: 0 tests passed — run tests before promoting" }, 412);
+    return;
+  }
+  activeRun = spawn("go", ["run", ".", "deploy", "--live", "--require-pass"], {
+    cwd: commandRoot,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  activeRun.stdout?.pipe(process.stdout, { end: false });
+  activeRun.stderr?.pipe(process.stdout, { end: false });
+  activeRun.once("exit", () => {
+    activeRun = null;
+  });
+  sendJson(response, { promoting: true, passed: passed.length, total: tests.length }, 202);
 }
 
 async function listCdpPageTargets(): Promise<CdpPageTarget[]> {
@@ -579,6 +623,7 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     port: 5174,
+    allowedHosts: true,
   },
   build: {
     outDir: "dist",

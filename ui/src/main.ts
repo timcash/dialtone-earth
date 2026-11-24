@@ -575,11 +575,13 @@ function renderBottomBar(
     </div>
     <div class="earth-table-bar">
       <div class="earth-bar-left">
-        <span class="tbl-brand">DIALTONE.EARTH</span>
+        <span class="tbl-brand">TEST.DIALTONE.EARTH</span>
         <span class="tbl-pill ${cdpStatus.connected ? "is-live" : ""}" data-testid="cdp-status">
           ${cdpStatus.connected ? `CDP :${cdpStatus.port}` : "CDP OFF"}
         </span>
-        <span class="tbl-cadence">${passed}/${tests.length} pass${failed > 0 ? ` · ${failed} fail` : ""}</span>
+        <span class="tbl-pill ${failed === 0 && passed > 0 ? "is-live" : ""}" data-testid="staging-gate-pill">
+          ${failed > 0 ? `GATE BLOCKED (${failed} fail)` : passed > 0 ? `GATE PASS (${passed}/${tests.length})` : "GATE PENDING"}
+        </span>
       </div>
       <div class="earth-bar-tabs">
         ${catalog
@@ -597,8 +599,11 @@ function renderBottomBar(
       <div class="earth-bar-right">
         <button type="button" class="tbl-chip" data-testid="add-browser-btn" title="Open an additional projected Chrome browser tab">+ browser</button>
         <button type="button" class="tbl-chip" data-testid="run-browser-suite" ${busy ? "disabled" : ""}>run browser</button>
-        <button type="button" class="tbl-chip is-primary" data-testid="start-tests" ${busy ? "disabled" : ""}>
-          ${starting ? "starting…" : stage === "deploying" ? "deploying…" : runningTest ? "running…" : "start tests"}
+        <button type="button" class="tbl-chip" data-testid="start-tests" ${busy ? "disabled" : ""}>
+          ${starting ? "starting…" : stage === "deploying" ? "promoting…" : runningTest ? "running…" : "start tests"}
+        </button>
+        <button type="button" class="tbl-chip is-primary" data-testid="promote-live" ${busy || failed > 0 || passed === 0 ? "disabled" : ""} title="Promote verified staging build to https://dialtone.earth/">
+          promote → dialtone.earth
         </button>
         <button type="button" class="tbl-chip ${menuOpen ? "is-active" : ""}" data-testid="open-menu">menu</button>
       </div>
@@ -608,6 +613,10 @@ function renderBottomBar(
   const startButton = bar.querySelector<HTMLButtonElement>("[data-testid='start-tests']");
   startButton?.addEventListener("click", () => {
     startAllTests().catch(showError);
+  });
+
+  bar.querySelector<HTMLButtonElement>("[data-testid='promote-live']")?.addEventListener("click", () => {
+    promoteToLive().catch(showError);
   });
 
   bar.querySelector<HTMLButtonElement>("[data-testid='run-browser-suite']")?.addEventListener("click", () => {
@@ -936,6 +945,19 @@ async function refreshCdpStatus(): Promise<void> {
 
 async function startAllTests(): Promise<void> {
   await startFilteredTests("", useBrowser, deployOnPass);
+}
+
+async function promoteToLive(): Promise<void> {
+  starting = true;
+  errorMessage = "";
+  renderWorkspace();
+  const response = await fetch("/api/promote", { method: "POST" });
+  const payload = (await response.json()) as { error?: string };
+  starting = false;
+  if (!response.ok) {
+    throw new Error(payload.error || `Staging promotion blocked: HTTP ${response.status}`);
+  }
+  await refreshPipeline();
 }
 
 async function startFilteredTests(filter: string, withBrowser: boolean, withDeploy: boolean): Promise<void> {
