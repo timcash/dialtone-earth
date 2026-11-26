@@ -120,6 +120,10 @@ func TestDialtoneEarthOwnerOnlyAccess(t *testing.T) {
 	runToolInDir(t, "registry", "node", "--test", "tests/owner-access.test.mjs")
 }
 
+func TestDialtoneEarthScreenshotsWorker(t *testing.T) {
+	runToolInDir(t, "registry", "node", "--test", "tests/screenshots.test.mjs")
+}
+
 func TestProductionLiveSmoke(t *testing.T) {
 	if os.Getenv("DIALTONE_VERIFY_PROD") != "1" {
 		t.Skip("runs automatically after `deploy --live` (or set DIALTONE_VERIFY_PROD=1 to test live production)")

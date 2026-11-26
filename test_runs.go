@@ -50,18 +50,23 @@ type deployedRecord struct {
 }
 
 type pipelineState struct {
-	Stage        string `json:"stage"`
-	Message      string `json:"message"`
-	Changed      string `json:"changed,omitempty"`
-	TargetOrigin string `json:"target_origin,omitempty"`
-	DeployURL    string `json:"deploy_url,omitempty"`
-	VersionID    string `json:"version_id,omitempty"`
-	TestedHash   string `json:"tested_hash,omitempty"`
-	DeployedHash string `json:"deployed_hash,omitempty"`
-	Passed       int    `json:"passed"`
-	Failed       int    `json:"failed"`
-	Total        int    `json:"total"`
-	UpdatedAt    string `json:"updated_at"`
+	Stage                string `json:"stage"`
+	Message              string `json:"message"`
+	Changed              string `json:"changed,omitempty"`
+	TargetOrigin         string `json:"target_origin,omitempty"`
+	DeployURL            string `json:"deploy_url,omitempty"`
+	VersionID            string `json:"version_id,omitempty"`
+	TestedHash           string `json:"tested_hash,omitempty"`
+	DeployedHash         string `json:"deployed_hash,omitempty"`
+	Passed               int    `json:"passed"`
+	Failed               int    `json:"failed"`
+	Total                int    `json:"total"`
+	ScreenshotsURL       string `json:"screenshots_url,omitempty"`
+	ScreenshotsDir       string `json:"screenshots_dir,omitempty"`
+	ScreenshotsCount     int    `json:"screenshots_count,omitempty"`
+	ScreenshotsAnnotated int    `json:"screenshots_annotated,omitempty"`
+	ScreenshotsLoopID    string `json:"screenshots_loop_id,omitempty"`
+	UpdatedAt            string `json:"updated_at"`
 }
 
 func readPipelineState(root string) pipelineState {
@@ -344,6 +349,7 @@ func testSection(name string) string {
 	case "TestDialtoneEarthCloudflareGateway",
 		"TestDialtoneEarthCloudflareRegistry",
 		"TestDialtoneEarthOwnerOnlyAccess",
+		"TestDialtoneEarthScreenshotsWorker",
 		"TestDialtoneEarthLiveOwnerAccessOnCloudflare",
 		"TestDialtoneEarthRegistrySecurityHeaders",
 		"TestDialtoneEarthOriginBridge",

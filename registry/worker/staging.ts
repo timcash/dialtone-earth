@@ -1,6 +1,7 @@
 import { verifySessionCookie } from "./auth.ts";
 import { getOwnerEmail } from "./live.ts";
 import { handleRegistryRoute, renderOwnerCodePortal } from "./registry.ts";
+import { handleScreenshotsRoute } from "./screenshots.ts";
 import type {
   AccessVerificationResult,
   GatewayDeps,
@@ -204,6 +205,19 @@ export async function handleStagingRoute({
     const codeResp = await handleRegistryRoute(request, env, securityHeaders, nowSec);
     if (codeResp) {
       return codeResp;
+    }
+  }
+
+  // Owner verified: serve and manage stable-link annotated screenshots (/screenshots/ & /api/screenshots/*) from R2 + KV.
+  if (
+    url.pathname === "/screenshots" ||
+    url.pathname.startsWith("/screenshots/") ||
+    url.pathname === "/api/screenshots/latest" ||
+    url.pathname.startsWith("/api/screenshots/latest/")
+  ) {
+    const shotResp = await handleScreenshotsRoute(request, env, securityHeaders, nowSec);
+    if (shotResp) {
+      return shotResp;
     }
   }
 

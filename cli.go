@@ -31,9 +31,10 @@ Actions:
   live      Modify public https://dialtone.earth/ live or watch-deploy
   code      Store, push, pull, and clone git code on Cloudflare R2
   release   Tag and publish SHA-256-verified releases on Cloudflare R2
-  plugins   List and publish public Dialtone plugins (e.g. dialtone-shell)
-  dev       Start the test dashboard without running tests
-  help      Show this help
+  plugins     List and publish public Dialtone plugins (e.g. dialtone-shell)
+  screenshots Capture annotated test UI screenshots and build stable gallery
+  dev         Start the test dashboard without running tests
+  help        Show this help
 
 Flags:
   auth status [--json]     Report configured and verified auth state
@@ -42,7 +43,9 @@ Flags:
   test --browser           Start/reconnect persistent CDP Chrome synced with dashboard
   test --keep-signed-in    Leave Chrome signed into LIVE metal after browser tests
   test --deploy-on-pass    Auto-deploy to https://dialtone.earth/ if all tests pass
+  test --screenshots       Capture annotated test UI screenshots after the test loop
   test --close-browser     Close the persistent CDP Chrome browser and exit
+  screenshots [--publish-live]  Capture annotated screenshots (dry-run by default)
   deploy --live            Build registry/ and deploy live to Cloudflare Workers
   live <status|set|reset|watch|init-token>  Control or watch-deploy dialtone.earth live
   code <list|status|push|pull|clone>        Store/sync git bundles directly on Cloudflare R2
@@ -96,6 +99,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		err = runRelease(args[1:], stdout, stderr)
 	case "plugins":
 		err = runPlugins(args[1:], stdout, stderr)
+	case "screenshots":
+		err = runScreenshots(args[1:], stdout, stderr)
 	case "dev":
 		err = runDev(args[1:], stdout, stderr)
 	default:
@@ -211,6 +216,10 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	closeBrowser := flags.Bool("close-browser", false, "Close the persistent CDP Chrome browser and exit")
 	cdpPort := flags.Int("cdp-port", 9222, "Chrome DevTools Protocol loopback port for --browser")
 	dashboardURL := flags.String("dashboard-url", "http://127.0.0.1:5174/", "Test dashboard URL opened beside the live app in --browser mode")
+	screenshots := flags.Bool("screenshots", false, "Capture annotated test UI screenshots after the test loop (dry-run by default)")
+	noScreenshots := flags.Bool("no-screenshots", false, "Disable automatic post-loop annotated screenshots in --browser mode")
+	screenshotsPublishLive := flags.Bool("screenshots-publish-live", false, "Explicitly upload post-loop screenshots to Cloudflare R2 (default: false, local dry-run)")
+	screenshotsPublishURL := flags.String("screenshots-publish-url", "https://test.dialtone.earth", "Stable-link host URL when --screenshots-publish-live is set")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -288,16 +297,22 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	})
 	testErr := runGoTests(root, &state, *filter, extraEnv, stdout)
 	passed, failed, total := countStateTotals(&state)
+	shouldCaptureShots := *screenshots || (*browser && !*noScreenshots)
 	if testErr != nil {
 		writePipelineState(root, pipelineState{
 			Stage:        "failed",
-			Message:      fmt.Sprintf("Tests failed (%d failed) — deploy blocked", failed),
+			Message:      fmt.Sprintf("Tests failed (%d failed) -- deploy blocked", failed),
 			Changed:      strings.TrimSpace(*triggerFile),
 			TargetOrigin: "http://127.0.0.1:5175",
 			Passed:       passed,
 			Failed:       failed,
 			Total:        total,
 		})
+		if shouldCaptureShots {
+			if shotErr := runPostLoopScreenshots(root, *dashboardURL, *filter, *screenshotsPublishLive, *screenshotsPublishURL, false, stdout, stderr); shotErr != nil {
+				fmt.Fprintf(stderr, "screenshots post-loop warning: %v\n", shotErr)
+			}
+		}
 		return testErr
 	}
 	testedHash := ""
@@ -307,12 +322,12 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	if !*deployOnPass {
 		deployedHash := readDeployedRecord(root).DeployedHash
 		stage := "staging_ready"
-		readyMsg := fmt.Sprintf("Ready (%d/%d passed on test network) — click deploy to update dialtone.earth", passed, total)
+		readyMsg := fmt.Sprintf("Ready (%d/%d passed on test network) -- click deploy to update dialtone.earth", passed, total)
 		if testedHash == "" {
-			readyMsg = fmt.Sprintf("Passed %d/%d — run full test-network browser suite to unlock deploy", passed, total)
+			readyMsg = fmt.Sprintf("Passed %d/%d -- run full test-network browser suite to unlock deploy", passed, total)
 		} else if deployedHash != "" && deployedHash == testedHash {
 			stage = "deployed"
-			readyMsg = fmt.Sprintf("All %d/%d passed — up to date with live dialtone.earth (nothing new to deploy)", passed, total)
+			readyMsg = fmt.Sprintf("All %d/%d passed -- up to date with live dialtone.earth (nothing new to deploy)", passed, total)
 		}
 		writePipelineState(root, pipelineState{
 			Stage:        stage,
@@ -325,6 +340,11 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 			Failed:       failed,
 			Total:        total,
 		})
+		if shouldCaptureShots {
+			if shotErr := runPostLoopScreenshots(root, *dashboardURL, *filter, *screenshotsPublishLive, *screenshotsPublishURL, *screenshots, stdout, stderr); shotErr != nil {
+				return shotErr
+			}
+		}
 		return nil
 	}
 	writePipelineState(root, pipelineState{

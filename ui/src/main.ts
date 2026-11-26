@@ -961,6 +961,7 @@ function renderMenuOverlay(menuEl: HTMLElement, catalog: WorkspaceContent[], ass
                 : `<button type="button" class="tbl-chip is-primary" data-testid="launch-browser">launch persistent chrome</button>`
             }
             <a class="tbl-chip" href="/logs">logs</a>
+            <a class="tbl-chip" href="/screenshots/">screenshots</a>
             ${isRemoteHost ? `<a class="tbl-chip" href="/code">code</a>` : ""}
             ${isRemoteHost ? `<a class="tbl-chip" data-testid="remote-sign-out" href="/auth/logout">sign out</a>` : ""}
           </div>

@@ -57,6 +57,8 @@ Flags for "live watch":
   --deploy-on-pass    Opt-in auto-deploy on pass (default: false — promote manually from test.dialtone.earth)
   --push              Also push git bundle + source archives to Cloudflare R2 on pass
   --filter <regexp>   Optional Go test filter regexp (empty runs all tests)
+  --screenshots       Capture annotated test UI screenshots after each loop (default: true, dry-run)
+  --screenshots-publish-live  Explicitly upload screenshots to Cloudflare R2 (default: false)
   --interval <dur>    File change poll interval (default: 1.2s)
 `
 
@@ -359,6 +361,8 @@ func runLiveWatch(args []string, stdout, stderr io.Writer) error {
 	keepSignedIn := fs.Bool("keep-signed-in", true, "Keep persistent CDP Chrome signed into LIVE metal")
 	deployOnPass := fs.Bool("deploy-on-pass", false, "Opt-in auto-deploy to https://dialtone.earth/ on pass (default false: promote from test.dialtone.earth)")
 	filter := fs.String("filter", "", "Optional Go test filter regexp (empty runs all tests)")
+	screenshots := fs.Bool("screenshots", true, "Capture annotated test UI screenshots after each test loop (dry-run by default)")
+	screenshotsPublishLive := fs.Bool("screenshots-publish-live", false, "Explicitly upload screenshots to Cloudflare R2 after each loop (default: false)")
 	pushCode := fs.Bool("push", false, "Also push git bundle to Cloudflare R2 on pass")
 	repo := fs.String("repo", defaultRepoSlug(), "Repository slug when --push is set")
 	baseURL := fs.String("url", defaultLiveSiteURL, "Registry base URL when --push is set")
@@ -432,6 +436,14 @@ func runLiveWatch(args []string, stdout, stderr io.Writer) error {
 			}
 			if *filter != "" {
 				testArgs = append(testArgs, "--filter", *filter)
+			}
+			if *screenshots {
+				testArgs = append(testArgs, "--screenshots")
+				if *screenshotsPublishLive {
+					testArgs = append(testArgs, "--screenshots-publish-live")
+				}
+			} else {
+				testArgs = append(testArgs, "--no-screenshots")
 			}
 			testArgs = append(testArgs, "--trigger-file", changedLabel)
 			if code := Run(testArgs, stdout, stderr); code != 0 {

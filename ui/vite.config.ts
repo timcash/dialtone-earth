@@ -17,6 +17,7 @@ const logsDir = dirname(statePath);
 const cdpPort = Number(process.env.DIALTONE_CDP_PORT || 9222);
 const SAFE_FILTER_RE = /^[\^$A-Za-z0-9_.|*-]+$/;
 const SAFE_TARGET_ID_RE = /^[A-Za-z0-9_-]{4,80}$/;
+const SAFE_SCREENSHOT_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.(png|html|json)$/i;
 let activeRun: ChildProcess | null = null;
 
 type TestRecord = {
@@ -142,6 +143,47 @@ function testApiPlugin(): Plugin {
         }
         if (pathname === "/api/cdp/close" && request.method === "POST") {
           closeCdpBrowser(request, response);
+          return;
+        }
+        if (pathname === "/screenshots" && (request.method === "GET" || request.method === "HEAD")) {
+          response.statusCode = 302;
+          response.setHeader("Location", "/screenshots/");
+          response.setHeader("Cache-Control", "no-store");
+          response.end();
+          return;
+        }
+        if (pathname.startsWith("/screenshots/") && (request.method === "GET" || request.method === "HEAD")) {
+          const relName = pathname.slice("/screenshots/".length) || "index.html";
+          if (!SAFE_SCREENSHOT_FILE_RE.test(relName) || relName.includes("..")) {
+            sendJson(response, { error: "Invalid screenshot filename" }, 400);
+            return;
+          }
+          const shotPath = resolve(logsDir, "screenshots", "latest", relName);
+          readFile(shotPath)
+            .then((buf) => {
+              const lower = relName.toLowerCase();
+              const contentType = lower.endsWith(".png")
+                ? "image/png"
+                : lower.endsWith(".html")
+                  ? "text/html; charset=utf-8"
+                  : "application/json; charset=utf-8";
+              response.statusCode = 200;
+              response.setHeader("Content-Type", contentType);
+              response.setHeader("Cache-Control", "no-store");
+              response.end(request.method === "HEAD" ? undefined : buf);
+            })
+            .catch((error: unknown) => {
+              const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
+              sendJson(
+                response,
+                {
+                  error: missing
+                    ? "No screenshots captured yet (run `go run . screenshots`)"
+                    : "Could not read screenshot artifact",
+                },
+                missing ? 404 : 500,
+              );
+            });
           return;
         }
         if (pathname.startsWith("/api/test-runs/") && request.method === "GET") {

@@ -136,6 +136,7 @@ go run . release channel promote --repo dialtone        # atomically promote cha
 go run . plugins list                                   # list public Dialtone plugins (e.g. dialtone-shell)
 go run . plugins info dialtone-shell                    # show plugin manifest, hashes, and iroh-blobs:// ticket
 go run . plugins publish dialtone-shell --from-local    # publish local Dialtone plugin to https://dialtone.earth/api/plugins
+go run . screenshots                                    # capture annotated test UI screenshots and build local gallery (dry-run)
 go run . clean                                          # remove generated artifacts; retain archived run logs
 ```
 
