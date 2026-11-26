@@ -1,7 +1,8 @@
 import "./style.css";
 import {
+  classifyTestSection,
+  computeTestProgress,
   elapsedSeconds,
-  groupTestsBySection,
   normalizeStatus,
   parseStructuredLogLine,
   statusLabel,
@@ -15,6 +16,7 @@ type TestRow = {
   source?: string;
   status: string;
   elapsed: string;
+  last_elapsed?: string;
   timestamp: string;
   "test-id"?: string;
 };
@@ -27,13 +29,57 @@ type TestRun = TestRow & {
   completed_at?: string;
 };
 
+type CdpTarget = {
+  id: string;
+  title: string;
+  url: string;
+};
+
 type CdpStatus = {
   connected: boolean;
   port: number;
   pid?: number | null;
   app_url?: string;
+  active_target_id?: string;
+  active_origin?: string;
   page_count?: number;
+  targets?: CdpTarget[];
 };
+
+type PipelineStatus = {
+  stage: string;
+  message: string;
+  changed?: string;
+  target_origin?: string;
+  deploy_url?: string;
+  version_id?: string;
+  passed?: number;
+  failed?: number;
+  total?: number;
+  updated_at?: string;
+};
+
+type SplitLayout = "1" | "1|1" | "1/1" | "1|2" | "2x2";
+type LayoutPref = "auto" | SplitLayout;
+
+type WorkspaceContent = {
+  id: string;
+  kind: "tests-all" | "tests-browser" | "log" | "browser";
+  label: string;
+  sourceTag: string;
+  sourceClass: "is-ch" | "is-cf" | "is-warn";
+  targetId?: string;
+  viewport?: "wide" | "mobile";
+  url?: string;
+};
+
+const SPLIT_LAYOUTS: Array<{ id: SplitLayout; label: string; panes: number; title: string }> = [
+  { id: "1", label: "1", panes: 1, title: "Single full pane" },
+  { id: "1|1", label: "1|1", panes: 2, title: "Left / Right split" },
+  { id: "1/1", label: "1/1", panes: 2, title: "Top / Bottom split" },
+  { id: "1|2", label: "1|2", panes: 3, title: "Left + two stacked right panes (3 panes)" },
+  { id: "2x2", label: "2x2", panes: 4, title: "Quad 2×2 split (4 panes)" },
+];
 
 const appElement = document.querySelector<HTMLElement>("#app");
 if (!appElement) {
@@ -41,281 +87,1013 @@ if (!appElement) {
 }
 const app: HTMLElement = appElement;
 
+// Persistent workspace state (saved in localStorage so reloads keep your panes)
 let tests: TestRow[] = [];
 let loaded = false;
 let errorMessage = "";
 let starting = false;
 let useBrowser = true;
 let keepSignedIn = true;
-let cdpStatus: CdpStatus = { connected: false, port: 9222 };
+let deployOnPass = false;
+let theme: "dark" | "light" = (localStorage.getItem("dt_test_theme") as "dark" | "light") || "dark";
+let layoutPref: LayoutPref = (localStorage.getItem("dt_test_layout_v2") as LayoutPref) || "auto";
+let paneContents: string[] = loadSavedPanes();
+let focusedPane = 0;
+let maximizedPane: number | null = null;
+let menuOpen = false;
+let selectedTestId = "";
+type StagingEnvStatus = {
+  preview?: {
+    ok?: boolean;
+    channel?: string;
+    preview_url?: string;
+    nodes?: Array<{ node?: string; reachable?: boolean; nodeCount?: number }>;
+  };
+  release_channels?: Record<string, { tag?: string }>;
+  deploy?: {
+    ready?: boolean;
+    has_changes?: boolean;
+    all_tests_passed?: boolean;
+    tested_matches_current?: boolean;
+    browser_passed?: number;
+    browser_total?: number;
+    current_hash?: string;
+    tested_hash?: string;
+    deployed_hash?: string;
+    reason?: string;
+  };
+};
+
+let selectedLogRun: TestRun | null = null;
+let newBrowserUrlDraft = "http://127.0.0.1:5175/";
+let stagingEnv: StagingEnvStatus = {};
+
+let cdpStatus: CdpStatus = { connected: false, port: 9222, targets: [] };
+let pipelineStatus: PipelineStatus = { stage: "idle", message: "Ready" };
 let lastRunningTestName = "";
 let streamNonce = 1;
-let mountedStreamConnected: boolean | null = null;
-let shellMounted = false;
+let wmMounted = false;
 
-function ensureDashboardShell(): { testsRoot: HTMLElement; viewportRoot: HTMLElement } {
-  if (!shellMounted) {
-    shellMounted = true;
-    app.innerHTML = `
-      <main class="synced-workspace">
-        <section id="cdp-viewport-host" class="viewport-pane" aria-label="Live Chrome CDP browser viewport"></section>
-        <section id="dashboard-tests" class="tests-pane"></section>
-      </main>
-    `;
-  }
-  const testsRoot = app.querySelector<HTMLElement>("#dashboard-tests");
-  const viewportRoot = app.querySelector<HTMLElement>("#cdp-viewport-host");
-  if (!testsRoot || !viewportRoot) {
-    throw new Error("missing dashboard workspace roots");
-  }
-  return { testsRoot, viewportRoot };
-}
-
-function syncViewportPane(): void {
-  const { viewportRoot } = ensureDashboardShell();
-  const runningTest = tests.find((test) => normalizeStatus(test.status) === "running");
-
-  // Only recreate the <img> stream element when CDP connection state changes
-  // so live MJPEG playback never flickers as individual test cards update.
-  if (mountedStreamConnected !== cdpStatus.connected) {
-    mountedStreamConnected = cdpStatus.connected;
-    if (cdpStatus.connected) {
-      streamNonce += 1;
-      viewportRoot.innerHTML = `
-        <div class="viewport-card">
-          <div class="viewport-head">
-            <div class="viewport-title-row">
-              <span class="cdp-pill connected" data-testid="viewport-live-pill">
-                <span class="cdp-dot"></span>
-                LIVE CHROME · CDP :${cdpStatus.port}
-              </span>
-              <code class="viewport-url" data-testid="viewport-url">${escapeHtml(cdpStatus.app_url || "https://metal.dialtone.earth/")}</code>
-            </div>
-            <div class="viewport-actions">
-              <span class="viewport-active-test" data-testid="viewport-active-test"></span>
-              <button data-testid="viewport-reconnect" class="ghost-btn" type="button" title="Reconnect live video stream">Refresh view</button>
-              <button data-testid="viewport-close-browser" class="ghost-btn" type="button">Close</button>
-            </div>
-          </div>
-          <div class="viewport-stage">
-            <img
-              data-testid="cdp-live-stream"
-              class="viewport-stream"
-              src="/api/cdp/stream?v=${streamNonce}"
-              alt="Live Chrome browser running Dialtone Earth tests"
-            />
-          </div>
-        </div>
-      `;
-      viewportRoot.querySelector<HTMLButtonElement>("[data-testid='viewport-reconnect']")?.addEventListener("click", () => {
-        mountedStreamConnected = null;
-        syncViewportPane();
-      });
-      viewportRoot.querySelector<HTMLButtonElement>("[data-testid='viewport-close-browser']")?.addEventListener("click", () => {
-        closeBrowser().catch(showError);
-      });
-    } else {
-      viewportRoot.innerHTML = `
-        <div class="viewport-card viewport-offline">
-          <div class="viewport-head">
-            <span class="cdp-pill offline" data-testid="viewport-live-pill">
-              <span class="cdp-dot"></span>
-              CHROME CDP :${cdpStatus.port} OFFLINE
-            </span>
-            <button data-testid="launch-browser" class="secondary-btn" type="button">Launch live browser</button>
-          </div>
-          <div class="viewport-placeholder">
-            <p>Start the persistent Chrome browser or click <strong>Run browser suite</strong> to watch live tests execute here in real time.</p>
-          </div>
-        </div>
-      `;
-      viewportRoot.querySelector<HTMLButtonElement>("[data-testid='launch-browser']")?.addEventListener("click", () => {
-        launchBrowser().catch(showError);
-      });
-    }
-  }
-
-  const urlEl = viewportRoot.querySelector<HTMLElement>("[data-testid='viewport-url']");
-  if (urlEl && cdpStatus.app_url) {
-    urlEl.textContent = cdpStatus.app_url;
-  }
-  const activeBadge = viewportRoot.querySelector<HTMLElement>("[data-testid='viewport-active-test']");
-  if (activeBadge) {
-    if (runningTest) {
-      activeBadge.textContent = `RUNNING: ${runningTest.title} (${elapsedSeconds(runningTest).toFixed(1)}s)`;
-      activeBadge.classList.add("active");
-    } else {
-      activeBadge.textContent = "READY · Reconnectable";
-      activeBadge.classList.remove("active");
-    }
-  }
-}
-
-function render(): void {
-  const { testsRoot } = ensureDashboardShell();
-  syncViewportPane();
-
-  const passed = tests.filter((test) => normalizeStatus(test.status) === "pass").length;
-  const failed = tests.filter((test) => normalizeStatus(test.status) === "fail").length;
-  const runningTest = tests.find((test) => normalizeStatus(test.status) === "running");
-  const running = Boolean(runningTest);
-  const sections = groupTestsBySection(tests);
-
-  testsRoot.innerHTML = `
-    <header>
-      <p class="eyebrow">Dialtone Earth</p>
-      <section class="heading-row">
-        <div>
-          <h1>Tests</h1>
-        </div>
-        <div class="header-actions">
-          <button data-testid="run-browser-suite" class="secondary-btn" type="button" ${starting || running ? "disabled" : ""}>
-            Run browser suite
-          </button>
-          <button data-testid="start-tests" type="button" ${starting || running ? "disabled" : ""}>
-            ${starting ? "Starting…" : running ? "Running…" : "Start tests"}
-          </button>
-        </div>
-      </section>
-      <section class="cdp-bar" aria-label="Persistent browser controls">
-        <span class="cdp-pill ${cdpStatus.connected ? "connected" : "offline"}" data-testid="cdp-status">
-          <span class="cdp-dot"></span>
-          CDP :${cdpStatus.port} ${cdpStatus.connected ? "connected" : "offline"}
-        </span>
-        <label class="cdp-toggle">
-          <input type="checkbox" data-testid="toggle-browser" ${useBrowser ? "checked" : ""} />
-          <span>Live Browser</span>
-        </label>
-        <label class="cdp-toggle">
-          <input type="checkbox" data-testid="toggle-keep-signed-in" ${keepSignedIn ? "checked" : ""} />
-          <span>Keep signed in</span>
-        </label>
-        ${
-          cdpStatus.connected
-            ? `<button data-testid="close-browser" class="ghost-btn" type="button">Close browser</button>`
-            : `<button data-testid="open-browser-bar" class="ghost-btn" type="button">Launch browser</button>`
-        }
-      </section>
-      <section class="summary" aria-label="Test summary">
-        <span><strong>${tests.length}</strong> total</span>
-        <span><strong>${sections.length}</strong> sections</span>
-        <span class="passed"><strong>${passed}</strong> passed</span>
-        <span class="${failed > 0 ? "failed" : ""}"><strong>${failed}</strong> failed</span>
-      </section>
-      ${errorMessage ? `<p class="error" role="alert">${escapeHtml(errorMessage)}</p>` : ""}
-    </header>
-    <section class="test-sections" aria-label="Test sections">
-      ${
-        tests.length > 0
-          ? sections.map((section) => renderSection(section, starting || running)).join("")
-          : `<section class="test-list"><p class="empty">${loaded ? "No tests listed yet. Press Start tests." : "Loading tests…"}</p></section>`
+function loadSavedPanes(): string[] {
+  try {
+    const raw = localStorage.getItem("dt_test_panes_v2");
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) {
+        return parsed;
       }
-    </section>
-  `;
+    }
+  } catch {
+    // ignore
+  }
+  // Default 1|2 layout: full-height test table on left (#1), wide desktop (#2) & mobile (#3) browsers stacked on right
+  return ["tests:all", "browser:wide", "browser:mobile", "log:active"];
+}
 
-  const startButton = testsRoot.querySelector<HTMLButtonElement>("[data-testid='start-tests']");
-  startButton?.addEventListener("click", () => {
-    startAllTests().catch(showError);
-  });
+function saveWorkspacePrefs(): void {
+  try {
+    localStorage.setItem("dt_test_theme", theme);
+    localStorage.setItem("dt_test_layout_v2", layoutPref);
+    localStorage.setItem("dt_test_panes_v2", JSON.stringify(paneContents));
+  } catch {
+    // ignore
+  }
+}
 
-  const browserSuiteBtn = testsRoot.querySelector<HTMLButtonElement>("[data-testid='run-browser-suite']");
-  browserSuiteBtn?.addEventListener("click", () => {
-    startFilteredTests("^TestBrowser", true).catch(showError);
-  });
+function applyTheme(): void {
+  document.documentElement.setAttribute("data-theme", theme);
+}
 
-  const browserToggle = testsRoot.querySelector<HTMLInputElement>("[data-testid='toggle-browser']");
-  browserToggle?.addEventListener("change", () => {
-    useBrowser = Boolean(browserToggle.checked);
-  });
+function resolveEffectiveLayout(): SplitLayout {
+  if (maximizedPane !== null) return "1";
+  // Mobile viewports strictly stay single-column ("1" or stacked "1/1")
+  if (window.innerWidth < 900) {
+    return layoutPref === "1" ? "1" : "1/1";
+  }
+  if (layoutPref !== "auto") return layoutPref;
+  return "1|2";
+}
 
-  const keepSignedInToggle = testsRoot.querySelector<HTMLInputElement>("[data-testid='toggle-keep-signed-in']");
-  keepSignedInToggle?.addEventListener("change", () => {
-    keepSignedIn = Boolean(keepSignedInToggle.checked);
-  });
+function paneCountFor(layout: SplitLayout): number {
+  return SPLIT_LAYOUTS.find((l) => l.id === layout)?.panes ?? 2;
+}
 
-  const closeBrowserBtn = testsRoot.querySelector<HTMLButtonElement>("[data-testid='close-browser']");
-  closeBrowserBtn?.addEventListener("click", () => {
-    closeBrowser().catch(showError);
-  });
+function shortHostLabel(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl);
+    return u.hostname + (u.pathname !== "/" ? u.pathname : "");
+  } catch {
+    return rawUrl || "chrome";
+  }
+}
 
-  const openBrowserBarBtn = testsRoot.querySelector<HTMLButtonElement>("[data-testid='open-browser-bar']");
-  openBrowserBarBtn?.addEventListener("click", () => {
-    launchBrowser().catch(showError);
-  });
+function availableContents(): WorkspaceContent[] {
+  const activeOrigin = (
+    pipelineStatus.target_origin ||
+    cdpStatus.active_origin ||
+    stagingEnv.preview?.preview_url ||
+    "http://127.0.0.1:5175"
+  ).replace(/\/+$/, "");
+  const isProdTarget = activeOrigin.startsWith("https://");
+  const targets = cdpStatus.targets && cdpStatus.targets.length > 0 ? cdpStatus.targets : [];
+  const primaryTarget =
+    (cdpStatus.active_target_id ? targets.find((t) => t.id === cdpStatus.active_target_id) : undefined) ||
+    targets.find((t) => t.url.startsWith(activeOrigin)) ||
+    targets.find((t) => t.url.includes("127.0.0.1:5175")) ||
+    targets.find((t) => t.url.includes("metal.dialtone.earth")) ||
+    targets[0];
 
-  testsRoot.querySelectorAll<HTMLButtonElement>("[data-run-single]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const name = btn.dataset.runSingle || "";
-      if (!name) return;
-      const forceBrowser = name.startsWith("TestBrowser") || useBrowser;
-      startFilteredTests(`^${name}$`, forceBrowser).catch(showError);
+  const items: WorkspaceContent[] = [
+    {
+      id: "tests:all",
+      kind: "tests-all",
+      label: "db:tests",
+      sourceTag: isProdTarget ? "LIVE PROD" : "STAGING TEST",
+      sourceClass: "is-ch",
+    },
+    {
+      id: "browser:wide",
+      kind: "browser",
+      label: "browser:wide",
+      sourceTag: cdpStatus.connected ? (isProdTarget ? "PROD WIDE 1440×900" : "WIDE 1440×900") : "OFFLINE",
+      sourceClass: cdpStatus.connected ? "is-ch" : "is-warn",
+      targetId: primaryTarget?.id,
+      viewport: "wide",
+      url: primaryTarget?.url || `${activeOrigin}/`,
+    },
+    {
+      id: "browser:mobile",
+      kind: "browser",
+      label: "browser:mobile",
+      sourceTag: cdpStatus.connected ? (isProdTarget ? "PROD MOBILE 390×844" : "MOBILE 390×844") : "OFFLINE",
+      sourceClass: cdpStatus.connected ? "is-ch" : "is-warn",
+      viewport: "mobile",
+      url: `${activeOrigin}/`,
+    },
+    { id: "tests:browser", kind: "tests-browser", label: "cdp:suite", sourceTag: "CDP", sourceClass: "is-ch" },
+    { id: "log:active", kind: "log", label: "run:log", sourceTag: "LOG", sourceClass: "is-cf" },
+  ];
+
+  // Include any additional user-opened Chrome tabs beyond the primary staging tab
+  let extraNum = 3;
+  for (const t of targets) {
+    if (primaryTarget && t.id === primaryTarget.id) continue;
+    items.push({
+      id: `browser:${t.id}`,
+      kind: "browser",
+      label: `browser:${extraNum} (${shortHostLabel(t.url).slice(0, 22)})`,
+      sourceTag: `CDP:${cdpStatus.port}`,
+      sourceClass: "is-ch",
+      targetId: t.id,
+      url: t.url,
     });
+    extraNum += 1;
+  }
+  return items;
+}
+
+function normalizedAssignments(layout: SplitLayout, catalog: WorkspaceContent[]): WorkspaceContent[] {
+  if (maximizedPane !== null) {
+    const id = paneContents[maximizedPane] || catalog[0].id;
+    const found = catalog.find((c) => c.id === id) || catalog[0];
+    return [found];
+  }
+  const count = paneCountFor(layout);
+  const valid = new Map(catalog.map((c) => [c.id, c]));
+  const result: WorkspaceContent[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const wanted = paneContents[i];
+    if (wanted && valid.has(wanted)) {
+      result.push(valid.get(wanted)!);
+    } else {
+      const fallback = catalog.find((c) => !result.some((r) => r.id === c.id)) || catalog[i % catalog.length];
+      result.push(fallback);
+      paneContents[i] = fallback.id;
+    }
+  }
+  if (focusedPane >= result.length) focusedPane = 0;
+  return result;
+}
+
+function ensureWmShell(): void {
+  applyTheme();
+  if (wmMounted) return;
+  wmMounted = true;
+  app.innerHTML = `
+    <div class="hud-shell app-wm-shell" data-testid="wm-shell">
+      <div class="app-window-grid earth-split-grid" data-testid="split-grid" data-layout="1|1"></div>
+      <footer class="app-bottom-bar" data-testid="bottom-bar"></footer>
+      <section class="config-page" data-testid="menu-overlay" hidden></section>
+    </div>
+  `;
+  window.addEventListener("resize", () => {
+    if (layoutPref === "auto") renderWorkspace();
+  });
+}
+
+function renderWorkspace(): void {
+  ensureWmShell();
+  const shell = app.querySelector<HTMLElement>("[data-testid='wm-shell']")!;
+  const grid = app.querySelector<HTMLElement>("[data-testid='split-grid']")!;
+  const bottomBar = app.querySelector<HTMLElement>("[data-testid='bottom-bar']")!;
+  const menuEl = app.querySelector<HTMLElement>("[data-testid='menu-overlay']")!;
+
+  shell.classList.toggle("is-config-open", menuOpen);
+
+  const layout = resolveEffectiveLayout();
+  grid.setAttribute("data-layout", layout);
+
+  const catalog = availableContents();
+  const assigned = normalizedAssignments(layout, catalog);
+  const runningTest = tests.find((t) => normalizeStatus(t.status) === "running");
+  const isBrowserDemo = Boolean(runningTest && runningTest.name.startsWith("TestBrowser"));
+
+  // Sync pane count without destroying active MJPEG browser streams unnecessarily.
+  while (grid.children.length > assigned.length) {
+    grid.lastElementChild?.remove();
+  }
+  while (grid.children.length < assigned.length) {
+    const paneEl = document.createElement("section");
+    paneEl.className = "earth-pane";
+    paneEl.innerHTML = `<div class="earth-pane-head"></div><div class="pane-body-slot" style="display:flex;flex-direction:column;flex:1;min-height:0;"></div>`;
+    grid.appendChild(paneEl);
+  }
+
+  assigned.forEach((content, idx) => {
+    const paneEl = grid.children[idx] as HTMLElement;
+    const isFocused = idx === focusedPane;
+    const isDemoPane =
+      content.kind === "browser" &&
+      isBrowserDemo &&
+      (content.id === "browser:wide" || content.id === "browser:mobile" || idx === 1);
+    paneEl.setAttribute("data-testid", `wm-pane-${idx}`);
+    paneEl.setAttribute("data-content-id", content.id);
+    paneEl.classList.toggle("is-focused", isFocused);
+    paneEl.classList.toggle("is-demonstrating", isDemoPane);
+    paneEl.classList.toggle("is-deploying", content.kind === "browser" && pipelineStatus.stage === "deploying");
+
+    paneEl.onclick = () => {
+      if (focusedPane !== idx) {
+        focusedPane = idx;
+        renderWorkspace();
+      }
+    };
+
+    const head = paneEl.querySelector<HTMLElement>(".earth-pane-head")!;
+    const bodySlot = paneEl.querySelector<HTMLElement>(".pane-body-slot")!;
+
+    let statsText = "";
+    if (content.kind === "tests-all" || content.kind === "tests-browser") {
+      const subset = content.kind === "tests-browser" ? tests.filter((t) => t.name.startsWith("TestBrowser")) : tests;
+      const pCount = subset.filter((t) => normalizeStatus(t.status) === "pass").length;
+      const fCount = subset.filter((t) => normalizeStatus(t.status) === "fail").length;
+      statsText = `${pCount}/${subset.length} pass${fCount > 0 ? ` · ${fCount} fail` : ""}`;
+    } else if (content.kind === "browser") {
+      statsText = isDemoPane && runningTest
+        ? `DEMONSTRATING: ${runningTest.title} (${elapsedSeconds(runningTest).toFixed(1)}s)`
+        : content.url || "https://metal.dialtone.earth/";
+    } else if (content.kind === "log") {
+      statsText = selectedLogRun ? `${selectedLogRun.name} (${statusLabel(selectedLogRun.status)})` : "select any test row";
+    }
+
+    const maxLabel = maximizedPane !== null ? "restore" : "max";
+    head.innerHTML = `
+      <div class="pane-head-left">
+        <span class="pane-num">#${idx + 1}</span>
+        <span class="pane-title">${escapeHtml(content.label)}</span>
+        <span class="pane-source ${content.sourceClass}">${escapeHtml(content.sourceTag)}</span>
+        <span class="pane-stats" data-pane-stats="${idx}">${escapeHtml(statsText)}</span>
+      </div>
+      <div class="pane-head-right">
+        ${
+          content.kind === "browser" && cdpStatus.connected
+            ? `<button type="button" class="row-btn" data-refresh-stream="${idx}" title="Reconnect stream">refresh</button>`
+            : ""
+        }
+        <button type="button" class="row-btn" data-max-pane="${idx}">${maxLabel}</button>
+      </div>
+    `;
+    head.querySelector<HTMLButtonElement>(`[data-max-pane="${idx}"]`)?.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      maximizedPane = maximizedPane !== null ? null : idx;
+      renderWorkspace();
+    });
+    head.querySelector<HTMLButtonElement>(`[data-refresh-stream="${idx}"]`)?.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      streamNonce += 1;
+      bodySlot.removeAttribute("data-mounted-stream");
+      renderWorkspace();
+    });
+
+    if (content.kind === "browser") {
+      renderBrowserPaneBody(bodySlot, content, isDemoPane, runningTest);
+    } else if (content.kind === "tests-all" || content.kind === "tests-browser") {
+      bodySlot.removeAttribute("data-mounted-stream");
+      renderTestsTableBody(bodySlot, content.kind === "tests-browser");
+    } else {
+      bodySlot.removeAttribute("data-mounted-stream");
+      renderLogPaneBody(bodySlot);
+    }
   });
 
+  renderBottomBar(bottomBar, runningTest);
+  if (menuOpen) {
+    menuEl.hidden = false;
+    renderMenuOverlay(menuEl, catalog, assigned);
+  } else {
+    menuEl.hidden = true;
+  }
+
+  // Gently scroll the active running row into view inside the database table pane.
   if (runningTest && runningTest.name !== lastRunningTestName) {
     lastRunningTestName = runningTest.name;
-    const row = testsRoot.querySelector<HTMLElement>(`[data-test-name="${CSS.escape(runningTest.name)}"]`);
+    const row = grid.querySelector<HTMLElement>(`tr[data-test-name="${CSS.escape(runningTest.name)}"]`);
     row?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    if (runningTest["test-id"]) {
+      selectedTestId = runningTest["test-id"];
+      void fetchSelectedLog(selectedTestId);
+    }
   } else if (!runningTest) {
     lastRunningTestName = "";
   }
 }
 
-function renderSection(section: { title: string; description: string; tests: TestRow[] }, busy: boolean): string {
-  const secPassed = section.tests.filter((t) => normalizeStatus(t.status) === "pass").length;
-  const secFailed = section.tests.filter((t) => normalizeStatus(t.status) === "fail").length;
-  const secRunning = section.tests.some((t) => normalizeStatus(t.status) === "running");
-  const badgeClass = secFailed > 0 ? "failed" : secRunning ? "running" : secPassed === section.tests.length ? "passed" : "";
-  const badgeText =
-    secFailed > 0
-      ? `${secFailed} failed · ${secPassed}/${section.tests.length} passed`
-      : secRunning
-        ? `running · ${secPassed}/${section.tests.length}`
-        : `${secPassed}/${section.tests.length} passed`;
+const isRemoteHost =
+  typeof location !== "undefined" &&
+  location.hostname !== "127.0.0.1" &&
+  location.hostname !== "localhost" &&
+  location.hostname !== "::1";
 
-  return `
-    <section class="test-section" data-testid="test-section" data-section="${escapeHtml(section.title)}">
-      <div class="section-head">
-        <div>
-          <h2 class="section-title">${escapeHtml(section.title)}</h2>
-          ${section.description ? `<p class="section-desc">${escapeHtml(section.description)}</p>` : ""}
+function buildFrameUrl(content: WorkspaceContent, bust: number): string {
+  const qs = new URLSearchParams({ v: String(streamNonce), t: String(bust) });
+  if (content.viewport) qs.set("viewport", content.viewport);
+  if (content.targetId && content.viewport !== "mobile") qs.set("targetId", content.targetId);
+  return `/api/cdp/frame?${qs.toString()}`;
+}
+
+function renderBrowserPaneBody(
+  slot: HTMLElement,
+  content: WorkspaceContent,
+  isDemoPane: boolean,
+  runningTest: TestRow | undefined,
+): void {
+  const streamKey = cdpStatus.connected
+    ? `${content.viewport || "default"}:${content.viewport === "mobile" ? content.url || "mobile" : content.targetId || "default"}:${streamNonce}`
+    : "offline";
+  if (slot.getAttribute("data-mounted-stream") !== streamKey) {
+    // Explicitly abort any existing MJPEG <img> stream socket before swapping DOM
+    // so Chromium immediately releases the HTTP/1.1 connection slot.
+    slot.querySelectorAll<HTMLImageElement>("img").forEach((img) => {
+      img.removeAttribute("src");
+      img.src = "";
+    });
+    slot.setAttribute("data-mounted-stream", streamKey);
+    if (cdpStatus.connected) {
+      const qs = new URLSearchParams({ v: String(streamNonce) });
+      if (content.viewport) qs.set("viewport", content.viewport);
+      if (content.targetId && content.viewport !== "mobile") qs.set("targetId", content.targetId);
+      const imgCls = content.viewport === "mobile" ? "browser-stream-img is-mobile" : "browser-stream-img";
+      const initialSrc = isRemoteHost ? buildFrameUrl(content, Date.now()) : `/api/cdp/stream?${qs.toString()}`;
+      slot.innerHTML = `
+        <div class="browser-pane-body">
+          <div class="browser-stage">
+            <img
+              data-testid="${content.viewport === "mobile" ? "cdp-mobile-stream" : "cdp-live-stream"}"
+              data-remote-viewport="${escapeHtml(content.viewport || "")}"
+              data-remote-target="${escapeHtml(content.viewport !== "mobile" ? content.targetId || "" : "")}"
+              class="${imgCls}"
+              src="${initialSrc}"
+              alt="Projected Chrome browser ${escapeHtml(content.label)}"
+            />
+          </div>
+          <div class="browser-foot" data-browser-foot></div>
         </div>
-        <span class="section-badge ${badgeClass}">${escapeHtml(badgeText)}</span>
-      </div>
-      <div class="test-list">
-        ${section.tests.map((test) => renderTest(test, busy)).join("")}
-      </div>
-    </section>
+      `;
+    } else {
+      slot.innerHTML = `
+        <div class="browser-pane-body">
+          <div class="browser-placeholder">
+            <p>Projected Chrome CDP :${cdpStatus.port} is offline.</p>
+            <button type="button" class="tbl-chip is-primary" data-launch-browser-pane>Launch persistent Chrome</button>
+          </div>
+        </div>
+      `;
+      slot.querySelector<HTMLButtonElement>("[data-launch-browser-pane]")?.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        launchBrowser().catch(showError);
+      });
+    }
+  }
+
+  const foot = slot.querySelector<HTMLElement>("[data-browser-foot]");
+  if (foot) {
+    foot.classList.toggle("is-active", isDemoPane);
+    const label = isDemoPane && runningTest
+      ? `▶ SPOTLIGHT: ${runningTest.title} (${runningTest.name})`
+      : pipelineStatus.stage === "deploying"
+        ? "DEPLOYING VERIFIED BUILD → https://dialtone.earth/..."
+        : pipelineStatus.stage === "deployed"
+          ? `LIVE ON dialtone.earth (${(pipelineStatus.version_id || "").slice(0, 8)})`
+          : `${content.url || "https://metal.dialtone.earth/"} · persistent CDP reconnect ready`;
+    foot.innerHTML = `<span>${escapeHtml(label)}</span><span>${cdpStatus.connected ? "LIVE STREAM" : "OFFLINE"}</span>`;
+  }
+}
+
+const LAST_ELAPSED_STORAGE_KEY = "dialtone.test.lastElapsed.v1";
+
+function loadLastElapsedCache(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(LAST_ELAPSED_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      const n = Number(v);
+      if (Number.isFinite(n) && n > 0) out[k] = n;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+const lastElapsedCache: Record<string, number> = loadLastElapsedCache();
+
+function persistLastElapsedCache(): void {
+  try {
+    localStorage.setItem(LAST_ELAPSED_STORAGE_KEY, JSON.stringify(lastElapsedCache));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+function syncLastElapsedCache(rows: TestRow[]): void {
+  let dirty = false;
+  for (const row of rows) {
+    const serverLast = Number.parseFloat(String(row.last_elapsed ?? "0"));
+    if (Number.isFinite(serverLast) && serverLast > 0) {
+      if (lastElapsedCache[row.name] !== serverLast) {
+        lastElapsedCache[row.name] = serverLast;
+        dirty = true;
+      }
+      continue;
+    }
+    const st = normalizeStatus(row.status);
+    if (st === "pass") {
+      const el = Number.parseFloat(String(row.elapsed ?? "0"));
+      if (Number.isFinite(el) && el > 0 && lastElapsedCache[row.name] !== el) {
+        lastElapsedCache[row.name] = el;
+        dirty = true;
+      }
+    }
+  }
+  if (dirty) persistLastElapsedCache();
+}
+
+function formatProgressTime(prog: { elapsed: number; lastSec: number; overtime: boolean }, status: string): string {
+  const cur = `${prog.elapsed.toFixed(2)}s`;
+  if (prog.lastSec > 0 && (status === "running" || (status === "pass" && prog.overtime))) {
+    return `${cur} / ${prog.lastSec.toFixed(2)}s`;
+  }
+  return cur;
+}
+
+function renderTestsTableBody(slot: HTMLElement, browserOnly: boolean): void {
+  const prevScroll = slot.querySelector<HTMLElement>(".earth-table-scroll")?.scrollTop ?? 0;
+  const rows = browserOnly ? tests.filter((t) => t.name.startsWith("TestBrowser")) : tests;
+  const busy = starting || tests.some((t) => normalizeStatus(t.status) === "running") || pipelineStatus.stage === "deploying";
+
+  if (rows.length === 0) {
+    slot.innerHTML = `<div class="browser-placeholder"><p>${loaded ? "No tests listed yet. Press start tests." : "Loading tests…"}</p></div>`;
+    return;
+  }
+
+  slot.innerHTML = `
+    <div class="earth-table-scroll">
+      <table class="earth-table" data-testid="tests-db-table">
+        <thead>
+          <tr>
+            <th>STATUS</th>
+            <th>TEST</th>
+            <th>SECTION</th>
+            <th>SOURCE</th>
+            <th>TIME</th>
+            <th>ACTIONS</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows
+            .map((test) => {
+              const status = normalizeStatus(test.status);
+              const elapsed = elapsedSeconds(test);
+              const prog = { ...computeTestProgress(test, lastElapsedCache[test.name] || 0), elapsed };
+              const timeLabel = formatProgressTime(prog, status);
+              const logHref = testLogHref(test["test-id"], import.meta.env.BASE_URL);
+              const dotClass =
+                status === "pass"
+                  ? "is-low"
+                  : status === "fail"
+                    ? "is-high"
+                    : status === "running"
+                      ? prog.overtime
+                        ? "is-high is-pulsing"
+                        : "is-low is-pulsing"
+                      : status === "skip"
+                        ? "is-med"
+                        : "is-idle";
+              const statusColor =
+                status === "pass"
+                  ? "c-ok"
+                  : status === "running"
+                    ? prog.overtime
+                      ? "c-err"
+                      : "c-ok"
+                    : status === "fail"
+                      ? "c-err"
+                      : status === "skip"
+                        ? "c-warn"
+                        : "c-dim";
+              const rowClass = [
+                "is-clickable",
+                "test-progress-row",
+                status === "running" ? "is-running-row" : "",
+                status === "fail" ? "is-fail-row" : "",
+                prog.overtime ? "is-overtime" : "",
+                test["test-id"] && test["test-id"] === selectedTestId ? "is-selected" : "",
+              ]
+                .filter(Boolean)
+                .join(" ");
+              const sec = classifyTestSection(test);
+              return `
+                <tr class="${rowClass}" style="--row-progress:${prog.percent.toFixed(1)}%" data-status="${status}" data-testid="test-row" data-test-name="${escapeHtml(test.name)}" data-test-id="${escapeHtml(test["test-id"] || "")}">
+                  <td class="${statusColor} c-strong"><span class="tbl-dot ${dotClass}"></span>${escapeHtml(statusLabel(test.status).toUpperCase())}</td>
+                  <td><span class="c-strong">${escapeHtml(test.title)}</span> <span class="c-dim">${escapeHtml(test.name)}</span></td>
+                  <td class="c-dim">${escapeHtml(sec)}</td>
+                  <td class="c-cf">${escapeHtml(test.source || "—")}</td>
+                  <td class="c-dim"><time>${timeLabel}</time></td>
+                  <td>
+                    <span class="row-actions">
+                      <button type="button" class="row-btn" data-run-single="${escapeHtml(test.name)}" data-testid="run-test-${escapeHtml(test.name)}" ${busy ? "disabled" : ""}>run</button>
+                      ${logHref ? `<a class="row-link" data-testid="test-log-link" href="${escapeHtml(logHref)}" target="_blank" rel="noreferrer">log ↗</a>` : '<span class="c-dim">—</span>'}
+                    </span>
+                  </td>
+                </tr>
+              `;
+            })
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+
+  const scroller = slot.querySelector<HTMLElement>(".earth-table-scroll");
+  if (scroller) scroller.scrollTop = prevScroll;
+
+  slot.querySelectorAll<HTMLButtonElement>("[data-run-single]").forEach((btn) => {
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const name = btn.dataset.runSingle || "";
+      if (!name) return;
+      const forceBrowser = name.startsWith("TestBrowser") || useBrowser;
+      startFilteredTests(`^${name}$`, forceBrowser, false).catch(showError);
+    });
+  });
+
+  slot.querySelectorAll<HTMLTableRowElement>("tr[data-test-name]").forEach((tr) => {
+    tr.addEventListener("click", () => {
+      const id = tr.dataset.testId || "";
+      if (id) {
+        selectedTestId = id;
+        void fetchSelectedLog(id);
+      }
+    });
+  });
+}
+
+function renderLogPaneBody(slot: HTMLElement): void {
+  if (!selectedLogRun) {
+    slot.innerHTML = `<div class="browser-placeholder"><p>Click any test row in <strong>db:tests</strong> to inspect its structured timestamp / level / file:line log here.</p></div>`;
+    return;
+  }
+  slot.innerHTML = `
+    <div class="earth-table-scroll">
+      <pre class="log-output" data-testid="pane-log-output">${renderFormattedLog(selectedLogRun.log)}</pre>
+    </div>
   `;
 }
 
-function renderTest(test: TestRow, busy: boolean): string {
-  const status = normalizeStatus(test.status);
-  const elapsed = elapsedSeconds(test).toFixed(2);
-  const logHref = testLogHref(test["test-id"], import.meta.env.BASE_URL);
-  return `
-    <article class="test-card ${status}" data-status="${status}" data-testid="test-row" data-test-name="${escapeHtml(test.name)}">
-      <section class="test-copy">
-        <h3>${escapeHtml(test.title)}</h3>
-        <div class="test-meta">
-          <code>${escapeHtml(test.name)}</code>
-          ${test.source ? `<span class="test-src">${escapeHtml(test.source)}</span>` : ""}
-        </div>
-      </section>
-      <section class="result" aria-label="${escapeHtml(test.title)} result">
-        <strong>${statusLabel(test.status)}</strong>
-        <time>${elapsed}s</time>
-        <button class="run-one-btn" type="button" data-run-single="${escapeHtml(test.name)}" data-testid="run-test-${escapeHtml(test.name)}" ${busy ? "disabled" : ""} title="Run only ${escapeHtml(test.name)}">
-          Run
+function renderBottomBar(
+  bar: HTMLElement,
+  runningTest: TestRow | undefined,
+): void {
+  const passed = tests.filter((t) => normalizeStatus(t.status) === "pass").length;
+  const failed = tests.filter((t) => normalizeStatus(t.status) === "fail").length;
+  const stage = pipelineStatus.stage || "idle";
+  const busy = starting || Boolean(runningTest) || stage === "deploying" || stage === "verifying_prod";
+
+  const stepClass = (step: "edit" | "testing" | "staging_ready" | "deploying" | "verifying_prod"): string => {
+    const order: Record<string, number> = {
+      idle: 0,
+      edit: 1,
+      testing: 2,
+      failed: 2,
+      passed: 3,
+      staging_ready: 3,
+      deploying: 4,
+      verifying_prod: 5,
+      deployed: 6,
+    };
+    const rank = order[stage] ?? 0;
+    const target = { edit: 1, testing: 2, staging_ready: 3, deploying: 4, verifying_prod: 5 }[step];
+    if (stage === "failed" && step === "testing") return "failed";
+    if (stage === step) return "active";
+    if (rank > target) return "done";
+    return "";
+  };
+
+  const bannerCls =
+    stage === "deployed" || stage === "staging_ready" || stage === "testing" || stage === "edit" || stage === "verifying_prod"
+      ? "is-live"
+      : stage === "deploying"
+        ? "is-warn"
+        : stage === "failed"
+          ? "is-err"
+          : "";
+
+  const deployInfo = stagingEnv.deploy;
+  const deployReady = Boolean(deployInfo?.ready) && !busy;
+  const gatePillClass =
+    failed > 0
+      ? "is-err"
+      : deployReady
+        ? "is-live"
+        : deployInfo?.has_changes && !deployInfo.tested_matches_current
+          ? "is-warn"
+          : "";
+  const gatePillText =
+    failed > 0
+      ? `GATE BLOCKED (${failed} fail)`
+      : deployReady
+        ? `READY (${passed}/${tests.length})`
+        : deployInfo && !deployInfo.has_changes
+          ? "UP TO DATE"
+          : deployInfo?.has_changes && !deployInfo.tested_matches_current
+            ? "NEW CHANGES · RUN TESTS"
+            : passed > 0
+              ? `PASSED ${passed}/${tests.length}`
+              : "GATE PENDING";
+  const deployTitle = deployReady
+    ? "Deploy verified changes to https://dialtone.earth/ and release auto-update channel"
+    : deployInfo?.reason || "Deploy unlocks only when new changes pass all tests on the test network";
+
+  bar.innerHTML = `
+    ${errorMessage ? `<div class="error-banner" role="alert">${escapeHtml(errorMessage)}</div>` : ""}
+    <div class="tbl-banner-bar ${bannerCls}" data-testid="pipeline-bar">
+      <div class="pipe-steps">
+        <span class="pipe-step ${stepClass("edit")}">1.EDIT</span>
+        <span>→</span>
+        <span class="pipe-step ${stepClass("testing")}">2.STAGING TESTS</span>
+        <span>→</span>
+        <span class="pipe-step ${stepClass("staging_ready")}">3.READY</span>
+        <span>→</span>
+        <span class="pipe-step ${stepClass("deploying")}">4.DEPLOY</span>
+        <span>→</span>
+        <span class="pipe-step ${stepClass("verifying_prod")}">5.PROD VERIFY</span>
+        ${pipelineStatus.changed ? `<span class="c-cf">${escapeHtml(pipelineStatus.changed)}</span>` : ""}
+        <span>${escapeHtml(pipelineStatus.message || "Ready — edits stay on staging until you deploy to dialtone.earth")}</span>
+      </div>
+      <div>
+        ${
+          stage === "deployed"
+            ? `<a class="c-ok" href="${escapeHtml(pipelineStatus.deploy_url || "https://dialtone.earth/")}" target="_blank" rel="noreferrer">dialtone.earth ↗</a>`
+            : ""
+        }
+      </div>
+    </div>
+    <div class="earth-table-bar">
+      <div class="earth-bar-left">
+        <span class="tbl-brand">TEST.DIALTONE.EARTH</span>
+        <span class="tbl-pill ${cdpStatus.connected ? "is-live" : "is-warn"}" data-testid="cdp-status">
+          ${cdpStatus.connected ? `CDP :${cdpStatus.port}` : "CDP OFF"}
+        </span>
+        <span class="tbl-pill ${stagingEnv.preview?.ok ? "is-live" : "is-warn"}" data-testid="test-mesh-pill" title="Isolated Dialtone Iroh mesh test channel (${escapeHtml(stagingEnv.preview?.preview_url || "http://127.0.0.1:5175/")})">
+          ${
+            stagingEnv.preview?.ok
+              ? `TEST MESH ${(stagingEnv.preview.nodes || []).filter((n) => n.reachable).length}/${(stagingEnv.preview.nodes || []).length}`
+              : "TEST MESH OFF"
+          }
+        </span>
+        <span class="tbl-pill ${gatePillClass}" data-testid="staging-gate-pill" title="${escapeHtml(deployTitle)}">
+          ${escapeHtml(gatePillText)}
+        </span>
+      </div>
+      <div class="earth-bar-right">
+        <button type="button" class="tbl-chip" data-testid="add-browser-btn" title="Open an additional projected Chrome browser tab">+ browser</button>
+        <button type="button" class="tbl-chip" data-testid="run-browser-suite" ${busy ? "disabled" : ""}>run browser</button>
+        <button type="button" class="tbl-chip" data-testid="run-prod-suite" ${busy ? "disabled" : ""} title="Run the full live production verification suite on https://metal.dialtone.earth & https://dialtone.earth">test live</button>
+        <button type="button" class="tbl-chip" data-testid="start-tests" ${busy ? "disabled" : ""}>
+          ${starting ? "starting…" : stage === "deploying" ? "deploying…" : stage === "verifying_prod" ? "verifying…" : runningTest ? "running…" : "start tests"}
         </button>
-        ${logHref ? `<a data-testid="test-log-link" href="${escapeHtml(logHref)}" target="_blank" rel="noreferrer" aria-label="Log for ${escapeHtml(test.title)}">Log ↗</a>` : '<span class="no-log" title="Log available when this test starts">—</span>'}
-      </section>
-    </article>
+        <button type="button" class="tbl-chip is-deploy" data-testid="deploy-live" ${deployReady ? "" : "disabled"} title="${escapeHtml(deployTitle)}">
+          ${stage === "deploying" ? "deploying…" : stage === "verifying_prod" ? "verifying prod…" : "deploy"}
+        </button>
+        <button type="button" class="tbl-chip ${menuOpen ? "is-active" : ""}" data-testid="open-menu">menu</button>
+      </div>
+    </div>
   `;
+
+  const startButton = bar.querySelector<HTMLButtonElement>("[data-testid='start-tests']");
+  startButton?.addEventListener("click", () => {
+    startAllTests().catch(showError);
+  });
+
+  bar.querySelector<HTMLButtonElement>("[data-testid='run-prod-suite']")?.addEventListener("click", () => {
+    startProdTests().catch(showError);
+  });
+
+  bar.querySelector<HTMLButtonElement>("[data-testid='deploy-live']")?.addEventListener("click", () => {
+    promoteToLive().catch(showError);
+  });
+
+  bar.querySelector<HTMLButtonElement>("[data-testid='run-browser-suite']")?.addEventListener("click", () => {
+    startFilteredTests("^TestBrowser", true, deployOnPass).catch(showError);
+  });
+
+  bar.querySelector<HTMLButtonElement>("[data-testid='add-browser-btn']")?.addEventListener("click", () => {
+    openExtraProjectedBrowser("http://127.0.0.1:5175/").catch(showError);
+  });
+
+  bar.querySelector<HTMLButtonElement>("[data-testid='open-menu']")?.addEventListener("click", () => {
+    menuOpen = !menuOpen;
+    renderWorkspace();
+  });
+}
+
+function renderMenuOverlay(menuEl: HTMLElement, catalog: WorkspaceContent[], assigned: WorkspaceContent[]): void {
+  const effectiveLayout = resolveEffectiveLayout();
+  const wireframeCells = (layout: SplitLayout): string => {
+    const count = paneCountFor(layout);
+    return Array.from({ length: count }, () => "<i></i>").join("");
+  };
+
+  menuEl.innerHTML = `
+    <div class="cfg-frame">
+      <div class="cfg-header">
+        <div class="pane-head-left">
+          <span class="tbl-brand">DIALTONE.EARTH // MENU & WINDOW MANAGER</span>
+          <span class="tbl-pill ${cdpStatus.connected ? "is-live" : ""}">CDP :${cdpStatus.port} (${cdpStatus.targets?.length ?? 0} browser tab(s))</span>
+        </div>
+        <div class="pane-head-right">
+          <button type="button" class="tbl-chip" data-toggle-theme>theme: ${theme}</button>
+          <button type="button" class="tbl-chip is-active" data-testid="menu-done">done</button>
+        </div>
+      </div>
+
+      <div class="cfg-body">
+        <section class="cfg-section">
+          <div class="cfg-section-head">
+            <span class="cfg-section-title">1. Tiling Window Layout</span>
+            <span class="c-dim">Matches dialtone.earth split layouts</span>
+          </div>
+          <div class="cfg-layout-row">
+            <button type="button" class="cfg-layout-card ${layoutPref === "auto" ? "is-active" : ""}" data-set-layout="auto" data-testid="layout-auto">
+              <span class="cfg-wireframe" data-layout="${effectiveLayout}">${wireframeCells(effectiveLayout)}</span>
+              <span class="cfg-layout-label">auto</span>
+            </button>
+            ${SPLIT_LAYOUTS.map(
+              (l) => `
+              <button type="button" class="cfg-layout-card ${layoutPref === l.id ? "is-active" : ""}" data-set-layout="${l.id}" data-testid="layout-${l.id}" title="${escapeHtml(l.title)}">
+                <span class="cfg-wireframe" data-layout="${l.id}">${wireframeCells(l.id)}</span>
+                <span class="cfg-layout-label">${l.label}</span>
+              </button>
+            `,
+            ).join("")}
+          </div>
+        </section>
+
+        <section class="cfg-section">
+          <div class="cfg-section-head">
+            <span class="cfg-section-title">2. Active Pane Assignments (click a pane slot, then assign a table or projected browser below)</span>
+          </div>
+          <div class="cfg-pane-map" data-layout="${effectiveLayout}">
+            ${assigned
+              .map(
+                (item, idx) => `
+              <button type="button" class="cfg-pane-slot ${idx === focusedPane ? "is-active" : ""}" data-select-pane="${idx}" data-testid="cfg-pane-${idx}">
+                <span class="cfg-slot-top">PANE #${idx + 1} ${idx === focusedPane ? "· SELECTED" : ""}</span>
+                <span class="cfg-slot-name">${escapeHtml(item.label)}</span>
+                <span class="cfg-slot-sub">${escapeHtml(item.url || item.sourceTag)}</span>
+              </button>
+            `,
+              )
+              .join("")}
+          </div>
+        </section>
+
+        <section class="cfg-section">
+          <div class="cfg-section-head">
+            <span class="cfg-section-title">3. Available Views & Projected Chrome Browsers</span>
+          </div>
+          <div class="cfg-table-wrap">
+            <table class="earth-table">
+              <thead>
+                <tr>
+                  <th>VIEW / BROWSER</th>
+                  <th>TYPE</th>
+                  <th>TARGET</th>
+                  <th>ASSIGN TO PANE #${focusedPane + 1}</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${catalog
+                  .map(
+                    (item) => `
+                  <tr>
+                    <td class="c-strong">${escapeHtml(item.label)}</td>
+                    <td><span class="pane-source ${item.sourceClass}">${escapeHtml(item.sourceTag)}</span></td>
+                    <td class="c-dim">${escapeHtml(item.url || item.id)}</td>
+                    <td>
+                      <button type="button" class="row-btn" data-assign-content="${escapeHtml(item.id)}">
+                        ${assigned[focusedPane]?.id === item.id ? "assigned ✓" : `assign → #${focusedPane + 1}`}
+                      </button>
+                    </td>
+                  </tr>
+                `,
+                  )
+                  .join("")}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="cfg-section">
+          <div class="cfg-section-head">
+            <span class="cfg-section-title">4. Add Another Projected Browser (Multi-Browser CDP)</span>
+          </div>
+          <div class="cfg-controls-row">
+            <input type="url" class="cfg-url-input" data-new-browser-url value="${escapeHtml(newBrowserUrlDraft)}" placeholder="https://dialtone.earth/" />
+            <button type="button" class="tbl-chip is-primary" data-spawn-browser-url>open projected browser</button>
+            <button type="button" class="tbl-chip" data-quick-url="https://dialtone.earth/">+ dialtone.earth</button>
+            <button type="button" class="tbl-chip" data-quick-url="https://metal.dialtone.earth/">+ metal.dialtone.earth</button>
+          </div>
+        </section>
+
+        <section class="cfg-section">
+          <div class="cfg-section-head">
+            <span class="cfg-section-title">5. Test Runner & Auto-Deploy Options</span>
+          </div>
+          <div class="cfg-controls-row">
+            <label class="cfg-toggle">
+              <input type="checkbox" data-testid="toggle-browser" ${useBrowser ? "checked" : ""} />
+              <span>Live Browser (CDP)</span>
+            </label>
+            <label class="cfg-toggle">
+              <input type="checkbox" data-testid="toggle-keep-signed-in" ${keepSignedIn ? "checked" : ""} />
+              <span>Keep signed in</span>
+            </label>
+            <label class="cfg-toggle">
+              <input type="checkbox" data-testid="toggle-deploy-on-pass" ${deployOnPass ? "checked" : ""} />
+              <span>Auto-deploy to dialtone.earth on pass</span>
+            </label>
+            ${
+              cdpStatus.connected
+                ? `<button type="button" class="tbl-chip" data-testid="close-browser">close persistent chrome</button>`
+                : `<button type="button" class="tbl-chip is-primary" data-testid="launch-browser">launch persistent chrome</button>`
+            }
+            <a class="tbl-chip" href="/logs">logs</a>
+            <a class="tbl-chip" href="/screenshots/">screenshots</a>
+            ${isRemoteHost ? `<a class="tbl-chip" href="/code">code</a>` : ""}
+            ${isRemoteHost ? `<a class="tbl-chip" data-testid="remote-sign-out" href="/auth/logout">sign out</a>` : ""}
+          </div>
+        </section>
+      </div>
+    </div>
+  `;
+
+  menuEl.querySelector<HTMLButtonElement>("[data-testid='menu-done']")?.addEventListener("click", () => {
+    menuOpen = false;
+    renderWorkspace();
+  });
+
+  menuEl.querySelector<HTMLButtonElement>("[data-toggle-theme]")?.addEventListener("click", () => {
+    theme = theme === "dark" ? "light" : "dark";
+    saveWorkspacePrefs();
+    renderWorkspace();
+  });
+
+  menuEl.querySelectorAll<HTMLButtonElement>("[data-set-layout]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const next = (btn.dataset.setLayout || "auto") as LayoutPref;
+      layoutPref = next;
+      maximizedPane = null;
+      saveWorkspacePrefs();
+      renderWorkspace();
+    });
+  });
+
+  menuEl.querySelectorAll<HTMLButtonElement>("[data-select-pane]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      focusedPane = Number(btn.dataset.selectPane || 0);
+      renderWorkspace();
+    });
+  });
+
+  menuEl.querySelectorAll<HTMLButtonElement>("[data-assign-content]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const id = btn.dataset.assignContent || "";
+      if (!id) return;
+      paneContents[focusedPane] = id;
+      saveWorkspacePrefs();
+      renderWorkspace();
+    });
+  });
+
+  const urlInput = menuEl.querySelector<HTMLInputElement>("[data-new-browser-url]");
+  urlInput?.addEventListener("input", () => {
+    newBrowserUrlDraft = urlInput.value;
+  });
+
+  menuEl.querySelector<HTMLButtonElement>("[data-spawn-browser-url]")?.addEventListener("click", () => {
+    openExtraProjectedBrowser(newBrowserUrlDraft || "https://dialtone.earth/").catch(showError);
+  });
+
+  menuEl.querySelectorAll<HTMLButtonElement>("[data-quick-url]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const u = btn.dataset.quickUrl || "https://dialtone.earth/";
+      openExtraProjectedBrowser(u).catch(showError);
+    });
+  });
+
+  const browserToggle = menuEl.querySelector<HTMLInputElement>("[data-testid='toggle-browser']");
+  browserToggle?.addEventListener("change", () => {
+    useBrowser = Boolean(browserToggle.checked);
+  });
+
+  const keepSignedInToggle = menuEl.querySelector<HTMLInputElement>("[data-testid='toggle-keep-signed-in']");
+  keepSignedInToggle?.addEventListener("change", () => {
+    keepSignedIn = Boolean(keepSignedInToggle.checked);
+  });
+
+  const deployToggle = menuEl.querySelector<HTMLInputElement>("[data-testid='toggle-deploy-on-pass']");
+  deployToggle?.addEventListener("change", () => {
+    deployOnPass = Boolean(deployToggle.checked);
+  });
+
+  menuEl.querySelector<HTMLButtonElement>("[data-testid='close-browser']")?.addEventListener("click", () => {
+    closeBrowser().catch(showError);
+  });
+
+  menuEl.querySelector<HTMLButtonElement>("[data-testid='launch-browser']")?.addEventListener("click", () => {
+    launchBrowser().catch(showError);
+  });
+}
+
+async function openExtraProjectedBrowser(targetUrl: string): Promise<void> {
+  if (!cdpStatus.connected) {
+    await launchBrowser();
+  }
+  const resp = await fetch(`/api/cdp/new-tab?url=${encodeURIComponent(targetUrl)}`, { method: "POST" });
+  const payload = (await resp.json()) as { targetId?: string; error?: string };
+  if (!resp.ok) {
+    throw new Error(payload.error || `Could not open projected browser: HTTP ${resp.status}`);
+  }
+  await refreshCdpStatus();
+  if (payload.targetId) {
+    // Automatically expand to 1|2 layout if currently in 1|1 so user immediately sees multiple projected browsers side-by-side!
+    const eff = resolveEffectiveLayout();
+    if (eff === "1" || eff === "1|1" || eff === "1/1") {
+      layoutPref = "1|2";
+      maximizedPane = null;
+      paneContents[2] = `browser:${payload.targetId}`;
+    } else {
+      paneContents[focusedPane] = `browser:${payload.targetId}`;
+    }
+    saveWorkspacePrefs();
+    menuOpen = false;
+    renderWorkspace();
+  }
+}
+
+async function fetchSelectedLog(testId: string): Promise<void> {
+  if (!testLogHref(testId)) return;
+  try {
+    const resp = await fetch(`/api/test-runs/${encodeURIComponent(testId)}`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!resp.ok) return;
+    const data = (await resp.json()) as { run?: TestRun };
+    if (data.run && JSON.stringify(data.run) !== JSON.stringify(selectedLogRun)) {
+      selectedLogRun = data.run;
+      renderWorkspace();
+    }
+  } catch {
+    // ignore transient poll errors
+  }
 }
 
 async function refreshTests(): Promise<void> {
-  const response = await fetch("/api/tests", { cache: "no-store" });
+  const response = await fetch("/api/tests", { cache: "no-store", signal: AbortSignal.timeout(4000) });
   if (!response.ok) {
     throw new Error(`Could not load tests: HTTP ${response.status}`);
   }
@@ -325,23 +1103,34 @@ async function refreshTests(): Promise<void> {
   }
   const changed = !loaded || JSON.stringify(tests) !== JSON.stringify(payload.tests) || errorMessage !== "";
   tests = payload.tests;
+  syncLastElapsedCache(tests);
   loaded = true;
   errorMessage = "";
-  if (changed) render();
+  if (changed) renderWorkspace();
+}
+
+async function refreshPipeline(): Promise<void> {
+  try {
+    const response = await fetch("/api/pipeline", { cache: "no-store", signal: AbortSignal.timeout(4000) });
+    if (!response.ok) return;
+    const next = (await response.json()) as PipelineStatus;
+    if (JSON.stringify(next) !== JSON.stringify(pipelineStatus)) {
+      pipelineStatus = next;
+      renderWorkspace();
+    }
+  } catch {
+    // ignore transient poll error
+  }
 }
 
 async function refreshCdpStatus(): Promise<void> {
   try {
-    const response = await fetch("/api/cdp/status", { cache: "no-store" });
+    const response = await fetch("/api/cdp/status", { cache: "no-store", signal: AbortSignal.timeout(4000) });
     if (!response.ok) return;
     const next = (await response.json()) as CdpStatus;
-    if (
-      next.connected !== cdpStatus.connected ||
-      next.port !== cdpStatus.port ||
-      next.app_url !== cdpStatus.app_url
-    ) {
+    if (JSON.stringify(next) !== JSON.stringify(cdpStatus)) {
       cdpStatus = next;
-      render();
+      renderWorkspace();
     }
   } catch {
     // ignore transient poll errors
@@ -349,16 +1138,45 @@ async function refreshCdpStatus(): Promise<void> {
 }
 
 async function startAllTests(): Promise<void> {
-  await startFilteredTests("", useBrowser);
+  await startFilteredTests("", useBrowser, deployOnPass);
 }
 
-async function startFilteredTests(filter: string, withBrowser: boolean): Promise<void> {
+async function startProdTests(): Promise<void> {
   starting = true;
   errorMessage = "";
-  render();
+  renderWorkspace();
+  const response = await fetch("/api/tests/run?prod=1", { method: "POST" });
+  const payload = (await response.json()) as { error?: string };
+  starting = false;
+  if (!response.ok) {
+    throw new Error(payload.error || `Could not start live production suite: HTTP ${response.status}`);
+  }
+  await refreshTests();
+  void refreshPipeline();
+  void refreshCdpStatus();
+}
+
+async function promoteToLive(): Promise<void> {
+  starting = true;
+  errorMessage = "";
+  renderWorkspace();
+  const response = await fetch("/api/promote", { method: "POST" });
+  const payload = (await response.json()) as { error?: string };
+  starting = false;
+  if (!response.ok) {
+    throw new Error(payload.error || `Staging promotion blocked: HTTP ${response.status}`);
+  }
+  await refreshPipeline();
+}
+
+async function startFilteredTests(filter: string, withBrowser: boolean, withDeploy: boolean): Promise<void> {
+  starting = true;
+  errorMessage = "";
+  renderWorkspace();
   const params = new URLSearchParams();
   if (withBrowser) params.set("browser", "1");
   if (withBrowser && keepSignedIn) params.set("keepSignedIn", "1");
+  if (withDeploy) params.set("deployOnPass", "1");
   if (filter) params.set("filter", filter);
   const query = params.toString();
   const response = await fetch(`/api/tests/run${query ? `?${query}` : ""}`, { method: "POST" });
@@ -368,6 +1186,7 @@ async function startFilteredTests(filter: string, withBrowser: boolean): Promise
     throw new Error(payload.error || `Could not start tests: HTTP ${response.status}`);
   }
   await refreshTests();
+  void refreshPipeline();
   void refreshCdpStatus();
 }
 
@@ -392,7 +1211,7 @@ async function closeBrowser(): Promise<void> {
 function showError(error: unknown): void {
   starting = false;
   errorMessage = error instanceof Error ? error.message : String(error);
-  render();
+  renderWorkspace();
 }
 
 function escapeHtml(value: string): string {
@@ -442,6 +1261,7 @@ function renderFormattedLog(rawLog: string): string {
 }
 
 async function refreshLogPage(testId: string): Promise<void> {
+  applyTheme();
   const response = await fetch(`/api/test-runs/${encodeURIComponent(testId)}`, { cache: "no-store" });
   if (!response.ok) throw new Error(response.status === 404 ? "This test run could not be found." : `Could not load log: HTTP ${response.status}`);
   const { run } = (await response.json()) as { run: TestRun };
@@ -453,56 +1273,245 @@ async function refreshLogPage(testId: string): Promise<void> {
   }
   renderedRun = serialized;
   app.innerHTML = `
-    <main class="log-page">
-      <header>
-        <p><a href="${import.meta.env.BASE_URL}">← All tests</a></p>
-        <p class="eyebrow">Dialtone Earth / test run</p>
-        <h1>${escapeHtml(run.title)}</h1>
-        <dl class="run-details">${runDetails(run)}</dl>
-        <h2>Rerun this test</h2>
-        <pre class="command" data-testid="test-run-command"><code>${escapeHtml(run.command)}</code></pre>
-        <a href="/api/test-runs/${encodeURIComponent(testId)}/log" target="_blank" rel="noreferrer">Raw log</a>
-      </header>
-      <h2>Output (timestamp · level · file:line)</h2>
-      <pre class="log-output" data-testid="test-log-output" aria-label="Test run output">${renderFormattedLog(run.log)}</pre>
-    </main>`;
+    <div class="log-page-wrap">
+      <main class="log-page">
+        <header>
+          <p><a class="c-cf" href="${import.meta.env.BASE_URL}">← All tests</a></p>
+          <p class="c-dim">DIALTONE.EARTH / TEST RUN</p>
+          <h1>${escapeHtml(run.title)}</h1>
+          <dl class="run-details">${runDetails(run)}</dl>
+          <h2>Rerun this test</h2>
+          <pre class="command" data-testid="test-run-command"><code>${escapeHtml(run.command)}</code></pre>
+          <p><a class="c-cf" href="/api/test-runs/${encodeURIComponent(testId)}/log" target="_blank" rel="noreferrer">Raw log ↗</a></p>
+        </header>
+        <h2>Output (timestamp · level · file:line)</h2>
+        <pre class="log-output" data-testid="test-log-output" aria-label="Test run output">${renderFormattedLog(run.log)}</pre>
+      </main>
+    </div>`;
+}
+
+async function refreshStagingEnv(): Promise<void> {
+  try {
+    const response = await fetch("/api/staging/env", { cache: "no-store", signal: AbortSignal.timeout(6000) });
+    if (!response.ok) return;
+    const next = (await response.json()) as StagingEnvStatus;
+    if (JSON.stringify(next) !== JSON.stringify(stagingEnv)) {
+      stagingEnv = next;
+      renderWorkspace();
+    }
+  } catch {
+    // ignore transient poll errors
+  }
+}
+
+async function refreshLogsIndex(): Promise<void> {
+  applyTheme();
+  const response = await fetch("/api/tests", { cache: "no-store", signal: AbortSignal.timeout(4000) });
+  if (!response.ok) throw new Error(`Could not load test logs: HTTP ${response.status}`);
+  const payload = (await response.json()) as { tests?: TestRow[] };
+  if (!Array.isArray(payload.tests)) throw new Error("Malformed /api/tests payload");
+  const serialized = JSON.stringify(payload.tests);
+  if (renderedRun === serialized) return;
+  renderedRun = serialized;
+
+  const passed = payload.tests.filter((t) => normalizeStatus(t.status) === "pass").length;
+  const failed = payload.tests.filter((t) => normalizeStatus(t.status) === "fail").length;
+  const rowsHtml = payload.tests
+    .map((t) => {
+      const st = normalizeStatus(t.status);
+      const href = testLogHref(t["test-id"]);
+      const rawHref = href ? `/api/test-runs/${encodeURIComponent(t["test-id"] || "")}/log` : "";
+      return `
+        <tr>
+          <td><span class="${st === "pass" ? "c-ok" : st === "fail" ? "c-err" : "c-dim"}">${escapeHtml(statusLabel(t.status))}</span></td>
+          <td><strong>${escapeHtml(t.title)}</strong> <span class="c-dim">${escapeHtml(t.name)}</span></td>
+          <td class="c-dim">${escapeHtml(t.section || "")}</td>
+          <td class="c-dim">${escapeHtml(t.source || "—")}</td>
+          <td>${elapsedSeconds(t).toFixed(2)}s</td>
+          <td>${
+            href
+              ? `<a class="c-cf" href="${escapeHtml(href)}">log ↗</a> · <a class="c-dim" href="${escapeHtml(rawHref)}" target="_blank" rel="noreferrer">raw ↗</a>`
+              : `<span class="c-dim">—</span>`
+          }</td>
+        </tr>`;
+    })
+    .join("");
+
+  app.innerHTML = `
+    <div class="log-page-wrap">
+      <main class="log-page">
+        <header>
+          <p>
+            <a class="c-cf" href="${import.meta.env.BASE_URL}">← Test dashboard</a>
+            ${isRemoteHost ? ` · <a class="c-cf" href="/code">code ↗</a> · <a class="c-dim" href="/auth/logout">sign out</a>` : ""}
+          </p>
+          <p class="c-dim">DIALTONE.EARTH / IMMUTABLE TEST LOGS</p>
+          <h1>Test Runs (${passed}/${payload.tests.length} pass${failed > 0 ? ` · ${failed} fail` : ""})</h1>
+        </header>
+        <div class="earth-table-scroll">
+          <table class="earth-table">
+            <thead>
+              <tr><th>STATUS</th><th>TEST</th><th>SECTION</th><th>SOURCE</th><th>TIME</th><th>LOGS</th></tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+        </div>
+      </main>
+    </div>`;
 }
 
 if (location.pathname.replace(/\/$/, "").endsWith("/logs")) {
-  const testId = new URLSearchParams(location.search).get("test-id") || "";
-  if (!testLogHref(testId)) {
-    app.innerHTML = `<main><a href="${import.meta.env.BASE_URL}">← All tests</a><p role="alert">A valid test-id is required.</p></main>`;
+  const params = new URLSearchParams(location.search);
+  const hasTestIdParam = params.has("test-id");
+  const testId = params.get("test-id") || "";
+  if (hasTestIdParam && !testLogHref(testId)) {
+    app.innerHTML = `<div class="log-page-wrap"><main class="log-page"><a class="c-cf" href="${import.meta.env.BASE_URL}">← All tests</a><p role="alert">A valid test-id is required.</p></main></div>`;
+  } else if (!hasTestIdParam) {
+    app.innerHTML = `<div class="log-page-wrap"><main class="log-page"><p>Loading test logs…</p></main></div>`;
+    let logsIndexInFlight = false;
+    const refreshIndex = () => {
+      if (logsIndexInFlight || document.visibilityState === "hidden") return;
+      logsIndexInFlight = true;
+      refreshLogsIndex()
+        .catch((error: unknown) => {
+          renderedRun = "";
+          app.innerHTML = `<div class="log-page-wrap"><main class="log-page"><a class="c-cf" href="${import.meta.env.BASE_URL}">← All tests</a><p role="alert">${escapeHtml(error instanceof Error ? error.message : String(error))}</p></main></div>`;
+        })
+        .finally(() => {
+          logsIndexInFlight = false;
+        });
+    };
+    refreshIndex();
+    setInterval(refreshIndex, 1500);
   } else {
-    app.innerHTML = "<main><p>Loading test run…</p></main>";
-    const refresh = () =>
-      refreshLogPage(testId).catch((error: unknown) => {
-        renderedRun = "";
-        app.innerHTML = `<main><a href="${import.meta.env.BASE_URL}">← All tests</a><p role="alert">${escapeHtml(error instanceof Error ? error.message : String(error))}</p></main>`;
-      });
-    void refresh();
-    setInterval(refresh, 500);
+    app.innerHTML = `<div class="log-page-wrap"><main class="log-page"><p>Loading test run…</p></main></div>`;
+    let logPageInFlight = false;
+    const refresh = () => {
+      if (logPageInFlight) return;
+      logPageInFlight = true;
+      refreshLogPage(testId)
+        .catch((error: unknown) => {
+          renderedRun = "";
+          app.innerHTML = `<div class="log-page-wrap"><main class="log-page"><a class="c-cf" href="${import.meta.env.BASE_URL}">← All tests</a><p role="alert">${escapeHtml(error instanceof Error ? error.message : String(error))}</p></main></div>`;
+        })
+        .finally(() => {
+          logPageInFlight = false;
+        });
+    };
+    refresh();
+    setInterval(refresh, 750);
   }
 } else {
-  render();
-  refreshTests().catch(showError);
-  void refreshCdpStatus();
+  renderWorkspace();
+
+  // Sequential, in-flight-guarded pollers so HTTP/1.1 connection slots (shared with
+  // the 2 live MJPEG streams) can never pile up into net::ERR_INSUFFICIENT_RESOURCES.
+  let fastPollInFlight = false;
+  let slowPollInFlight = false;
+  const pollFast = async () => {
+    if (fastPollInFlight) return;
+    fastPollInFlight = true;
+    try {
+      await refreshTests().catch(showError);
+      await refreshPipeline();
+      if (selectedTestId) await fetchSelectedLog(selectedTestId);
+    } finally {
+      fastPollInFlight = false;
+    }
+  };
+  const pollSlow = async () => {
+    if (slowPollInFlight) return;
+    slowPollInFlight = true;
+    try {
+      await refreshCdpStatus();
+      await refreshStagingEnv();
+    } finally {
+      slowPollInFlight = false;
+    }
+  };
+
+  void pollFast();
+  void pollSlow();
   setInterval(() => {
-    refreshTests().catch(showError);
-  }, 500);
+    if (document.visibilityState === "hidden") return;
+    void pollFast();
+  }, 750);
   setInterval(() => {
-    void refreshCdpStatus();
-  }, 1500);
+    if (document.visibilityState === "hidden") return;
+    void pollSlow();
+  }, 2500);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      void pollFast();
+      void pollSlow();
+    }
+  });
   setInterval(() => {
-    const runningTest = tests.find((test) => normalizeStatus(test.status) === "running");
-    if (runningTest) {
-      const row = app.querySelector<HTMLElement>(`[data-test-name="${CSS.escape(runningTest.name)}"]`);
-      const time = row?.querySelector("time");
-      if (time) time.textContent = `${elapsedSeconds(runningTest).toFixed(2)}s`;
-      const activeBadge = app.querySelector<HTMLElement>("[data-testid='viewport-active-test']");
-      if (activeBadge) {
-        activeBadge.textContent = `RUNNING: ${runningTest.title} (${elapsedSeconds(runningTest).toFixed(1)}s)`;
-        activeBadge.classList.add("active");
+    const now = Date.now();
+    for (const runningTest of tests) {
+      if (normalizeStatus(runningTest.status) !== "running") continue;
+      const prog = computeTestProgress(runningTest, lastElapsedCache[runningTest.name] || 0, now);
+      const row = app.querySelector<HTMLElement>(`tr[data-test-name="${CSS.escape(runningTest.name)}"]`);
+      if (!row) continue;
+      row.style.setProperty("--row-progress", `${prog.percent.toFixed(1)}%`);
+      row.classList.toggle("is-overtime", prog.overtime);
+      const time = row.querySelector("time");
+      if (time) time.textContent = formatProgressTime(prog, "running");
+      const statusCell = row.querySelector("td:first-child");
+      if (statusCell) {
+        statusCell.classList.toggle("c-err", prog.overtime);
+        statusCell.classList.toggle("c-ok", !prog.overtime);
+        const dot = statusCell.querySelector(".tbl-dot");
+        if (dot) {
+          dot.classList.toggle("is-high", prog.overtime);
+          dot.classList.toggle("is-low", !prog.overtime);
+        }
       }
     }
   }, 100);
+
+  if (isRemoteHost) {
+    // On https://test.dialtone.earth/ (proxied via Cloudflare Worker), drive live
+    // wide & mobile panes with flicker-free preloaded JPEG frames instead of infinite
+    // MJPEG streams so Cloudflare Edge and mobile browsers never stall.
+    let remoteFramesInFlight = false;
+    const refreshRemoteFrames = async () => {
+      if (remoteFramesInFlight || !cdpStatus.connected || document.visibilityState === "hidden") return;
+      const imgs = Array.from(app.querySelectorAll<HTMLImageElement>("img[data-remote-viewport]"));
+      if (imgs.length === 0) return;
+      remoteFramesInFlight = true;
+      try {
+        await Promise.all(
+          imgs.map(
+            (img) =>
+              new Promise<void>((resolve) => {
+                const vp = img.getAttribute("data-remote-viewport") || "";
+                const tid = img.getAttribute("data-remote-target") || "";
+                const qs = new URLSearchParams({ v: String(streamNonce), t: String(Date.now()) });
+                if (vp) qs.set("viewport", vp);
+                if (tid && vp !== "mobile") qs.set("targetId", tid);
+                const nextUrl = `/api/cdp/frame?${qs.toString()}`;
+                const loader = new Image();
+                const timer = setTimeout(resolve, 4000);
+                loader.onload = () => {
+                  clearTimeout(timer);
+                  if (img.isConnected) img.src = nextUrl;
+                  resolve();
+                };
+                loader.onerror = () => {
+                  clearTimeout(timer);
+                  resolve();
+                };
+                loader.src = nextUrl;
+              }),
+          ),
+        );
+      } finally {
+        remoteFramesInFlight = false;
+      }
+    };
+    setInterval(() => {
+      void refreshRemoteFrames();
+    }, 650);
+  }
 }

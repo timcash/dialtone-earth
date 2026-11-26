@@ -49,12 +49,17 @@ export type OverviewGlobeController = {
   syncQueryLayers: (layers: GlobeQueryLayers) => void;
 };
 
+export type OverviewGlobeOptions = {
+  autoSpin?: boolean;
+};
+
 export async function mountOverviewGlobe(
   container: HTMLElement,
   initialLayers: GlobeQueryLayers,
+  options: OverviewGlobeOptions = {},
 ): Promise<OverviewGlobeController> {
   const landCells = await loadLandCells();
-  const globe = new OverviewGlobe(container, initialLayers, landCells);
+  const globe = new OverviewGlobe(container, initialLayers, landCells, options);
   return {
     dispose: () => globe.dispose(),
     setCameraTarget: (target) => globe.setCameraTarget(target),
@@ -123,12 +128,16 @@ class OverviewGlobe {
   private lastTarget: CameraTarget | null = null;
   private lastLayerSignature = "";
   private networkSlugs: string[] = [];
+  private readonly autoSpin: boolean;
+  private lastFrameMs = 0;
 
   constructor(
     private readonly container: HTMLElement,
     initialLayers: GlobeQueryLayers,
     landCells: string[],
+    options: OverviewGlobeOptions = {},
   ) {
+    this.autoSpin = Boolean(options.autoSpin);
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -172,7 +181,12 @@ class OverviewGlobe {
 
     this.syncQueryLayers(initialLayers);
 
-    this.camera.position.set(0, 0, DEFAULT_CAMERA_DISTANCE);
+    if (this.autoSpin) {
+      this.globe.rotation.set(0.24, -1.65, 0);
+      this.camera.position.set(0, 0, DEFAULT_CAMERA_DISTANCE * 0.92);
+    } else {
+      this.camera.position.set(0, 0, DEFAULT_CAMERA_DISTANCE);
+    }
     this.camera.lookAt(0, 0, 0);
     this.controls.target.set(0, 0, 0);
     this.controls.update();
@@ -572,7 +586,12 @@ class OverviewGlobe {
   private animate = (): void => {
     this.frameId = requestAnimationFrame(this.animate);
     const now = performance.now();
+    const dtSec = this.lastFrameMs > 0 ? Math.min((now - this.lastFrameMs) / 1000, 0.1) : 0;
+    this.lastFrameMs = now;
     this.updateCameraTransition(now);
+    if (this.autoSpin && !this.reducedMotion && !this.userDragging && !this.transitioning) {
+      this.globe.rotation.y += dtSec * 0.085;
+    }
     const timeSec = now / 1000;
     this.geoOverlay?.updatePulse(timeSec);
     if (!this.reducedMotion) {

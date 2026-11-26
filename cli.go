@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -27,9 +28,13 @@ Actions:
   test      Run the Go tests in cli_test.go
   clean     Remove generated local state
   deploy    Build local bundle (deploy/local) or publish live (--live)
-  live      Modify public https://dialtone.earth/ live without redeploying
-  dev       Start the test dashboard without running tests
-  help      Show this help
+  live      Modify public https://dialtone.earth/ live or watch-deploy
+  code      Store, push, pull, and clone git code on Cloudflare R2
+  release   Tag and publish SHA-256-verified releases on Cloudflare R2
+  plugins     List and publish public Dialtone plugins (e.g. dialtone-shell)
+  screenshots Capture annotated test UI screenshots and build stable gallery
+  dev         Start the test dashboard without running tests
+  help        Show this help
 
 Flags:
   auth status [--json]     Report configured and verified auth state
@@ -37,12 +42,27 @@ Flags:
   test --list              Print the selected test names without running them
   test --browser           Start/reconnect persistent CDP Chrome synced with dashboard
   test --keep-signed-in    Leave Chrome signed into LIVE metal after browser tests
+  test --deploy-on-pass    Auto-deploy to https://dialtone.earth/ if all tests pass
+  test --screenshots       Capture annotated test UI screenshots after the test loop
   test --close-browser     Close the persistent CDP Chrome browser and exit
+  screenshots [--publish-live]  Capture annotated screenshots (dry-run by default)
   deploy --live            Build registry/ and deploy live to Cloudflare Workers
-  live <status|set|reset|init-token>  Control public dialtone.earth live (<2s)
+  live <status|set|reset|watch|init-token>  Control or watch-deploy dialtone.earth live
+  code <list|status|push|pull|clone>        Store/sync git bundles directly on Cloudflare R2
+  release <list|tag vX.Y.Z [--build]>       Tag releases & upload SHA-256 binaries to R2
+  plugins <list|info|publish>               Browse/publish public Dialtone plugins (Iroh + R2)
   dev --port <port>        Serve the dashboard on another port
 
-Run an action with "go run . <action>", or with "bin/dialtone-earth <action>" after build.
+How the Cloudflare + Iroh workflow works (zero GitHub, zero Tailscale):
+  code push [--live]                      Pack git bundle + archives to Cloudflare R2 (and deploy live)
+  code pull / code clone <repo> [dir]     Sync or clone a repository directly from dialtone.earth R2
+  release tag v0.6.0 --build --live       Tag HEAD, cross-compile 6 binaries + .sha256 to R2, deploy live
+  plugins list / plugins info <name>      Discover public Dialtone plugins & live iroh-blobs:// tickets
+  plugins publish <name> --from-local     Publish an installed local Dialtone plugin to dialtone.earth
+  live watch                              Watch edits -> run synced CDP browser tests -> deploy on pass
+
+Run "<action> --help" (e.g. "dialtone-earth code help", "live help", "release help", "plugins help")
+for full subcommand flags. Run with "go run . <action>", ".\dialtone-earth.ps1 <action>", or "bin/dialtone-earth <action>".
 `
 
 func Run(args []string, stdout, stderr io.Writer) int {
@@ -73,6 +93,14 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		err = runDeploy(args[1:], stdout, stderr)
 	case "live":
 		err = runLive(args[1:], stdout, stderr)
+	case "code":
+		err = runCode(args[1:], stdout, stderr)
+	case "release":
+		err = runRelease(args[1:], stdout, stderr)
+	case "plugins":
+		err = runPlugins(args[1:], stdout, stderr)
+	case "screenshots":
+		err = runScreenshots(args[1:], stdout, stderr)
 	case "dev":
 		err = runDev(args[1:], stdout, stderr)
 	default:
@@ -181,10 +209,17 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	filter := flags.String("filter", "", "Run only the Go tests matching this regular expression")
 	list := flags.Bool("list", false, "Print the selected test names without running them")
 	browser := flags.Bool("browser", false, "Start or reconnect persistent CDP Chrome synced with the test dashboard")
-	keepSignedIn := flags.Bool("keep-signed-in", false, "Keep the persistent CDP Chrome browser signed into LIVE metal after tests finish")
+	prod := flags.Bool("prod", false, "Run the live production verification suite against https://metal.dialtone.earth/ and https://dialtone.earth/")
+	keepSignedIn := flags.Bool("keep-signed-in", false, "Keep the persistent CDP Chrome browser signed into LIVE session after tests finish")
+	deployOnPass := flags.Bool("deploy-on-pass", false, "Automatically deploy live to https://dialtone.earth/ if all tests pass")
+	triggerFile := flags.String("trigger-file", "", "Optional edited file label shown in the live pipeline banner")
 	closeBrowser := flags.Bool("close-browser", false, "Close the persistent CDP Chrome browser and exit")
 	cdpPort := flags.Int("cdp-port", 9222, "Chrome DevTools Protocol loopback port for --browser")
 	dashboardURL := flags.String("dashboard-url", "http://127.0.0.1:5174/", "Test dashboard URL opened beside the live app in --browser mode")
+	screenshots := flags.Bool("screenshots", false, "Capture annotated test UI screenshots after the test loop (dry-run by default)")
+	noScreenshots := flags.Bool("no-screenshots", false, "Disable automatic post-loop annotated screenshots in --browser mode")
+	screenshotsPublishLive := flags.Bool("screenshots-publish-live", false, "Explicitly upload post-loop screenshots to Cloudflare R2 (default: false, local dry-run)")
+	screenshotsPublishURL := flags.String("screenshots-publish-url", "https://test.dialtone.earth", "Stable-link host URL when --screenshots-publish-live is set")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -202,6 +237,10 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	if *closeBrowser {
 		return runExternal(root, stdout, stderr, "node", cdpScript, "close", "--port", strconv.Itoa(*cdpPort))
 	}
+	if *prod {
+		deployedRec := readDeployedRecord(root)
+		return runTrackedProductionSuite(root, *cdpPort, *dashboardURL, deployedRec.VersionID, deployedRec.DeployedHash, "", false, stdout, stderr)
+	}
 	names, err := listTestNames(root, *filter)
 	if err != nil {
 		return err
@@ -217,6 +256,14 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	}
 	var extraEnv []string
 	if *browser {
+		// Rebuild registry/dist so any live edits from test.dialtone.earth are served by the isolated staging preview (127.0.0.1:5175).
+		regDir := filepath.Join(root, "registry")
+		if dirExists(regDir) {
+			fmt.Fprintln(stdout, "test --browser: rebuilding staging preview (registry/dist) for isolated test channel")
+			if err := runExternal(regDir, stdout, stderr, "pnpm", "run", "build"); err != nil {
+				return fmt.Errorf("staging preview build failed: %w", err)
+			}
+		}
 		if err := ensurePersistentBrowserSession(root, cdpScript, *cdpPort, *dashboardURL, stdout, stderr); err != nil {
 			return err
 		}
@@ -236,11 +283,234 @@ func runTest(args []string, stdout, stderr io.Writer) error {
 	if err := writeTestState(root, &state); err != nil {
 		return err
 	}
-	return runGoTests(root, &state, *filter, extraEnv, stdout)
+	msg := fmt.Sprintf("Running %d test(s)", len(names))
+	if *deployOnPass {
+		msg += " — will auto-deploy to https://dialtone.earth/ on pass"
+	}
+	runHash := computeStagingFingerprint(root)
+	writePipelineState(root, pipelineState{
+		Stage:        "testing",
+		Message:      msg,
+		Changed:      strings.TrimSpace(*triggerFile),
+		TargetOrigin: "http://127.0.0.1:5175",
+		Total:        len(state.Tests),
+	})
+	testErr := runGoTests(root, &state, *filter, extraEnv, stdout)
+	passed, failed, total := countStateTotals(&state)
+	shouldCaptureShots := *screenshots || (*browser && !*noScreenshots)
+	if testErr != nil {
+		writePipelineState(root, pipelineState{
+			Stage:        "failed",
+			Message:      fmt.Sprintf("Tests failed (%d failed) -- deploy blocked", failed),
+			Changed:      strings.TrimSpace(*triggerFile),
+			TargetOrigin: "http://127.0.0.1:5175",
+			Passed:       passed,
+			Failed:       failed,
+			Total:        total,
+		})
+		if shouldCaptureShots {
+			if shotErr := runPostLoopScreenshots(root, *dashboardURL, *filter, *screenshotsPublishLive, *screenshotsPublishURL, false, stdout, stderr); shotErr != nil {
+				fmt.Fprintf(stderr, "screenshots post-loop warning: %v\n", shotErr)
+			}
+		}
+		return testErr
+	}
+	testedHash := ""
+	if strings.TrimSpace(*filter) == "" && allBrowserTestsPassed(&state) {
+		testedHash = runHash
+	}
+	if !*deployOnPass {
+		deployedHash := readDeployedRecord(root).DeployedHash
+		stage := "staging_ready"
+		readyMsg := fmt.Sprintf("Ready (%d/%d passed on test network) -- click deploy to update dialtone.earth", passed, total)
+		if testedHash == "" {
+			readyMsg = fmt.Sprintf("Passed %d/%d -- run full test-network browser suite to unlock deploy", passed, total)
+		} else if deployedHash != "" && deployedHash == testedHash {
+			stage = "deployed"
+			readyMsg = fmt.Sprintf("All %d/%d passed -- up to date with live dialtone.earth (nothing new to deploy)", passed, total)
+		}
+		writePipelineState(root, pipelineState{
+			Stage:        stage,
+			Message:      readyMsg,
+			Changed:      strings.TrimSpace(*triggerFile),
+			TargetOrigin: "http://127.0.0.1:5175",
+			TestedHash:   testedHash,
+			DeployedHash: deployedHash,
+			Passed:       passed,
+			Failed:       failed,
+			Total:        total,
+		})
+		if shouldCaptureShots {
+			if shotErr := runPostLoopScreenshots(root, *dashboardURL, *filter, *screenshotsPublishLive, *screenshotsPublishURL, *screenshots, stdout, stderr); shotErr != nil {
+				return shotErr
+			}
+		}
+		return nil
+	}
+	writePipelineState(root, pipelineState{
+		Stage:     "deploying",
+		Message:   fmt.Sprintf("All %d tests passed — deploying live to https://dialtone.earth/...", passed),
+		Changed:   strings.TrimSpace(*triggerFile),
+		DeployURL: defaultLiveSiteURL + "/",
+		Passed:    passed,
+		Failed:    failed,
+		Total:     total,
+	})
+	var deployBuf bytes.Buffer
+	deployOut := io.MultiWriter(stdout, &deployBuf)
+	if err := runDeployLive(deployOut, stderr); err != nil {
+		writePipelineState(root, pipelineState{
+			Stage:   "failed",
+			Message: fmt.Sprintf("Tests passed, but live deploy failed: %v", err),
+			Changed: strings.TrimSpace(*triggerFile),
+			Passed:  passed,
+			Failed:  failed,
+			Total:   total,
+		})
+		return err
+	}
+	versionID := extractWranglerVersionID(deployBuf.String())
+	writePipelineState(root, pipelineState{
+		Stage:     "deployed",
+		Message:   fmt.Sprintf("All %d tests passed & deployed live to https://dialtone.earth/", passed),
+		Changed:   strings.TrimSpace(*triggerFile),
+		DeployURL: defaultLiveSiteURL + "/",
+		VersionID: versionID,
+		Passed:    passed,
+		Failed:    failed,
+		Total:     total,
+	})
+	if *browser {
+		_ = exec.Command("node", cdpScript, "banner", "ALL TESTS PASSED — DEPLOYED LIVE TO dialtone.earth!", "--port", strconv.Itoa(*cdpPort)).Run()
+	}
+	return nil
+}
+
+const prodVerificationFilter = "^(TestBrowser0[1-9]|TestProductionLiveSmoke$|TestDialtoneEarthLiveOwnerAccessOnCloudflare$)"
+const defaultProdBrowserOrigin = "https://metal.dialtone.earth"
+
+// runTrackedProductionSuite runs the live production test suite (all 9 dual-format
+// browser tests against live https://metal.dialtone.earth + live https://dialtone.earth/
+// HTTP/R2/security smoke checks) while streaming live test progress into logs/state.json
+// and projecting both wide & mobile production views into the test dashboard.
+func runTrackedProductionSuite(
+	root string,
+	cdpPort int,
+	dashboardURL string,
+	versionID string,
+	deployedHash string,
+	promotedRel string,
+	recordDeploy bool,
+	stdout, stderr io.Writer,
+) error {
+	cdpScript := filepath.Join(root, "registry", "scripts", "cdp-session.mjs")
+	if err := ensurePersistentBrowserSessionForOrigin(root, cdpScript, cdpPort, dashboardURL, defaultProdBrowserOrigin, stdout, stderr); err != nil {
+		return err
+	}
+	names, err := listTestNames(root, prodVerificationFilter)
+	if err != nil {
+		return err
+	}
+	if len(names) == 0 {
+		return errors.New("production verification filter matched no tests in cli_test.go")
+	}
+	state := buildInitialTestState(root, names, prodVerificationFilter)
+	populateTestSources(root, &state)
+	if err := writeTestState(root, &state); err != nil {
+		return err
+	}
+	prevPipe := readPipelineState(root)
+	keepTestedHash := deployedHash
+	if keepTestedHash == "" {
+		keepTestedHash = prevPipe.TestedHash
+	}
+	writePipelineState(root, pipelineState{
+		Stage:        "verifying_prod",
+		Message:      fmt.Sprintf("Running live production suite (%d tests) on https://metal.dialtone.earth & https://dialtone.earth...", len(names)),
+		TargetOrigin: defaultProdBrowserOrigin,
+		DeployURL:    defaultLiveSiteURL + "/",
+		VersionID:    versionID,
+		TestedHash:   keepTestedHash,
+		Total:        len(state.Tests),
+	})
+
+	extraEnv := []string{
+		"DIALTONE_VERIFY_PROD=1",
+		"DIALTONE_LIVE_CLOUDFLARE_E2E=1",
+		"DIALTONE_CDP_REUSE=1",
+		"DIALTONE_CDP_PORT=" + strconv.Itoa(cdpPort),
+		"DIALTONE_DASHBOARD_URL=" + dashboardURL,
+		"QA_HEADED=1",
+		"QA_KEEP_SIGNED_IN=1",
+		"QA_ORIGIN=" + defaultProdBrowserOrigin,
+		"QA_EMAIL=test@dialtone.earth",
+	}
+	if tok, err := loadLiveControlToken(""); err == nil && tok != "" {
+		extraEnv = append(extraEnv, "DIALTONE_LIVE_TOKEN="+tok)
+	}
+
+	testErr := runGoTests(root, &state, prodVerificationFilter, extraEnv, stdout)
+	passed, failed, total := countStateTotals(&state)
+	if testErr != nil {
+		writePipelineState(root, pipelineState{
+			Stage:        "failed",
+			Message:      fmt.Sprintf("Live production verification failed (%d/%d passed, %d failed)", passed, total, failed),
+			TargetOrigin: defaultProdBrowserOrigin,
+			DeployURL:    defaultLiveSiteURL + "/",
+			VersionID:    versionID,
+			TestedHash:   keepTestedHash,
+			Passed:       passed,
+			Failed:       failed,
+			Total:        total,
+		})
+		return testErr
+	}
+	if recordDeploy && deployedHash != "" {
+		writeDeployedRecord(root, deployedRecord{
+			DeployedHash: deployedHash,
+			VersionID:    versionID,
+			VerifiedProd: true,
+		})
+	}
+	msg := fmt.Sprintf("Live on https://dialtone.earth/ & production verified (%d/%d live prod tests passed)", passed, total)
+	if promotedRel != "" {
+		msg += fmt.Sprintf(" + dialtone auto-update %s", promotedRel)
+	}
+	writePipelineState(root, pipelineState{
+		Stage:        "deployed",
+		Message:      msg,
+		TargetOrigin: defaultProdBrowserOrigin,
+		DeployURL:    defaultLiveSiteURL + "/",
+		VersionID:    versionID,
+		TestedHash:   keepTestedHash,
+		DeployedHash: deployedHash,
+		Passed:       passed,
+		Failed:       0,
+		Total:        total,
+	})
+	return nil
+}
+
+func extractWranglerVersionID(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if idx := strings.Index(line, "Current Version ID:"); idx >= 0 {
+			return strings.TrimSpace(line[idx+len("Current Version ID:"):])
+		}
+	}
+	return ""
 }
 
 func ensurePersistentBrowserSession(root, cdpScript string, port int, dashboardURL string, stdout, stderr io.Writer) error {
-	command := exec.Command("node", cdpScript, "ensure", "--port", strconv.Itoa(port), "--dashboard", dashboardURL)
+	return ensurePersistentBrowserSessionForOrigin(root, cdpScript, port, dashboardURL, "http://127.0.0.1:5175", stdout, stderr)
+}
+
+func ensurePersistentBrowserSessionForOrigin(root, cdpScript string, port int, dashboardURL, origin string, stdout, stderr io.Writer) error {
+	args := []string{cdpScript, "ensure", "--port", strconv.Itoa(port), "--dashboard", dashboardURL}
+	if strings.TrimSpace(origin) != "" {
+		args = append(args, "--origin", strings.TrimSpace(origin))
+	}
+	command := exec.Command("node", args...)
 	command.Dir = root
 	command.Stderr = stderr
 	out, err := command.Output()
@@ -287,6 +557,7 @@ func runDeploy(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("deploy", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	live := flags.Bool("live", false, "Build registry/ and publish live to Cloudflare Workers (https://dialtone.earth/)")
+	requirePass := flags.Bool("require-pass", false, "Enforce staging test gate: refuse deploy unless all recorded tests pass")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -294,7 +565,46 @@ func runDeploy(args []string, stdout, stderr io.Writer) error {
 		return errors.New("deploy accepts no positional arguments; use --live to publish to Cloudflare")
 	}
 	if *live {
-		return runDeployLive(stdout, stderr)
+		root, err := projectRoot()
+		if err != nil {
+			return err
+		}
+		var passed, total int
+		if *requirePass {
+			passed, total, err = verifyStagingGate(root)
+			if err != nil {
+				writePipelineState(root, pipelineState{
+					Stage:   "failed",
+					Message: err.Error(),
+					Passed:  passed,
+					Total:   total,
+				})
+				return err
+			}
+			writePipelineState(root, pipelineState{
+				Stage:     "deploying",
+				Message:   fmt.Sprintf("Staging gate passed (%d/%d) — promoting to https://dialtone.earth/...", passed, total),
+				DeployURL: defaultLiveSiteURL + "/",
+				Passed:    passed,
+				Total:     total,
+			})
+		}
+		var deployBuf bytes.Buffer
+		if err := runDeployLive(io.MultiWriter(stdout, &deployBuf), stderr); err != nil {
+			if *requirePass {
+				writePipelineState(root, pipelineState{
+					Stage:   "failed",
+					Message: fmt.Sprintf("Staging promotion failed: %v", err),
+					Passed:  passed,
+					Total:   total,
+				})
+			}
+			return err
+		}
+		promotedRel := promoteTestReleaseChannelToLatest(defaultLiveSiteURL, "", stdout)
+		deployedHash := computeStagingFingerprint(root)
+		versionID := extractWranglerVersionID(deployBuf.String())
+		return runTrackedProductionSuite(root, 9222, "http://127.0.0.1:5174/", versionID, deployedHash, promotedRel, true, stdout, stderr)
 	}
 	root, err := projectRoot()
 	if err != nil {

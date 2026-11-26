@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import {
@@ -53,7 +53,22 @@ const KEEP_OPEN_MS = Number(
 const TARGET_ORIGIN = (
   argValue("--origin") || process.env.QA_ORIGIN || DEFAULT_TARGET_ORIGIN
 ).replace(/\/+$/, "");
-const QA_EMAIL = (process.env.QA_EMAIL || "test@dialtone.earth")
+const IS_STAGING_TEST =
+  TARGET_ORIGIN.startsWith("http://127.0.0.1:") ||
+  TARGET_ORIGIN.startsWith("http://localhost:") ||
+  TARGET_ORIGIN.includes("test-channel");
+const NETWORK_LABEL = IS_STAGING_TEST ? "test" : "metal";
+const PRIMARY_NODE = IS_STAGING_TEST ? "test-alpha" : "legion";
+const PEER_NODE = IS_STAGING_TEST ? "test-beta" : "vm-us";
+const CAMERA_TARGET_NODE = IS_STAGING_TEST ? "test-beta" : "vm-asia";
+const DIALTONE_LISTEN_ARG = IS_STAGING_TEST ? ["--listen", "127.0.0.1:8798"] : [];
+const DIALTONE_ENV = IS_STAGING_TEST
+  ? { DIALTONE_STATE_DIR: process.env.DIALTONE_TEST_STATE_DIR || join(homedir(), ".dialtone-test-alpha") }
+  : null;
+const QA_EMAIL = (
+  process.env.QA_EMAIL ||
+  (IS_STAGING_TEST ? "timcash@gmail.com" : "test@dialtone.earth")
+)
   .trim()
   .toLowerCase();
 const POLL_TIMEOUT_MS = Number(process.env.QA_POLL_TIMEOUT_MS || 45_000);
@@ -163,8 +178,8 @@ async function isSignedInLive(cdp) {
       const t = document.body?.innerText || "";
       return location.pathname === "/" &&
         t.includes("LIVE") &&
-        t.includes("metal") &&
-        document.querySelector('[href="/auth/logout"]') !== null;
+        t.includes(${JSON.stringify(NETWORK_LABEL)}) &&
+        document.querySelector('[data-testid="live-badge"]') !== null;
     })()`);
   } catch {
     return false;
@@ -172,12 +187,12 @@ async function isSignedInLive(cdp) {
 }
 
 async function dismissOverlays(cdp) {
-  // If a prior run left Config or Camera Studio open, close it cleanly.
+  // If a prior run left Menu or Camera Studio visible, close it cleanly.
   try {
     await cdp.eval(`(() => {
-      const cfgDone = document.querySelector('[data-testid="config-done"]');
+      const cfgDone = document.querySelector('#config-page:not([hidden]) [data-testid="config-done"]');
       if (cfgDone) cfgDone.click();
-      const camDone = document.querySelector('[data-testid="camera-done"]');
+      const camDone = document.querySelector('#camera-page:not([hidden]) [data-testid="camera-done"]');
       if (camDone) camDone.click();
       return true;
     })()`);
@@ -192,13 +207,10 @@ async function performMagicLinkLogin(cdp) {
   if (!onTarget) {
     await cdp.send("Page.navigate", { url: `${TARGET_ORIGIN}/` });
   }
-  await cdp.waitFor(
-    "sign-in link on landing page",
-    `document.querySelector('[href="/login"]') !== null || location.pathname === "/login"`,
-  );
   const alreadyAtLogin = await cdp.eval(`location.pathname === "/login"`);
   if (!alreadyAtLogin) {
-    await cdp.click('[href="/login"]', "sign in link");
+    await cdp.openConfigMenu();
+    await cdp.click('#config-page:not([hidden]) [href="/login"]', "sign in link");
   }
   await cdp.waitFor(
     "grayscale login email input",
@@ -222,8 +234,26 @@ async function performMagicLinkLogin(cdp) {
   let deadline = Date.now() + POLL_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (await isSignedInLive(cdp)) {
-      await cdp.captureFrame("02-live-metal-hydrated");
+      await cdp.captureFrame("02-live-hydrated");
       return;
+    }
+    if (IS_STAGING_TEST) {
+      try {
+        const stagingLinkResp = await fetch(`${TARGET_ORIGIN}/api/staging-test/last-magic-link`, {
+          cache: "no-store",
+        });
+        if (stagingLinkResp.ok) {
+          const data = await stagingLinkResp.json();
+          if (data?.url && String(data.to || "").toLowerCase() === QA_EMAIL) {
+            verifyUrl = data.url;
+            break;
+          }
+        }
+      } catch {
+        // retry shortly
+      }
+      await sleep(250);
+      continue;
     }
     const mailRes = tryReadLatestMagicLinkUrl(requestStartedSec, {
       targetOrigin: TARGET_ORIGIN,
@@ -249,7 +279,7 @@ async function performMagicLinkLogin(cdp) {
   }
   if (!verifyUrl) {
     if (await isSignedInLive(cdp)) {
-      await cdp.captureFrame("02-live-metal-hydrated");
+      await cdp.captureFrame("02-live-hydrated");
       return;
     }
     throw new Error(
@@ -268,8 +298,8 @@ async function performMagicLinkLogin(cdp) {
   await cdp.click('form button[type="submit"]', "Continue sign-in button");
 
   await cdp.waitFor(
-    "authenticated LIVE metal mode with real nodes",
-    `location.pathname === "/" && document.body.innerText.includes("LIVE") && document.body.innerText.includes("metal") && document.querySelector('[href="/auth/logout"]') !== null && (document.body.innerText.includes("legion") || document.body.innerText.includes("vm-us") || document.body.innerText.includes("vm-eu"))`,
+    `authenticated LIVE ${NETWORK_LABEL} mode with real nodes`,
+    `location.pathname === "/" && document.body.innerText.includes("LIVE") && document.body.innerText.includes(${JSON.stringify(NETWORK_LABEL)}) && document.querySelector('[data-testid="live-badge"]') !== null && (document.body.innerText.includes(${JSON.stringify(PRIMARY_NODE)}) || document.body.innerText.includes(${JSON.stringify(PEER_NODE)}))`,
     20_000,
   );
   const replayResp = await fetch(`${TARGET_ORIGIN}/api/auth/verify`, {
@@ -283,7 +313,14 @@ async function performMagicLinkLogin(cdp) {
   assert.equal(replayResp.status, 401, "replayed single-use magic link must return 401");
   const liveDomText = await cdp.eval(`document.body.innerText`);
   assert.ok(!liveDomText.includes("sim-atlas"), "simulated network still visible after live login");
-  await cdp.captureFrame("02-live-metal-hydrated");
+  if (cdp.mirror) {
+    try {
+      await cdp.mirror.send("Page.navigate", { url: `${TARGET_ORIGIN}/#mobile-preview` });
+    } catch {
+      // best-effort mobile live sync
+    }
+  }
+  await cdp.captureFrame("02-live-hydrated");
 }
 
 async function ensureSignedIn(cdp, allowLogin = false) {
@@ -295,7 +332,7 @@ async function ensureSignedIn(cdp, allowLogin = false) {
   await cdp.send("Page.navigate", { url: `${TARGET_ORIGIN}/` });
   await cdp.waitFor(
     "landing page ready",
-    `document.querySelector('[href="/auth/logout"]') !== null || document.querySelector('[href="/login"]') !== null`,
+    `document.querySelector('[data-testid="live-badge"]') !== null || document.querySelector('[data-testid="simulated-badge"]') !== null`,
     15_000,
   );
   if (await isSignedInLive(cdp)) {
@@ -345,16 +382,59 @@ async function step01SignedOut(cdp) {
     );
   });
 
-  // When --keep-signed-in is active and persistent Chrome is already signed into LIVE metal,
-  // verify unauthenticated containment via fresh cookieless fetch without destroying the live session.
+  // When --keep-signed-in is active, make sure we are on TARGET_ORIGIN before checking
+  // whether persistent Chrome already holds an authenticated LIVE session for this host.
   await dismissOverlays(cdp);
+  if (KEEP_SIGNED_IN && process.env.QA_FORCE_RELOGIN !== "1") {
+    const onTarget = await cdp.eval(`location.href.startsWith(${JSON.stringify(TARGET_ORIGIN)})`);
+    if (!onTarget) {
+      await cdp.send("Page.navigate", { url: `${TARGET_ORIGIN}/` });
+      await cdp.waitFor(
+        `initial ${NETWORK_LABEL} page load`,
+        `document.querySelector('[data-testid="live-badge"]') !== null || document.querySelector('[data-testid="simulated-badge"]') !== null`,
+        15_000,
+      );
+    }
+  }
   if (KEEP_SIGNED_IN && process.env.QA_FORCE_RELOGIN !== "1" && (await isSignedInLive(cdp))) {
+    // Reload freshly built/deployed bundle so both wide & mobile tabs verify the latest code.
+    await cdp.send("Page.reload", { ignoreCache: true });
+    await cdp.waitFor(
+      `reloaded LIVE ${NETWORK_LABEL} app`,
+      `document.body.innerText.includes("LIVE") && document.querySelector('[data-testid="live-badge"]') !== null`,
+      15_000,
+    );
+    if (cdp.mirror) {
+      try {
+        await cdp.mirror.send("Page.reload", { ignoreCache: true });
+      } catch {
+        // best-effort mobile reload
+      }
+    }
+    const layoutCheck = await cdp.eval(`(() => {
+      const globeHeaders = document.querySelectorAll('.globe-pane .earth-pane-head').length;
+      const globeMeta = document.querySelectorAll('.globe-pane [data-testid="globe-meta-overlay"]').length;
+      const bottomActionBtns = document.querySelectorAll('#bottom-table-dock .earth-bar-right button, #bottom-table-dock .earth-bar-right a').length;
+      const bottomCaptions = document.querySelectorAll('#bottom-table-dock [data-testid="tour-captions"]').length;
+      const ccRect = document.querySelector('#bottom-table-dock [data-testid="tour-captions"]')?.getBoundingClientRect();
+      const menuRect = document.querySelector('#bottom-table-dock [data-testid="open-config"]')?.getBoundingClientRect();
+      const navRect = document.querySelector('#bottom-table-dock [data-testid="bottom-tour-nav"]')?.getBoundingClientRect();
+      const ccOverlapsMenu = Boolean(ccRect && menuRect && ccRect.right > menuRect.left + 1);
+      const navOverlapsCc = Boolean(navRect && ccRect && navRect.right > ccRect.left + 1);
+      return { globeHeaders, globeMeta, bottomActionBtns, bottomCaptions, ccOverlapsMenu, navOverlapsCc };
+    })()`);
+    assert.equal(layoutCheck.globeHeaders, 0, "3D globe pane must have 0 title/button header bars");
+    assert.equal(layoutCheck.globeMeta, 1, "3D globe pane must render right-side metadata overlay");
+    assert.equal(layoutCheck.bottomActionBtns, 1, `Bottom bar right side must have only the menu button (got ${layoutCheck.bottomActionBtns})`);
+    assert.equal(layoutCheck.bottomCaptions, 1, "Bottom bar must contain closed captions");
+    assert.equal(layoutCheck.ccOverlapsMenu, false, "Closed captions must not overlap menu button");
+    assert.equal(layoutCheck.navOverlapsCc, false, "Tour nav buttons must not overlap closed captions");
     const anonHome = await fetch(`${TARGET_ORIGIN}/`);
     assert.equal(anonHome.status, 200, "signed-out GET / should return 200");
     const anonHtml = await anonHome.text();
     assert.ok(!anonHtml.includes("vm-asia"), "real metal node leaked in signed-out HTML");
-    await cdp.showBanner("01 Signed-out 401 checks passed (preserving LIVE metal session)");
-    console.log("  [PASS 01] 401 default-deny on protected routes + zero signed-out leaks (preserved existing LIVE metal session)");
+    await cdp.showBanner(`01 Signed-out 401 checks + clean HUD passed (LIVE ${NETWORK_LABEL})`);
+    console.log(`  [PASS 01] 401 default-deny + clean HUD (0 globe headers, right overlay, bottom CC + menu-only) on LIVE ${NETWORK_LABEL}`);
     await sleep(Math.min(400, STEP_MS));
     return;
   }
@@ -362,22 +442,23 @@ async function step01SignedOut(cdp) {
   // Otherwise sign out if currently logged in so we verify live browser SIM containment end-to-end.
   if (await isSignedInLive(cdp)) {
     await cdp.showBanner("01 Signing out existing session to verify SIM containment");
-    await cdp.click('[href="/auth/logout"]', "sign out link");
+    await cdp.openConfigMenu();
+    await cdp.click('#config-page:not([hidden]) [href="/auth/logout"]', "sign out link");
   } else {
     await cdp.send("Page.navigate", { url: `${TARGET_ORIGIN}/` });
   }
 
   await cdp.waitFor(
     "signed-out simulated mode with 3D globe",
-    `document.body.innerText.includes("SIM") && document.querySelector('[href="/login"]') !== null && document.querySelector('canvas[aria-label="Interactive H3 Earth globe"]') !== null`,
+    `document.body.innerText.includes("SIM") && document.querySelector('[data-testid="simulated-badge"]') !== null && document.querySelector('canvas[aria-label="Interactive H3 Earth globe"]') !== null`,
     15_000,
   );
   await cdp.showBanner("01 Signed-out SIM containment & zoomed-out 3D H3 globe");
   const signedOutText = await cdp.eval(`document.body.innerText`);
-  assert.ok(!signedOutText.includes("legion"), "real metal node leaked while signed out");
-  assert.ok(!signedOutText.includes("vm-eu"), "real metal node leaked while signed out");
+  assert.ok(!signedOutText.includes(PRIMARY_NODE), `real ${NETWORK_LABEL} node leaked while signed out`);
+  assert.ok(!signedOutText.includes(PEER_NODE), `real ${NETWORK_LABEL} peer leaked while signed out`);
   await cdp.captureFrame("01-signed-out-sim");
-  console.log("  [PASS 01] 401 default-deny on protected routes + SIM mode renders zoomed-out 3D globe with zero metal leaks");
+  console.log(`  [PASS 01] 401 default-deny on protected routes + SIM mode renders zoomed-out 3D globe with zero ${NETWORK_LABEL} leaks`);
   await sleep(STEP_MS);
 }
 
@@ -401,12 +482,14 @@ async function step02Login(cdp) {
 async function step03GlobeAndPaths(cdp) {
   await ensureSignedIn(cdp);
   await cdp.showBanner("03 Query-driven 3D globe: BASE NODES ONLY vs H3+ARCS & LAN/DIR paths");
-  // Ensure pane 0 is not already maximized; click maximize -> verify BASE NODES ONLY -> restore -> verify H3/ARCS
+  // Ensure pane #1 (globe) is focused, then toggle full/split via the menu overlay
   const alreadyBaseOnly = await cdp.eval(
     `Boolean(document.querySelector('[data-testid="globe-layer-legend"]')?.textContent?.includes("BASE NODES ONLY"))`,
   );
   if (!alreadyBaseOnly) {
-    await cdp.click('[data-testid="query-pane-0"] [data-max-pane="0"]', "maximize globe pane");
+    await cdp.openConfigMenu();
+    await cdp.click('#config-page:not([hidden]) [data-testid="cfg-pane-0"]', "pane #1 globe slot");
+    await cdp.click('#config-page:not([hidden]) [data-testid="toggle-fullscreen"]', "full button in menu");
   }
   const baseLegend = await cdp.waitFor(
     "globe fullscreen legend BASE NODES ONLY",
@@ -414,22 +497,25 @@ async function step03GlobeAndPaths(cdp) {
   );
   await cdp.captureFrame("03-globe-base-nodes-only");
   await sleep(Math.min(600, STEP_MS));
-  await cdp.click('[data-testid="query-pane-0"] [data-max-pane="0"]', "restore split from globe");
+  await cdp.openConfigMenu();
+  await cdp.click('#config-page:not([hidden]) [data-testid="toggle-fullscreen"]', "split button in menu");
   const queryLegend = await cdp.waitFor(
     "globe split legend with H3 or ARCS",
     `(() => { const el = document.querySelector('[data-testid="globe-layer-legend"]'); return el && (el.textContent.includes("H3:") || el.textContent.includes("ARCS:")) ? el.textContent.trim() : null; })()`,
   );
+  await cdp.spotlight('[data-testid="globe-layer-legend"]', "DEMO: Query-Driven H3 + RTT Arcs", 500);
 
   await cdp.ensureQueryTab("hosts");
-  await cdp.pickBottomTab("hosts", "metal hosts tab");
+  await cdp.pickBottomTab("hosts", `${NETWORK_LABEL} hosts tab`);
   const hostsText = await cdp.waitFor(
-    "live metal hosts with LAN/DIR/RLY path badges",
-    `(() => { const t = document.body.innerText; return (t.includes("legion") && t.includes("vm-us") && (t.includes("LAN") || t.includes("DIR") || t.includes("RLY"))) ? t : null; })()`,
+    `live ${NETWORK_LABEL} hosts with LAN/DIR/RLY path badges`,
+    `(() => { const t = document.body.innerText; return (t.includes(${JSON.stringify(PRIMARY_NODE)}) && t.includes(${JSON.stringify(PEER_NODE)}) && (t.includes("LAN") || t.includes("DIR") || t.includes("RLY") || t.includes("LOC") || t.includes("LOCAL"))) ? t : null; })()`,
     15_000,
   );
-  assert.ok(!hostsText.includes("0.0/0 GB"), "remote metal peers should show RAM % instead of 0.0/0 GB");
-  await cdp.captureFrame("03-live-metal-hosts-rtt");
-  console.log(`  [PASS 03] globe switched "${baseLegend}" -> "${queryLegend}" & metal hosts shows live RTT + LAN/DIR/RLY badges`);
+  assert.ok(!hostsText.includes("0.0/0 GB"), "remote peers should show RAM % instead of 0.0/0 GB");
+  await cdp.spotlight('[data-testid="query-pane-1"]', `DEMO: Live ${NETWORK_LABEL} Fleet RTT + Paths`, 550);
+  await cdp.captureFrame("03-live-hosts-rtt");
+  console.log(`  [PASS 03] globe switched "${baseLegend}" -> "${queryLegend}" & ${NETWORK_LABEL} hosts shows ${PRIMARY_NODE} + ${PEER_NODE} with live RTT/paths`);
   await sleep(STEP_MS);
 }
 
@@ -443,17 +529,23 @@ async function step04ShellRedaction(cdp) {
   const demoShellSession = `qa-live-${randomBytes(3).toString("hex")}`;
   const synthSecret = "ghp_SYNTHETIC0123456789abcdef0123456789";
   try {
-    await cdp.showBanner(`04 Live dialtone-shell (${demoShellSession}) & [REDACTED] secret check`);
-    runDialtone(dtBin, ["shell", "new", demoShellSession, "--node", "legion"]);
-    runDialtone(dtBin, [
-      "shell",
-      "send",
-      demoShellSession,
-      "--node",
-      "legion",
-      "--",
-      `Write-Output "QA_SHELL_OK token=${synthSecret}"`,
-    ]);
+    await cdp.showBanner(`04 Live dialtone-shell (${demoShellSession} on ${PRIMARY_NODE}) & [REDACTED] check`);
+    runDialtone(dtBin, ["shell", "new", demoShellSession, "--node", PRIMARY_NODE, ...DIALTONE_LISTEN_ARG], 20_000, DIALTONE_ENV);
+    runDialtone(
+      dtBin,
+      [
+        "shell",
+        "send",
+        demoShellSession,
+        "--node",
+        PRIMARY_NODE,
+        ...DIALTONE_LISTEN_ARG,
+        "--",
+        `Write-Output "QA_SHELL_OK token=${synthSecret}"`,
+      ],
+      20_000,
+      DIALTONE_ENV,
+    );
     const shellCheck = await cdp.waitFor(
       "live dialtone-shell session via /api/mesh/shell/sessions with redaction",
       `(async () => {
@@ -467,11 +559,11 @@ async function step04ShellRedaction(cdp) {
     );
     assert.equal(shellCheck.leaked, false, "RAW synthetic secret leaked through /api/mesh/shell/sessions!");
     console.log(
-      `  [PASS 04] live dialtone-shell '${demoShellSession}' streamed through Worker (leaked=false, redacted=${shellCheck.redacted})`,
+      `  [PASS 04] live dialtone-shell '${demoShellSession}' on ${PRIMARY_NODE} streamed through Worker (leaked=false, redacted=${shellCheck.redacted})`,
     );
   } finally {
     try {
-      runDialtone(dtBin, ["shell", "kill", demoShellSession, "--node", "legion"], 10_000);
+      runDialtone(dtBin, ["shell", "kill", demoShellSession, "--node", PRIMARY_NODE, ...DIALTONE_LISTEN_ARG], 10_000, DIALTONE_ENV);
     } catch {
       // best-effort cleanup
     }
@@ -480,28 +572,28 @@ async function step04ShellRedaction(cdp) {
 
 async function step05HostAndUsers(cdp) {
   await ensureSignedIn(cdp);
-  await cdp.showBanner("05 Single-host drill-down (legion) & Cloudflare edge users presence");
+  await cdp.showBanner(`05 Single-host drill-down (${PRIMARY_NODE}) & edge users presence`);
   await cdp.ensureQueryTab("hosts");
-  await cdp.pickBottomTab("hosts", "metal hosts tab");
-  await cdp.click('[data-select-host="legion"]', "select legion host row");
+  await cdp.pickBottomTab("hosts", `${NETWORK_LABEL} hosts tab`);
+  await cdp.click(`[data-select-host="${PRIMARY_NODE}"]`, `select ${PRIMARY_NODE} host row`);
   await cdp.ensureQueryTab("host");
-  await cdp.pickBottomTab("host", "metal host tab");
+  await cdp.pickBottomTab("host", `${NETWORK_LABEL} host tab`);
   await cdp.waitFor(
-    "metal host detail for legion",
-    `document.body.innerText.includes("legion") && document.body.innerText.includes("blobs") && document.body.innerText.includes("compute")`,
+    `${NETWORK_LABEL} host detail for ${PRIMARY_NODE}`,
+    `document.body.innerText.includes(${JSON.stringify(PRIMARY_NODE)}) && document.body.innerText.includes("blobs") && document.body.innerText.includes("compute")`,
     15_000,
   );
-  await cdp.captureFrame("05-live-metal-host-legion");
+  await cdp.captureFrame("05-live-host-detail");
 
   await cdp.ensureQueryTab("users");
-  await cdp.pickBottomTab("users", "metal users tab");
+  await cdp.pickBottomTab("users", `${NETWORK_LABEL} users tab`);
   await cdp.waitFor(
     "live signed-in user presence row for QA email",
     `document.body.innerText.includes(${JSON.stringify(QA_EMAIL)}) && document.body.innerText.includes("active")`,
     15_000,
   );
-  await cdp.captureFrame("05-live-metal-users-presence");
-  console.log(`  [PASS 05] metal host (legion) & metal users active edge presence (${QA_EMAIL}) verified`);
+  await cdp.captureFrame("05-live-users-presence");
+  console.log(`  [PASS 05] ${NETWORK_LABEL} host (${PRIMARY_NODE}) & active edge presence (${QA_EMAIL}) verified`);
   await sleep(STEP_MS);
 }
 
@@ -585,6 +677,22 @@ async function step07Tiling2x2AndKv(cdp) {
     `document.querySelector('[data-testid="split-grid"]')?.getAttribute("data-layout") === "2x2" && document.body.innerText.includes("shell") && document.body.innerText.includes("fast") && document.body.innerText.includes(${JSON.stringify(QA_EMAIL)})`,
     15_000,
   );
+  await cdp.spotlight('[data-testid="split-grid"]', "WIDE: 2x2 · MOBILE: 1-COL", 600);
+  if (cdp.mirror) {
+    const mobileCheck = await cdp.mirror.eval(`(() => {
+      const grid = document.querySelector('[data-testid="split-grid"]');
+      if (!grid) return { ok: false, reason: "missing split-grid" };
+      const cols = getComputedStyle(grid).gridTemplateColumns.trim().split(/\\s+/).filter(Boolean).length;
+      const layout = grid.getAttribute("data-layout");
+      return { ok: cols === 1 && (layout === "1" || layout === "1/1"), width: window.innerWidth, cols, layout };
+    })()`);
+    assert.equal(
+      mobileCheck?.ok,
+      true,
+      `Mobile preview must strictly demonstrate 1 column even when desktop is 2x2 (got ${JSON.stringify(mobileCheck)})`,
+    );
+    console.log(`  [PASS 07-MOBILE] verified mobile (${mobileCheck.width}px) strictly 1-column layout="${mobileCheck.layout}" (cols=${mobileCheck.cols})`);
+  }
   await cdp.captureFrame("07-live-metal-2x2-workspace");
   console.log("  [PASS 07] configured 2x2 split (Globe + Hosts[fast] + Plugins + Users) & persisted to CF KV");
   await sleep(STEP_MS);
@@ -592,77 +700,80 @@ async function step07Tiling2x2AndKv(cdp) {
 
 async function step08CameraTsAndReload(cdp) {
   await ensureSignedIn(cdp);
-  await cdp.showBanner("08 Camera Studio: custom TS targeting vm-asia + hard reload CF KV restore");
-  await cdp.click('[data-testid="open-camera"]', "camera button");
+  await cdp.showBanner(`08 Camera Studio: custom TS targeting ${CAMERA_TARGET_NODE} + hard reload KV restore`);
+  await cdp.openConfigMenu();
+  await cdp.click('#config-page:not([hidden]) [data-testid="open-camera"]', "camera button in menu");
   await cdp.waitFor(
     "camera studio open with syntax highlight",
-    `document.querySelector('[data-testid="cam-preset-highest-p95"]') !== null && document.querySelectorAll('[data-testid="camera-ts-highlight"] .tok-kw').length > 0`,
+    `document.querySelector('#camera-page:not([hidden]) [data-testid="cam-preset-highest-p95"]') !== null && document.querySelectorAll('#camera-page:not([hidden]) [data-testid="camera-ts-highlight"] .tok-kw').length > 0`,
   );
-  await cdp.click('[data-testid="cam-preset-highest-cpu"]', "highest CPU preset");
+  await cdp.click('#camera-page:not([hidden]) [data-testid="cam-preset-highest-cpu"]', "highest CPU preset");
   await sleep(Math.min(350, STEP_MS));
-  await cdp.click('[data-testid="cam-preset-highest-p95"]', "highest p95 preset");
+  await cdp.click('#camera-page:not([hidden]) [data-testid="cam-preset-highest-p95"]', "highest p95 preset");
   await sleep(Math.min(350, STEP_MS));
 
   const customTsPolicy = [
-    `// Custom live metal policy: track vm-asia (Tokyo e2-micro) zoomed out`,
-    `const target = ctx.nodes.find((n) => n.name === "vm-asia") ?? ctx.nodes[0];`,
+    `// Custom ${NETWORK_LABEL} policy: track ${CAMERA_TARGET_NODE}`,
+    `const target = ctx.nodes.find((n) => n.name === ${JSON.stringify(CAMERA_TARGET_NODE)}) ?? ctx.nodes[0];`,
     `return {`,
     `  lat: target.lat,`,
     `  lng: target.lng,`,
     `  distance: 235,`,
     `  node: target.name,`,
-    `  reason: "tokyo e2-micro",`,
+    `  reason: "${NETWORK_LABEL} target",`,
     `};`,
   ].join("\n");
-  await cdp.typeInto('[data-testid="camera-ts-editor"]', customTsPolicy);
+  await cdp.typeInto('[data-testid="camera-ts-editor"]', customTsPolicy, `Custom ${CAMERA_TARGET_NODE} TS Camera Policy`);
   const customCamStatus = await cdp.waitFor(
-    "custom TypeScript policy targeting vm-asia",
-    `(() => { const el = document.querySelector('[data-testid="cam-status"]'); return el && el.textContent.includes("vm-asia") ? el.textContent.trim() : null; })()`,
+    `custom TypeScript policy targeting ${CAMERA_TARGET_NODE}`,
+    `(() => { const el = document.querySelector('[data-testid="cam-status"]'); return el && el.textContent.includes(${JSON.stringify(CAMERA_TARGET_NODE)}) ? el.textContent.trim() : null; })()`,
   );
+  await cdp.spotlight('[data-testid="cam-status"]', `LIVE EVAL: ${customCamStatus}`, 500);
   await cdp.captureFrame("08-camera-studio-custom-ts");
   await sleep(Math.min(450, STEP_MS));
   await cdp.click('[data-testid="apply-camera-ts"]', "apply custom TypeScript policy");
   await cdp.click('[data-testid="camera-done"]', "camera done button");
   await cdp.waitFor(
     "custom TS camera policy applied on main view",
-    `document.body.innerText.includes("CAM: vm-asia")`,
+    `document.body.innerText.includes(${JSON.stringify(`CAM: ${CAMERA_TARGET_NODE}`)})`,
     10_000,
   );
   // Allow debounced PUT /api/user/ui-config to commit to Cloudflare KV before hard reload.
-  await sleep(1_400);
+  await sleep(IS_STAGING_TEST ? 1_400 : 2_200);
 
-  await cdp.showBanner("08 Hard reload -> verifying CF KV restores 2x2 + CAM: vm-asia");
+  await cdp.showBanner(`08 Hard reload -> verifying KV restores 2x2 + CAM: ${CAMERA_TARGET_NODE}`);
   await cdp.send("Page.reload", { ignoreCache: true });
   await cdp.waitFor(
-    "reloaded LIVE metal 2x2 layout & custom camera policy restored from CF KV",
-    `document.body.innerText.includes("LIVE") && document.body.innerText.includes("CAM: vm-asia")`,
+    `reloaded LIVE ${NETWORK_LABEL} 2x2 layout & custom camera policy restored from KV`,
+    `document.body.innerText.includes("LIVE") && document.body.innerText.includes(${JSON.stringify(`CAM: ${CAMERA_TARGET_NODE}`)})`,
     20_000,
   );
-  await cdp.captureFrame("08-live-metal-after-reload");
-  console.log(`  [PASS 08] Camera Studio (${customCamStatus}) + hard reload restored LIVE metal & CAM: vm-asia from CF KV`);
+  await cdp.captureFrame("08-live-after-reload");
+  console.log(`  [PASS 08] Camera Studio (${customCamStatus}) + hard reload restored LIVE ${NETWORK_LABEL} & CAM: ${CAMERA_TARGET_NODE} from KV`);
   await sleep(STEP_MS);
 }
 
 async function step09SignOut(cdp) {
   if (KEEP_SIGNED_IN) {
     await ensureSignedIn(cdp);
-    await cdp.showBanner("DONE! Chrome kept open & signed into LIVE metal for inspection");
-    console.log("  [PASS 09] --keep-signed-in active: leaving persistent Chrome open on LIVE metal");
+    await cdp.clearOverlays();
+    console.log(`  [PASS 09] --keep-signed-in active: leaving persistent Chrome clean & open on LIVE ${NETWORK_LABEL}`);
     return;
   }
   await dismissOverlays(cdp);
   if (await isSignedInLive(cdp)) {
     await cdp.showBanner("09 Signing out -> verifying clean return to SIM mode");
-    await cdp.click('[href="/auth/logout"]', "sign out link");
+    await cdp.openConfigMenu();
+    await cdp.click('#config-page:not([hidden]) [href="/auth/logout"]', "sign out link");
   }
   await cdp.waitFor(
     "signed-out SIM mode after logout",
-    `document.body.innerText.includes("SIM") && document.querySelector('[href="/login"]') !== null && !document.body.innerText.includes("legion")`,
+    `document.body.innerText.includes("SIM") && document.querySelector('[data-testid="simulated-badge"]') !== null && !document.body.innerText.includes(${JSON.stringify(PRIMARY_NODE)})`,
     15_000,
   );
-  await cdp.showBanner("09 ALL LIVE BROWSER CAPABILITIES VERIFIED!");
+  await cdp.showBanner(`09 ALL ISOLATED ${NETWORK_LABEL.toUpperCase()} BROWSER CAPABILITIES VERIFIED!`);
   await sleep(Math.min(800, KEEP_OPEN_MS));
-  console.log("  [PASS 09] clean sign-out to SIM mode with zero leaked nodes");
+  console.log(`  [PASS 09] clean sign-out to SIM mode with zero leaked ${NETWORK_LABEL} nodes`);
 }
 
 const STEPS = {

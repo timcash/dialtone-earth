@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { timingSafeEqual } from "node:crypto";
+import { Readable } from "node:stream";
 
 const ALLOWED_MESH_ROUTES = new Set([
   "/api/mesh",
@@ -14,6 +15,7 @@ const ALLOWED_MESH_ROUTES = new Set([
 ]);
 
 const TEST_RUN_RE = /^\/api\/test-runs\/([a-f0-9]{32})(\/log)?$/;
+const STAGING_PREFIX = "/__staging";
 
 export function constantTimeTokenMatch(provided, expected) {
   if (typeof provided !== "string" || typeof expected !== "string") return false;
@@ -56,7 +58,13 @@ export function createOriginBridgeHandler({
       res.end(JSON.stringify(payload));
     };
 
-    if (req.method !== "GET" && req.method !== "HEAD") {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    const isStagingProxy =
+      url.pathname === STAGING_PREFIX ||
+      url.pathname.startsWith(`${STAGING_PREFIX}/`);
+
+    // Non-staging mesh routes remain strictly read-only.
+    if (!isStagingProxy && req.method !== "GET" && req.method !== "HEAD") {
       sendJson(405, { error: "Method not allowed; origin bridge is read-only" });
       return;
     }
@@ -70,7 +78,63 @@ export function createOriginBridgeHandler({
       return;
     }
 
-    const url = new URL(req.url || "/", "http://127.0.0.1");
+    // Owner-verified staging proxy for https://test.dialtone.earth/ -> local Vite Test Dashboard (127.0.0.1:5174)
+    if (isStagingProxy) {
+      const ownerHeader = String(req.headers["x-dialtone-staging-owner"] || "").trim();
+      if (!ownerHeader) {
+        sendJson(403, { error: "Missing verified staging owner header" });
+        return;
+      }
+      const subPath = url.pathname.slice(STAGING_PREFIX.length) || "/";
+      const target = new URL(`${subPath}${url.search}`, testOrigin).toString();
+      try {
+        const chunks = [];
+        if (req.method !== "GET" && req.method !== "HEAD") {
+          for await (const chunk of req) chunks.push(chunk);
+        }
+        const controller = new AbortController();
+        req.once("close", () => controller.abort());
+        const isStream = subPath === "/api/cdp/stream";
+        const upstream = await fetchImpl(target, {
+          method: req.method,
+          headers: {
+            ...(req.headers["content-type"]
+              ? { "Content-Type": String(req.headers["content-type"]) }
+              : {}),
+            ...(req.headers.accept ? { Accept: String(req.headers.accept) } : {}),
+          },
+          body: chunks.length > 0 ? Buffer.concat(chunks) : undefined,
+          redirect: "manual",
+          signal: isStream ? controller.signal : AbortSignal.timeout(15_000),
+        });
+        const outHeaders = {
+          "Content-Type":
+            upstream.headers.get("Content-Type") || "application/octet-stream",
+          "Cache-Control": "private, no-store",
+          "X-Content-Type-Options": "nosniff",
+        };
+        const loc = upstream.headers.get("Location");
+        if (loc) outHeaders.Location = loc;
+        res.writeHead(upstream.status, outHeaders);
+        if (upstream.body) {
+          const nodeStream = Readable.fromWeb(upstream.body);
+          nodeStream.on("error", () => {
+            if (!res.writableEnded) res.end();
+          });
+          nodeStream.pipe(res);
+        } else {
+          res.end();
+        }
+      } catch {
+        if (!res.headersSent) {
+          sendJson(502, { error: "Local staging test dashboard upstream unavailable" });
+        } else if (!res.writableEnded) {
+          res.end();
+        }
+      }
+      return;
+    }
+
     let upstreamBase = null;
     let upstreamPath = url.pathname;
 
@@ -128,7 +192,7 @@ if (isDirectRun) {
   const handler = createOriginBridgeHandler({ token, meshOrigin, testOrigin });
   createServer(handler).listen(port, "127.0.0.1", () => {
     console.log(`dialtone-earth origin bridge listening on http://127.0.0.1:${port}`);
-    console.log(`  mesh upstream: ${meshOrigin}`);
-    console.log(`  test upstream: ${testOrigin}`);
+    console.log(`  mesh upstream:    ${meshOrigin}`);
+    console.log(`  staging upstream: ${testOrigin}`);
   });
 }

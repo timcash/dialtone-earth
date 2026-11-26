@@ -285,7 +285,12 @@ test("GET /login renders pure grayscale dialtone.earth form without Cloudflare/o
   assert.ok(html.includes('type="email"'));
   assert.ok(html.includes("Send sign-in link"));
   assert.ok(!/oakleon|cloudflareaccess/i.test(html));
-  assert.ok(!/<script\b/i.test(html), "login page must not embed inline scripts");
+  assert.ok(html.includes('id="auth-globe-stage"'), "login page must include spinning H3 globe mount");
+  assert.ok(html.includes('src="/auth-globe.js"'), "login page must load same-origin /auth-globe.js module");
+  assert.ok(
+    !/<script(?![^>]*\bsrc="\/auth(?:-globe|\/auto-verify)\.js")/i.test(html),
+    "login page must not embed inline scripts or third-party scripts",
+  );
 });
 
 test("magic-link end-to-end: request, scanner-safe GET verify, single-use POST verify, live session, and logout", async () => {

@@ -5,8 +5,8 @@ main() {
     set -eu
     version=${DIALTONE_EARTH_VERSION:-}
     install_dir=${DIALTONE_EARTH_INSTALL_DIR:-"$HOME/.local/bin"}
-    release_base=${DIALTONE_EARTH_RELEASE_BASE_URL:-https://github.com/timcash/dialtone-earth/releases}
-    source_url=${DIALTONE_EARTH_SOURCE_URL:-https://github.com/timcash/dialtone-earth/archive/refs/heads/main.tar.gz}
+    release_base=${DIALTONE_EARTH_RELEASE_BASE_URL:-https://dialtone.earth/releases/dialtone-earth}
+    source_url=${DIALTONE_EARTH_SOURCE_URL:-https://dialtone.earth/api/code/dialtone-earth/archive/main.tar.gz}
     download_dir=
     stage_dir=
 

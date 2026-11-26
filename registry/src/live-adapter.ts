@@ -254,7 +254,7 @@ function adaptPlugins(
         asString(manifest.kind) === "blob-binary"
           ? "stdio-rpc-blob"
           : "builtin-quic",
-      repo: asString(manifest.source_repo) || "timcash/dialtone",
+      repo: asString(manifest.source_repo) || "dialtone.earth/api/plugins",
       digest: shortenDigest(asString(manifest.blob_digest)),
       sizeBytes: asNumber(manifest.bytes) ?? 0,
       status: item.verified === false ? "verifying" : "deployed",

@@ -33,6 +33,42 @@ export function elapsedSeconds(row, now = Date.now()) {
   return Number.isFinite(elapsed) ? Math.max(0, elapsed) : 0;
 }
 
+/**
+ * Computes progress-bar fill percentage and overtime flag against the test's last elapsed time.
+ * @param {{status?: unknown, timestamp?: unknown, elapsed?: unknown, last_elapsed?: unknown}} row
+ * @param {number} [fallbackLastSec]
+ * @param {number} [now]
+ * @returns {{elapsed: number, lastSec: number, percent: number, overtime: boolean}}
+ */
+export function computeTestProgress(row, fallbackLastSec = 0, now = Date.now()) {
+  const status = normalizeStatus(row.status);
+  const elapsed = elapsedSeconds(row, now);
+  const parsedLast = Number.parseFloat(String(row.last_elapsed ?? "0"));
+  const lastSec =
+    Number.isFinite(parsedLast) && parsedLast > 0
+      ? parsedLast
+      : Number.isFinite(fallbackLastSec) && fallbackLastSec > 0
+        ? fallbackLastSec
+        : 0;
+
+  if (status === "running") {
+    if (lastSec > 0) {
+      const percent = Math.min(100, (elapsed / lastSec) * 100);
+      return { elapsed, lastSec, percent, overtime: elapsed > lastSec };
+    }
+    const percent = Math.min(85, (elapsed / (elapsed + 2)) * 100);
+    return { elapsed, lastSec: 0, percent, overtime: false };
+  }
+  if (status === "pass") {
+    const overtime = lastSec > 0 && elapsed > lastSec;
+    return { elapsed, lastSec, percent: 100, overtime };
+  }
+  if (status === "fail") {
+    return { elapsed, lastSec, percent: 100, overtime: true };
+  }
+  return { elapsed, lastSec, percent: 0, overtime: false };
+}
+
 export const SECTION_META = [
   {
     title: "Synced Live Browser (CDP)",

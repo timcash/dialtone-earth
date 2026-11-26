@@ -292,7 +292,10 @@ test("query workspace supports custom queries, best-effort rate tiers, and 1 / 1
   // Layout pane counts & responsive auto default (top/bottom mobile, left/right wide)
   assert.equal(resolveEffectiveLayout("auto", 390), "1/1");
   assert.equal(resolveEffectiveLayout("auto", 1280), "1|1");
-  assert.equal(resolveEffectiveLayout("1|2", 390), "1|2");
+  assert.equal(resolveEffectiveLayout("1|2", 390), "1/1");
+  assert.equal(resolveEffectiveLayout("2x2", 390), "1/1");
+  assert.equal(resolveEffectiveLayout("1", 390), "1");
+  assert.equal(resolveEffectiveLayout("1|2", 1280), "1|2");
   assert.equal(paneCountForLayout("1"), 1);
   assert.equal(paneCountForLayout("1|1"), 2);
   assert.equal(paneCountForLayout("1/1"), 2);

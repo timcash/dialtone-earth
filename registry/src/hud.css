@@ -109,6 +109,17 @@ a {
   grid-row: 2;
 }
 
+@media (max-width: 899px) {
+  .earth-split-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .earth-split-grid .earth-pane {
+    grid-column: auto !important;
+    grid-row: auto !important;
+  }
+}
+
 .earth-pane {
   display: flex;
   flex-direction: column;
@@ -206,58 +217,132 @@ a {
   cursor: grabbing;
 }
 
-.tour-captions {
+.globe-meta-overlay {
   position: absolute;
-  top: 12px;
-  left: 14px;
-  max-width: min(560px, calc(100% - 28px));
+  top: 10px;
+  right: 12px;
   z-index: 5;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
+  align-items: flex-end;
+  gap: 2px;
+  max-width: min(360px, calc(100% - 20px));
+  text-align: right;
   pointer-events: none;
 }
 
-.cc-head-row {
-  display: flex;
+.globe-meta-brand-row {
+  display: inline-flex;
   flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
   gap: 6px;
+  background: rgba(14, 14, 14, 0.78);
+  padding: 2px 6px;
+  pointer-events: auto;
+}
+
+.globe-meta-line {
+  font-size: 11px;
+  color: var(--muted);
+  background: rgba(14, 14, 14, 0.78);
+  padding: 1px 6px;
+  line-height: 1.3;
+}
+
+.globe-meta-line.is-ch {
+  color: var(--ok);
+  font-weight: 700;
+}
+
+:root[data-theme="light"] .globe-meta-brand-row,
+:root[data-theme="light"] .globe-meta-line {
+  background: rgba(244, 244, 244, 0.88);
+}
+
+/* On narrow/mobile screens, reserve clean space at top of the black globe pane
+   so the right-aligned metadata overlay NEVER overlaps the 3D Earth sphere. */
+@media (max-width: 899px) {
+  .globe-meta-overlay {
+    top: 6px;
+    right: 8px;
+    gap: 1px;
+  }
+
+  .globe-meta-brand-row .tbl-brand {
+    font-size: 12px;
+  }
+
+  .globe-meta-line {
+    font-size: 10px;
+    padding: 1px 4px;
+  }
+
+  .globe-pane-mount {
+    top: 76px;
+    height: calc(100% - 76px);
+  }
+}
+
+/* Closed captions on the bottom bar with optional tour ◀ ▶ on left and menu on right */
+.bottom-tour-nav {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.bottom-cc {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.bottom-cc-kicker {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--warn);
+}
+
+.bottom-cc-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.bottom-cc-headline {
+  font-weight: 700;
+  color: var(--fg);
+}
+
+.bottom-cc-sep {
+  color: var(--muted);
+}
+
+.bottom-cc-body {
+  color: var(--muted);
 }
 
 .cc-controls {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  pointer-events: auto;
-  background: rgba(14, 14, 14, 0.88);
-}
-
-.cc-line {
-  background: rgba(14, 14, 14, 0.88);
-  padding: 3px 8px;
-}
-
-:root[data-theme="light"] .cc-line,
-:root[data-theme="light"] .cc-controls {
-  background: rgba(244, 244, 244, 0.92);
 }
 
 .cc-kicker {
   font-size: 12px;
   font-weight: 700;
   color: var(--warn);
-}
-
-.cc-headline {
-  font-size: 18px;
-  font-weight: 700;
-}
-
-.cc-body {
-  font-size: 14px;
-  color: var(--muted);
 }
 
 /* Bottom workspace bar */
@@ -269,11 +354,36 @@ a {
 
 .earth-table-bar {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px 12px;
-  padding: 8px 14px;
+  padding: 6px 12px;
+}
+
+.earth-table-bar .earth-bar-right {
+  flex-shrink: 0;
+}
+
+@media (max-width: 899px) {
+  .earth-table-bar {
+    gap: 6px 8px;
+    padding: 6px 8px;
+  }
+
+  .bottom-cc {
+    gap: 5px;
+  }
+
+  .bottom-cc-text {
+    font-size: 11px;
+    line-height: 1.3;
+  }
+
+  .bottom-tour-nav .tbl-chip {
+    padding: 3px 6px;
+    font-size: 11px;
+  }
 }
 
 .tbl-brand {

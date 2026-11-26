@@ -16,7 +16,7 @@ export const DEFAULT_META_PATH = resolve(
   process.env.DIALTONE_CDP_META || join(REPO_ROOT, "logs", "cdp.json"),
 );
 export const DEFAULT_TARGET_ORIGIN = (
-  process.env.QA_ORIGIN || "https://metal.dialtone.earth"
+  process.env.QA_ORIGIN || "http://127.0.0.1:5175"
 ).replace(/\/+$/, "");
 export const DEFAULT_DASHBOARD_URL =
   (process.env.DIALTONE_DASHBOARD_URL || "http://127.0.0.1:5174").replace(/\/+$/, "") + "/";
@@ -64,11 +64,12 @@ export function findDialtoneBinary() {
   return null;
 }
 
-export function runDialtone(bin, args, timeoutMs = 20_000) {
+export function runDialtone(bin, args, timeoutMs = 20_000, envOverrides = null) {
   return execFileSync(bin, args, {
     encoding: "utf8",
     timeout: timeoutMs,
     stdio: ["ignore", "pipe", "pipe"],
+    ...(envOverrides ? { env: { ...process.env, ...envOverrides } } : {}),
   });
 }
 
@@ -231,6 +232,9 @@ export class CdpClient {
 
   async showBanner(stepLabel) {
     if (!this.headed) return;
+    if (this.mirror) {
+      await this.mirror.showBanner(stepLabel).catch(() => {});
+    }
     try {
       await this.eval(`(() => {
         let el = document.getElementById("__cdp_qa_banner");
@@ -239,27 +243,44 @@ export class CdpClient {
           el.id = "__cdp_qa_banner";
           Object.assign(el.style, {
             position: "fixed",
-            top: "10px",
-            right: "10px",
+            top: "8px",
+            left: "10px",
+            maxWidth: "min(460px, calc(100vw - 20px))",
             zIndex: "2147483647",
-            background: "#090d0a",
-            color: "#7ff2a4",
-            border: "1px solid #38d66b",
-            padding: "7px 13px",
+            background: "rgba(10, 10, 10, 0.94)",
+            color: "#ffffff",
+            border: "1.5px solid #ffffff",
+            padding: "4px 9px",
             fontFamily: 'ui-monospace, "SFMono-Regular", Consolas, monospace',
-            fontSize: "12px",
+            fontSize: "11px",
             fontWeight: "700",
             letterSpacing: "0.04em",
             pointerEvents: "none",
-            boxShadow: "0 2px 12px rgba(0,0,0,0.65)",
+            boxShadow: "0 2px 12px rgba(0,0,0,0.75)",
           });
           document.body.appendChild(el);
         }
-        el.textContent = ${JSON.stringify(`SYNCED CDP // ${stepLabel}`)};
+        el.textContent = ${JSON.stringify(`TEST // ${stepLabel}`)};
         return true;
       })()`);
     } catch {
       // ignore during page navigation
+    }
+  }
+
+  async clearOverlays() {
+    if (this.mirror) {
+      await this.mirror.clearOverlays().catch(() => {});
+    }
+    try {
+      await this.eval(`(() => {
+        for (const id of ["__cdp_qa_banner", "__cdp_spotlight_box", "__cdp_spotlight_label"]) {
+          document.getElementById(id)?.remove();
+        }
+        return true;
+      })()`);
+    } catch {
+      // ignore
     }
   }
 
@@ -281,19 +302,129 @@ export class CdpClient {
     return null;
   }
 
-  async click(selector, label) {
-    await this.waitFor(label || selector, `document.querySelector(${JSON.stringify(selector)}) !== null`);
-    if (this.headed) {
+  async spotlight(selector, caption = "", holdMs = 350) {
+    if (!this.headed) return;
+    if (this.mirror) {
+      await this.mirror.spotlight(selector, caption, 0).catch(() => {});
+    }
+    try {
       await this.eval(`(() => {
         const el = document.querySelector(${JSON.stringify(selector)});
         if (!el) return false;
         el.scrollIntoView({ block: "nearest", inline: "nearest" });
-        const prev = el.style.outline;
-        el.style.outline = "2px solid #38d66b";
-        setTimeout(() => { el.style.outline = prev; }, 450);
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) return false;
+
+        let box = document.getElementById("__cdp_spotlight_box");
+        if (!box) {
+          box = document.createElement("div");
+          box.id = "__cdp_spotlight_box";
+          Object.assign(box.style, {
+            position: "fixed",
+            zIndex: "2147483645",
+            pointerEvents: "none",
+            border: "2.5px solid #ffffff",
+            background: "rgba(255, 255, 255, 0.11)",
+            boxShadow: "0 0 0 3px rgba(255, 255, 255, 0.25), 0 0 24px rgba(255, 255, 255, 0.45)",
+            transition: "all 220ms cubic-bezier(0.2, 0.8, 0.2, 1)",
+          });
+          document.body.appendChild(box);
+        }
+        const pad = 4;
+        const left = Math.max(2, rect.left - pad);
+        const top = Math.max(2, rect.top - pad);
+        const width = Math.min(window.innerWidth - left - 2, rect.width + pad * 2);
+        const height = Math.min(window.innerHeight - top - 2, rect.height + pad * 2);
+        Object.assign(box.style, {
+          opacity: "1",
+          left: left + "px",
+          top: top + "px",
+          width: width + "px",
+          height: height + "px",
+        });
+
+        let lbl = document.getElementById("__cdp_spotlight_label");
+        if (!lbl) {
+          lbl = document.createElement("div");
+          lbl.id = "__cdp_spotlight_label";
+          Object.assign(lbl.style, {
+            position: "fixed",
+            zIndex: "2147483646",
+            pointerEvents: "none",
+            background: "#ffffff",
+            color: "#0b0b0b",
+            border: "1px solid #ffffff",
+            padding: "3px 8px",
+            fontFamily: 'ui-monospace, "SFMono-Regular", Consolas, monospace',
+            fontSize: "11px",
+            fontWeight: "800",
+            letterSpacing: "0.04em",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.8)",
+            whiteSpace: "nowrap",
+            transition: "all 220ms cubic-bezier(0.2, 0.8, 0.2, 1)",
+          });
+          document.body.appendChild(lbl);
+        }
+        const labelTop = top > 34 ? top - 26 : Math.min(window.innerHeight - 28, top + height + 6);
+        const labelLeft = Math.min(Math.max(6, window.innerWidth - 220), Math.max(6, left));
+        lbl.textContent = ${JSON.stringify(caption ? `▶ ${caption}` : `▶ ${selector}`)};
+        Object.assign(lbl.style, {
+          opacity: "1",
+          left: labelLeft + "px",
+          top: labelTop + "px",
+        });
         return true;
       })()`);
-      await sleep(Math.min(300, this.stepMs));
+      if (holdMs > 0) await sleep(Math.min(holdMs, this.stepMs + 250));
+    } catch {
+      // ignore during transitions
+    }
+  }
+
+  async pulseClick(selector) {
+    if (!this.headed) return;
+    if (this.mirror) {
+      await this.mirror.pulseClick(selector).catch(() => {});
+    }
+    try {
+      await this.eval(`(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        const dot = document.createElement("div");
+        Object.assign(dot.style, {
+          position: "fixed",
+          zIndex: "2147483647",
+          pointerEvents: "none",
+          left: (r.left + r.width / 2 - 14) + "px",
+          top: (r.top + r.height / 2 - 14) + "px",
+          width: "28px",
+          height: "28px",
+          borderRadius: "50%",
+          border: "3px solid #ffffff",
+          background: "rgba(255, 255, 255, 0.35)",
+          transform: "scale(0.5)",
+          opacity: "1",
+          transition: "transform 360ms ease-out, opacity 360ms ease-out",
+        });
+        document.body.appendChild(dot);
+        requestAnimationFrame(() => {
+          dot.style.transform = "scale(2.1)";
+          dot.style.opacity = "0";
+        });
+        setTimeout(() => dot.remove(), 420);
+        return true;
+      })()`);
+    } catch {
+      // ignore
+    }
+  }
+
+  async click(selector, label) {
+    await this.waitFor(label || selector, `document.querySelector(${JSON.stringify(selector)}) !== null`);
+    if (this.headed) {
+      await this.spotlight(selector, `CLICK: ${label || selector}`, Math.min(350, this.stepMs));
+      await this.pulseClick(selector);
     }
     await this.eval(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
@@ -301,10 +432,30 @@ export class CdpClient {
       el.click();
       return true;
     })()`);
+    // Mirror non-mutating UI navigation clicks onto mobile preview so both formats
+    // stay visually synced without racing KV writes, triggering duplicate magic-link
+    // submits on empty forms, or navigating mobile away from #mobile-preview.
+    const skipMirrorClick =
+      selector.includes("apply-camera-ts") ||
+      selector.includes("cam-preset-") ||
+      selector.includes("layout-") ||
+      selector.includes("cfg-add-") ||
+      selector.includes("cfg-assign") ||
+      selector.includes('type="submit"') ||
+      selector.includes("/login") ||
+      selector.includes("/auth/logout");
+    if (this.mirror && !skipMirrorClick) {
+      await this.mirror
+        .eval(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (el) el.click(); return Boolean(el); })()`)
+        .catch(() => {});
+    }
   }
 
-  async typeInto(selector, value) {
+  async typeInto(selector, value, label = "") {
     await this.waitFor(selector, `document.querySelector(${JSON.stringify(selector)}) !== null`);
+    if (this.headed) {
+      await this.spotlight(selector, `TYPE: ${label || selector}`, Math.min(250, this.stepMs));
+    }
     await this.eval(`(() => {
       const el = document.querySelector(${JSON.stringify(selector)});
       el.focus();
@@ -322,47 +473,93 @@ export class CdpClient {
     }
   }
 
+  async openConfigMenu() {
+    const isOpen = await this.eval(
+      `Boolean(document.querySelector('#config-page:not([hidden]) [data-testid="config-done"]'))`,
+    );
+    if (!isOpen) {
+      await this.click('[data-testid="open-config"]', "menu button");
+      await this.waitFor(
+        "menu overlay open",
+        `document.querySelector('#config-page:not([hidden]) [data-testid="config-done"]') !== null && document.querySelector('#config-page:not([hidden]) [data-testid="cfg-query-table"]') !== null`,
+      );
+    }
+  }
+
+  async closeConfigMenu() {
+    const isOpen = await this.eval(
+      `Boolean(document.querySelector('#config-page:not([hidden]) [data-testid="config-done"]'))`,
+    );
+    if (isOpen) {
+      await this.click('#config-page:not([hidden]) [data-testid="config-done"]', "menu done button");
+      await this.waitFor(
+        "menu overlay closed",
+        `document.querySelector('#config-page:not([hidden])') === null`,
+      );
+    }
+  }
+
   async pickBottomTab(substr, label) {
-    const matchExpr = `(() => {
-      const target = ${JSON.stringify(substr.toLowerCase())};
-      const btns = Array.from(document.querySelectorAll('[data-pick-content]'));
-      return btns.find((b) => {
-        const txt = (b.textContent || '').trim().toLowerCase();
+    // Window selection is done through the menu overlay (`open-config`).
+    const target = substr.toLowerCase();
+    await this.openConfigMenu();
+    // Focus pane #2 if present (so pane #1 stays 3D globe), else pane #1
+    const hasPane1 = await this.eval(
+      `document.querySelector('#config-page:not([hidden]) [data-testid="cfg-pane-1"]') !== null`,
+    );
+    if (hasPane1) {
+      await this.click('#config-page:not([hidden]) [data-testid="cfg-pane-1"]', "pane #2 slot");
+    } else {
+      await this.click('#config-page:not([hidden]) [data-testid="cfg-pane-0"]', "pane #1 slot");
+    }
+    const assigned = await this.eval(`(() => {
+      const target = ${JSON.stringify(target)};
+      const rows = Array.from(document.querySelectorAll('#config-page:not([hidden]) [data-testid="cfg-query-table"] tbody tr'));
+      const row = rows.find((r) => {
+        const txt = (r.querySelector('.cfg-q-name')?.textContent || '').trim().toLowerCase();
         if (target === 'host') return /(?:^|[\\s:])host$/.test(txt);
         return txt.includes(target);
-      }) || null;
-    })()`;
-    await this.waitFor(label || `bottom tab ${substr}`, `${matchExpr} !== null`);
-    const clicked = await this.eval(`(() => {
-      const btn = ${matchExpr};
-      if (!btn) return false;
+      });
+      if (!row) return null;
+      const btn = row.querySelector('[data-cfg-assign]');
+      if (!btn) return null;
       btn.click();
-      return btn.textContent.trim();
+      return (row.querySelector('.cfg-q-name')?.textContent || '').trim();
     })()`);
-    assert.ok(clicked, `Could not find bottom tab matching ${substr}`);
-    return clicked;
+    assert.ok(assigned, `Could not find window set matching ${substr} in menu`);
+    await sleep(Math.min(200, this.stepMs));
+    await this.closeConfigMenu();
+    return assigned;
   }
 
   async ensureQueryTab(kind) {
+    const target = kind.toLowerCase();
+    await this.openConfigMenu();
     const exists = await this.eval(`(() => {
-      const target = ${JSON.stringify(kind.toLowerCase())};
-      return Array.from(document.querySelectorAll('[data-pick-content]')).some((b) => {
-        const txt = (b.textContent || '').trim().toLowerCase();
+      const target = ${JSON.stringify(target)};
+      const rows = Array.from(document.querySelectorAll('#config-page:not([hidden]) [data-testid="cfg-query-table"] tbody tr'));
+      return rows.some((r) => {
+        const txt = (r.querySelector('.cfg-q-name')?.textContent || '').trim().toLowerCase();
         if (target === 'host') return /(?:^|[\\s:])host$/.test(txt);
         return txt.includes(target);
       });
     })()`);
-    if (exists) return false;
-    await this.click('[data-testid="open-config"]', "config button");
-    await this.click(`[data-testid="cfg-add-${kind}"]`, `add + ${kind} query`);
-    await sleep(Math.min(300, this.stepMs));
-    await this.click('[data-testid="config-done"]', "config done button");
-    return true;
+    if (!exists) {
+      await this.click(`#config-page:not([hidden]) [data-testid="cfg-add-${kind}"]`, `add + ${kind} query`);
+      await sleep(Math.min(250, this.stepMs));
+    }
+    await this.closeConfigMenu();
+    return !exists;
   }
 
   /** Close only the CDP WebSocket connection — never terminates the browser. */
   disconnect() {
     this.closedByCaller = true;
+    try {
+      this.mirror?.disconnect();
+    } catch {
+      // ignore
+    }
     try {
       this.ws.close();
     } catch {
@@ -506,11 +703,12 @@ export async function ensurePersistentBrowser(opts = {}) {
     );
 
     appTarget =
-      pageTargets.find((t) => String(t.url || "").startsWith(targetOrigin)) ||
+      pageTargets.find((t) => String(t.url || "").startsWith(targetOrigin) && !String(t.url || "").includes("#mobile-preview")) ||
       pageTargets.find(
         (t) =>
           !String(t.url || "").startsWith(dashboardOrigin) &&
-          !String(t.url || "").startsWith("devtools://"),
+          !String(t.url || "").startsWith("devtools://") &&
+          !String(t.url || "").includes("#mobile-preview"),
       ) ||
       null;
 
@@ -551,19 +749,11 @@ export async function ensurePersistentBrowser(opts = {}) {
 
       if (!reused || forceArrange || shouldCreateDashboard) {
         const bCdp = getBrowserCdp();
-        if (dashboardTarget?.id) {
-          await setWindowBounds(bCdp, dashboardTarget.id, {
-            left: 10,
-            top: 20,
-            width: 530,
-            height: 980,
-          });
-        }
         await setWindowBounds(bCdp, appTarget.id, {
-          left: dashboardTarget?.id ? 545 : 60,
+          left: 40,
           top: 20,
-          width: dashboardTarget?.id ? 1365 : 1440,
-          height: 980,
+          width: 1440,
+          height: 940,
         });
       }
     }
@@ -608,6 +798,39 @@ export async function connectAppSession(opts = {}) {
   await cdp.send("Page.enable");
   await cdp.send("Runtime.enable");
   await cdp.send("Network.enable");
+  // Attach optional mobile preview mirror (#mobile-preview) so spotlights, banners & UI steps highlight BOTH formats!
+  try {
+    const targetOrigin = (opts.targetOrigin || DEFAULT_TARGET_ORIGIN).replace(/\/+$/, "");
+    const status = await probeCdp(ensured.port);
+    const mobileTarget = (status.targets || []).find(
+      (t) => t.type === "page" && String(t.url || "").includes("#mobile-preview"),
+    );
+    if (mobileTarget?.webSocketDebuggerUrl) {
+      const mirror = new CdpClient(mobileTarget.webSocketDebuggerUrl, {
+        targetOrigin,
+        headed: !opts.headless,
+        stepMs: 0,
+        saveScreenshots: false,
+      });
+      await mirror.send("Page.enable");
+      await mirror.send("Runtime.enable");
+      const rawDpr = await cdp.eval("window.devicePixelRatio || 1").catch(() => 1);
+      const hostDpr = Number.isFinite(Number(rawDpr)) && Number(rawDpr) > 0 && Number(rawDpr) <= 4 ? Number(rawDpr) : 1;
+      await mirror.send("Emulation.setDeviceMetricsOverride", {
+        width: 390,
+        height: 844,
+        deviceScaleFactor: hostDpr,
+        mobile: true,
+      });
+      if (!String(mobileTarget.url || "").startsWith(targetOrigin)) {
+        await mirror.send("Page.navigate", { url: `${targetOrigin}/#mobile-preview` });
+        await sleep(600);
+      }
+      cdp.mirror = mirror;
+    }
+  } catch {
+    // mobile mirror is optional
+  }
   if (!opts.headless) {
     await cdp.send("Page.bringToFront");
   }

@@ -32,6 +32,7 @@ Subcommands:
   status      Show current live site state (public GET /api/live)
   set         Apply live edits to https://dialtone.earth/ (PATCH /api/live)
   reset       Clear all live overrides back to stock defaults (DELETE /api/live)
+  watch       Watch local files and auto-deploy live to https://dialtone.earth/
   init-token  Generate LIVE_CONTROL_TOKEN locally and upload to Cloudflare Worker
 
 Flags for "live set":
@@ -48,6 +49,17 @@ Flags for "live set":
   --url <url>         Target site base URL (default: https://dialtone.earth)
   --token-file <path> Path to LIVE_CONTROL_TOKEN file (or set DIALTONE_LIVE_TOKEN)
   --json              Emit raw JSON response
+
+Flags for "live watch":
+  --test              Run synced staging tests on every file save (default: true)
+  --browser           Drive persistent CDP Chrome projected into test.dialtone.earth (default: true)
+  --keep-signed-in    Preserve the authenticated LIVE metal session in Chrome (default: true)
+  --deploy-on-pass    Opt-in auto-deploy on pass (default: false — promote manually from test.dialtone.earth)
+  --push              Also push git bundle + source archives to Cloudflare R2 on pass
+  --filter <regexp>   Optional Go test filter regexp (empty runs all tests)
+  --screenshots       Capture annotated test UI screenshots after each loop (default: true, dry-run)
+  --screenshots-publish-live  Explicitly upload screenshots to Cloudflare R2 (default: false)
+  --interval <dur>    File change poll interval (default: 1.2s)
 `
 
 type liveSiteState struct {
@@ -109,6 +121,8 @@ func runLive(args []string, stdout, stderr io.Writer) error {
 		return runLiveSet(args[1:], stdout, stderr)
 	case "reset":
 		return runLiveReset(args[1:], stdout, stderr)
+	case "watch":
+		return runLiveWatch(args[1:], stdout, stderr)
 	case "init-token":
 		return runLiveInitToken(args[1:], stdout, stderr)
 	default:
@@ -338,6 +352,121 @@ func runLiveReset(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
+func runLiveWatch(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("live watch", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	interval := fs.Duration("interval", 1200*time.Millisecond, "File change poll interval")
+	runTests := fs.Bool("test", true, "Run synced tests before deploying live")
+	browser := fs.Bool("browser", true, "Run with persistent CDP Chrome browser synced to the test dashboard")
+	keepSignedIn := fs.Bool("keep-signed-in", true, "Keep persistent CDP Chrome signed into LIVE metal")
+	deployOnPass := fs.Bool("deploy-on-pass", false, "Opt-in auto-deploy to https://dialtone.earth/ on pass (default false: promote from test.dialtone.earth)")
+	filter := fs.String("filter", "", "Optional Go test filter regexp (empty runs all tests)")
+	screenshots := fs.Bool("screenshots", true, "Capture annotated test UI screenshots after each test loop (dry-run by default)")
+	screenshotsPublishLive := fs.Bool("screenshots-publish-live", false, "Explicitly upload screenshots to Cloudflare R2 after each loop (default: false)")
+	pushCode := fs.Bool("push", false, "Also push git bundle to Cloudflare R2 on pass")
+	repo := fs.String("repo", defaultRepoSlug(), "Repository slug when --push is set")
+	baseURL := fs.String("url", defaultLiveSiteURL, "Registry base URL when --push is set")
+	tokenFile := fs.String("token-file", "", "Path to LIVE_CONTROL_TOKEN file when --push is set")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	root, err := projectRoot()
+	if err != nil {
+		return err
+	}
+	watchDirs := []string{
+		filepath.Join(root, "registry", "src"),
+		filepath.Join(root, "registry", "worker"),
+	}
+	snapshotMap := func() map[string]string {
+		m := map[string]string{}
+		for _, dir := range watchDirs {
+			_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
+				if walkErr != nil || d.IsDir() {
+					return nil
+				}
+				if info, err := d.Info(); err == nil {
+					rel, _ := filepath.Rel(root, path)
+					m[filepath.ToSlash(rel)] = fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
+				}
+				return nil
+			})
+		}
+		return m
+	}
+	last := snapshotMap()
+	fmt.Fprintf(stdout, "live watch: watching registry/src & registry/worker (every %s) -> test -> deploy https://dialtone.earth/\n", *interval)
+	fmt.Fprintln(stdout, "live watch: save any file to trigger synced tests + auto-deploy on pass (Ctrl+C to stop)")
+	ticker := time.NewTicker(*interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		cur := snapshotMap()
+		var changed []string
+		for k, v := range cur {
+			if last[k] != v {
+				changed = append(changed, k)
+			}
+		}
+		for k := range last {
+			if _, ok := cur[k]; !ok {
+				changed = append(changed, k)
+			}
+		}
+		if len(changed) == 0 {
+			continue
+		}
+		last = cur
+		changedLabel := strings.Join(changed, ", ")
+		fmt.Fprintf(stdout, "\n[%s] live watch: edit detected in %s\n", time.Now().Format("15:04:05"), changedLabel)
+		writePipelineState(root, pipelineState{
+			Stage:   "edit",
+			Changed: changedLabel,
+			Message: "Edit detected in " + changedLabel + " — triggering synced test pipeline...",
+		})
+		if *runTests {
+			testArgs := []string{"test"}
+			if *browser {
+				testArgs = append(testArgs, "--browser")
+				if *keepSignedIn {
+					testArgs = append(testArgs, "--keep-signed-in")
+				}
+			}
+			if *deployOnPass {
+				testArgs = append(testArgs, "--deploy-on-pass")
+			}
+			if *filter != "" {
+				testArgs = append(testArgs, "--filter", *filter)
+			}
+			if *screenshots {
+				testArgs = append(testArgs, "--screenshots")
+				if *screenshotsPublishLive {
+					testArgs = append(testArgs, "--screenshots-publish-live")
+				}
+			} else {
+				testArgs = append(testArgs, "--no-screenshots")
+			}
+			testArgs = append(testArgs, "--trigger-file", changedLabel)
+			if code := Run(testArgs, stdout, stderr); code != 0 {
+				fmt.Fprintf(stderr, "live watch: tests failed (exit %d) — deploy blocked\n", code)
+				continue
+			}
+		} else if *deployOnPass {
+			if err := runDeployLive(stdout, stderr); err != nil {
+				fmt.Fprintf(stderr, "live watch deploy error: %v\n", err)
+				continue
+			}
+		}
+		if *pushCode {
+			if tok, err := loadLiveControlToken(*tokenFile); err == nil {
+				if _, err := pushCodeBundle(root, *repo, "", "", *baseURL, tok, true, stdout); err != nil {
+					fmt.Fprintf(stderr, "live watch code push error: %v\n", err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func runLiveInitToken(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("live init-token", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -410,6 +539,13 @@ func runDeployLive(stdout, stderr io.Writer) error {
 	if !dirExists(regDir) {
 		return fmt.Errorf("registry directory not found at %s", regDir)
 	}
+	// Sync root install.sh & install.ps1 into registry/public so https://dialtone.earth/install.{sh,ps1} stay current.
+	for _, script := range []string{"install.sh", "install.ps1"} {
+		src := filepath.Join(root, script)
+		if fileExists(src) {
+			_ = copyFile(src, filepath.Join(regDir, "public", script))
+		}
+	}
 	fmt.Fprintln(stdout, "deploy --live: building registry frontend + Worker")
 	buildCmd := exec.Command("pnpm", "run", "build")
 	buildCmd.Dir = regDir
@@ -430,6 +566,29 @@ func runDeployLive(stdout, stderr io.Writer) error {
 		return fmt.Errorf("wrangler deploy: %w", err)
 	}
 	fmt.Fprintln(stdout, "deploy --live: published live to https://dialtone.earth/")
+	return nil
+}
+
+func runProductionSmokeVerification(root string, stdout, stderr io.Writer) error {
+	regDir := filepath.Join(root, "registry")
+	script := filepath.Join(regDir, "scripts", "qa-prod-smoke.mjs")
+	if !fileExists(script) {
+		return fmt.Errorf("production smoke script not found at %s", script)
+	}
+	fmt.Fprintln(stdout, "prod-verify: running live production smoke suite against https://dialtone.earth/")
+	cmd := exec.Command("node", "scripts/qa-prod-smoke.mjs")
+	cmd.Dir = regDir
+	env := os.Environ()
+	if tok, err := loadLiveControlToken(""); err == nil && tok != "" {
+		env = append(env, "DIALTONE_LIVE_TOKEN="+tok)
+	}
+	cmd.Env = env
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("live production smoke verification failed: %w", err)
+	}
+	fmt.Fprintln(stdout, "prod-verify: live production https://dialtone.earth/ verified (4/4 checks passed)")
 	return nil
 }
 

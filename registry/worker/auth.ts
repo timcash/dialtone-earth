@@ -244,6 +244,21 @@ export async function handleAuthRoute(
     );
   }
 
+  if (pathname === "/auth/auto-verify.js") {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return methodNotAllowed(securityHeaders);
+    }
+    const js = `document.addEventListener("DOMContentLoaded",function(){var f=document.querySelector('form[data-auto-submit="1"]');if(f)f.submit();});\n`;
+    return new Response(js, {
+      status: 200,
+      headers: {
+        ...securityHeaders,
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Cache-Control": "private, no-store",
+      },
+    });
+  }
+
   if (pathname === "/auth/verify") {
     if (request.method !== "GET" && request.method !== "HEAD") {
       return methodNotAllowed(securityHeaders);
@@ -608,31 +623,31 @@ function renderLoginPage(opts: {
   errorCode: string;
   enabled: boolean;
 }): string {
-  const subtitle =
-    opts.host !== "dialtone.earth" && opts.host.endsWith(".dialtone.earth")
-      ? opts.host
-      : "";
-
+  const isStaging = opts.host.toLowerCase() === "test.dialtone.earth";
   let statusBanner = "";
   if (opts.sent) {
-    statusBanner = `<p class="notice" role="status">Check your email for a sign-in link.</p>`;
+    statusBanner = `<p class="notice is-ok" role="status">Check your email for a sign-in link.</p>`;
   } else if (opts.errorCode === "invalid" || opts.errorCode === "expired") {
-    statusBanner = `<p class="notice" role="alert">That sign-in link has expired or was already used. Request a new one.</p>`;
+    statusBanner = `<p class="notice is-err" role="alert">That sign-in link has expired or was already used. Request a new one.</p>`;
   } else if (opts.errorCode === "email") {
-    statusBanner = `<p class="notice" role="alert">Enter a valid email address.</p>`;
+    statusBanner = `<p class="notice is-err" role="alert">Enter a valid email address.</p>`;
   } else if (!opts.enabled) {
     statusBanner = `<p class="notice" role="status">Sign-in is not enabled on this hostname.</p>`;
   }
 
-  return renderAuthShell(
-    "dialtone.earth",
-    `
-      <div class="brand">
-        <img src="/favicon.svg" alt="" width="28" height="28" />
-        <div class="brand-text">
-          <h1>dialtone.earth</h1>
-          ${subtitle ? `<p class="sub">${escapeHtml(subtitle)}</p>` : ""}
-        </div>
+  return renderAuthShell({
+    title: `DIALTONE // EARTH — ${opts.host}`,
+    host: opts.host,
+    badge: isStaging ? "STAGING AUTH" : "MESH AUTH",
+    caption: isStaging
+      ? "Owner magic-link sign-in for live test dashboard & deploy."
+      : "Single-use passwordless email link for private mesh access.",
+    backHref: isStaging ? "https://dialtone.earth/" : "/",
+    backLabel: isStaging ? "dialtone.earth" : "overview",
+    bodyHtml: `
+      <div class="card-head">
+        <span class="card-kicker">${isStaging ? "OWNER SIGN IN" : "SIGN IN"}</span>
+        <span class="card-host">${escapeHtml(opts.host)}</span>
       </div>
       ${statusBanner}
       <form method="POST" action="/api/auth/request-link" class="auth-form">
@@ -650,7 +665,7 @@ function renderLoginPage(opts: {
         <button type="submit">Send sign-in link</button>
       </form>
     `,
-  );
+  });
 }
 
 function renderVerifyPage(opts: {
@@ -659,130 +674,223 @@ function renderVerifyPage(opts: {
   email?: string;
   token?: string;
 }): string {
+  const isStaging = opts.host.toLowerCase() === "test.dialtone.earth";
   if (!opts.valid || !opts.token) {
-    return renderAuthShell(
-      "dialtone.earth",
-      `
-        <div class="brand">
-          <img src="/favicon.svg" alt="" width="28" height="28" />
-          <div class="brand-text">
-            <h1>dialtone.earth</h1>
-            <p class="sub">${escapeHtml(opts.host)}</p>
-          </div>
+    return renderAuthShell({
+      title: `DIALTONE // EARTH — ${opts.host}`,
+      host: opts.host,
+      badge: "LINK EXPIRED",
+      caption: "Magic links expire after 10 minutes or a single sign-in.",
+      backHref: "/login",
+      backLabel: "sign in",
+      bodyHtml: `
+        <div class="card-head">
+          <span class="card-kicker">VERIFY LINK</span>
+          <span class="card-host">${escapeHtml(opts.host)}</span>
         </div>
-        <p class="notice" role="alert">This sign-in link has expired or was already used.</p>
+        <p class="notice is-err" role="alert">This sign-in link has expired or was already used.</p>
         <a class="btn-link" href="/login">Request a new link</a>
       `,
-    );
+    });
   }
 
-  return renderAuthShell(
-    "dialtone.earth",
-    `
-      <div class="brand">
-        <img src="/favicon.svg" alt="" width="28" height="28" />
-        <div class="brand-text">
-          <h1>dialtone.earth</h1>
-          <p class="sub">${escapeHtml(opts.host)}</p>
-        </div>
+  const autoSubmit = isStaging;
+  return renderAuthShell({
+    title: `DIALTONE // EARTH — ${opts.host}`,
+    host: opts.host,
+    badge: isStaging ? "STAGING VERIFY" : "MESH VERIFY",
+    caption: autoSubmit
+      ? `Completing single-use magic-link session for ${opts.host}.`
+      : `Confirm single-use sign-in to ${opts.host}.`,
+    backHref: "/login",
+    backLabel: "sign in",
+    bodyHtml: `
+      <div class="card-head">
+        <span class="card-kicker">VERIFY SESSION</span>
+        <span class="card-host">${escapeHtml(opts.host)}</span>
       </div>
       <p class="identity">${escapeHtml(opts.email ?? "")}</p>
-      <form method="POST" action="/api/auth/verify" class="auth-form">
+      <form method="POST" action="/api/auth/verify" class="auth-form"${autoSubmit ? ' data-auto-submit="1"' : ""}>
         <input type="hidden" name="token" value="${escapeHtml(opts.token)}" />
-        <button type="submit">Continue to ${escapeHtml(opts.host)}</button>
-      </form>
+        <button type="submit">${autoSubmit ? `Signing in to ${escapeHtml(opts.host)}…` : `Continue to ${escapeHtml(opts.host)}`}</button>
+      </form>${autoSubmit ? '\n      <script src="/auth/auto-verify.js" defer></script>' : ""}
     `,
-  );
+  });
 }
 
-function renderAuthShell(title: string, bodyHtml: string): string {
+function renderAuthShell(opts: {
+  title: string;
+  host: string;
+  badge: string;
+  caption: string;
+  backHref: string;
+  backLabel: string;
+  bodyHtml: string;
+}): string {
   return `<!doctype html>
 <html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#0d0d0d" />
+    <meta name="theme-color" content="#000000" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <title>${escapeHtml(title)}</title>
+    <title>${escapeHtml(opts.title)}</title>
     <style>
       *, *::before, *::after { box-sizing: border-box; }
       :root {
-        --bg: #0d0d0d;
-        --panel: #151515;
-        --border: #2a2a2a;
-        --border-focus: #8a8a8a;
-        --ink: #ececec;
-        --muted: #8c8c8c;
-        --btn-bg: #e6e6e6;
+        --bg: #000000;
+        --panel: rgba(10, 10, 10, 0.80);
+        --line: #262626;
+        --line-hi: #484848;
+        --ink: #f0f0f0;
+        --muted: #8a8a8a;
+        --ok: #36d66b;
+        --warn: #e0b44a;
+        --err: #ff6b6b;
+        --btn-bg: #f0f0f0;
         --btn-bg-hover: #ffffff;
-        --btn-ink: #0d0d0d;
+        --btn-ink: #000000;
       }
       html, body {
         margin: 0;
-        min-height: 100%;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
         background: var(--bg);
         color: var(--ink);
         font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
         -webkit-font-smoothing: antialiased;
       }
-      body {
-        min-height: 100vh;
+      #auth-globe-stage {
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        width: 100%;
+        height: 100%;
+        background: #000000;
+      }
+      #auth-globe-stage canvas {
+        display: block;
+        width: 100% !important;
+        height: 100% !important;
+      }
+      .globe-meta-overlay {
+        position: fixed;
+        top: 10px;
+        right: 12px;
+        z-index: 5;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 3px;
+        text-align: right;
+        pointer-events: none;
+      }
+      .globe-meta-brand-row {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        background: rgba(10, 10, 10, 0.78);
+        padding: 3px 8px;
+      }
+      .tbl-brand {
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        color: var(--ink);
+      }
+      .auth-pill {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        color: var(--ok);
+        border: 1px solid rgba(54, 214, 107, 0.55);
+        padding: 1px 6px;
+        background: rgba(10, 10, 10, 0.85);
+      }
+      .globe-meta-line {
+        font-size: 11px;
+        color: var(--muted);
+        background: rgba(10, 10, 10, 0.78);
+        padding: 1px 8px;
+        line-height: 1.35;
+      }
+      .globe-meta-line.is-ch {
+        color: var(--ok);
+        font-weight: 700;
+      }
+      .auth-center {
+        position: fixed;
+        inset: 0;
+        z-index: 4;
         display: grid;
         place-items: center;
-        padding: 24px;
+        padding: 84px 16px 64px;
+        pointer-events: none;
       }
       main {
         width: 100%;
-        max-width: 360px;
+        max-width: 368px;
         background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 28px 24px;
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        border: 1px solid var(--line-hi);
+        padding: 20px;
+        pointer-events: auto;
       }
-      .brand {
+      .card-head {
         display: flex;
-        align-items: center;
-        gap: 12px;
-        margin-bottom: 22px;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+        padding-bottom: 12px;
+        margin-bottom: 16px;
+        border-bottom: 1px solid var(--line);
       }
-      .brand img {
-        display: block;
-        border-radius: 6px;
-        flex: none;
-      }
-      .brand-text h1 {
-        margin: 0;
-        font-size: 1rem;
-        font-weight: 600;
-        letter-spacing: 0.04em;
+      .card-kicker {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
         color: var(--ink);
       }
-      .brand-text .sub {
-        margin: 2px 0 0;
-        font-size: 0.78rem;
+      .card-host {
+        font-size: 11px;
         color: var(--muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       .notice {
-        margin: 0 0 16px;
-        padding: 10px 12px;
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        background: #1c1c1c;
-        color: #d4d4d4;
-        font-size: 0.82rem;
+        margin: 0 0 14px;
+        padding: 9px 11px;
+        border: 1px solid var(--line-hi);
+        background: rgba(18, 18, 18, 0.92);
+        color: var(--ink);
+        font-size: 12px;
         line-height: 1.45;
       }
+      .notice.is-ok {
+        border-color: rgba(54, 214, 107, 0.6);
+        color: var(--ok);
+      }
+      .notice.is-err {
+        border-color: rgba(255, 107, 107, 0.65);
+        color: var(--err);
+      }
       .identity {
-        margin: 0 0 16px;
-        color: var(--muted);
-        font-size: 0.85rem;
+        margin: 0 0 14px;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        background: rgba(0, 0, 0, 0.65);
+        color: var(--ink);
+        font-size: 12px;
         word-break: break-all;
       }
       .auth-form {
         display: flex;
         flex-direction: column;
-        gap: 12px;
+        gap: 10px;
       }
       .sr-only {
         position: absolute;
@@ -797,14 +905,13 @@ function renderAuthShell(title: string, bodyHtml: string): string {
       }
       input[type="email"] {
         width: 100%;
-        height: 44px;
+        height: 40px;
         padding: 0 12px;
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        background: #0d0d0d;
+        border: 1px solid var(--line-hi);
+        background: rgba(0, 0, 0, 0.88);
         color: var(--ink);
         font: inherit;
-        font-size: 0.9rem;
+        font-size: 13px;
         outline: none;
         transition: border-color 120ms ease;
       }
@@ -812,38 +919,122 @@ function renderAuthShell(title: string, bodyHtml: string): string {
         color: #6b6b6b;
       }
       input[type="email"]:focus {
-        border-color: var(--border-focus);
+        border-color: #ffffff;
       }
       button, .btn-link {
         display: inline-flex;
         align-items: center;
         justify-content: center;
         width: 100%;
-        height: 44px;
+        height: 40px;
         padding: 0 14px;
-        border: 1px solid #444444;
-        border-radius: 6px;
+        border: 1px solid var(--btn-bg);
         background: var(--btn-bg);
         color: var(--btn-ink);
         font: inherit;
-        font-size: 0.88rem;
-        font-weight: 600;
-        letter-spacing: 0.02em;
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
         text-decoration: none;
         cursor: pointer;
-        transition: background-color 120ms ease;
+        transition: background-color 120ms ease, border-color 120ms ease;
       }
       button:hover, .btn-link:hover {
         background: var(--btn-bg-hover);
+        border-color: var(--btn-bg-hover);
       }
       button:focus-visible, .btn-link:focus-visible {
-        outline: 2px solid #b5b5b5;
+        outline: 2px solid #ffffff;
         outline-offset: 2px;
+      }
+      .auth-bottom-bar {
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 6;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 8px 12px;
+        background: rgba(8, 8, 8, 0.92);
+        border-top: 1px solid var(--line);
+        font-size: 11px;
+      }
+      .bottom-cc {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+      }
+      .bottom-cc-kicker {
+        flex-shrink: 0;
+        font-weight: 700;
+        color: var(--warn);
+      }
+      .bottom-cc-text {
+        color: var(--muted);
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        line-height: 1.35;
+      }
+      .bottom-chip {
+        flex-shrink: 0;
+        display: inline-flex;
+        align-items: center;
+        padding: 5px 10px;
+        border: 1px solid var(--line-hi);
+        background: #0d0d0d;
+        color: var(--ink);
+        text-decoration: none;
+        font-size: 11px;
+        letter-spacing: 0.03em;
+      }
+      .bottom-chip:hover {
+        border-color: #ffffff;
+        background: #181818;
+      }
+      @media (max-width: 899px) {
+        .globe-meta-overlay {
+          top: 6px;
+          right: 8px;
+          gap: 2px;
+        }
+        .tbl-brand { font-size: 12px; }
+        .globe-meta-line { font-size: 10px; padding: 1px 5px; }
+        .auth-center { padding: 72px 12px 62px; }
+        main { padding: 16px; }
+        .auth-bottom-bar { padding: 6px 8px; gap: 8px; }
+        .bottom-cc-text { font-size: 10px; }
       }
     </style>
   </head>
   <body>
-    <main>${bodyHtml}</main>
+    <div id="auth-globe-stage" aria-hidden="true"></div>
+    <div class="globe-meta-overlay">
+      <div class="globe-meta-brand-row">
+        <span class="tbl-brand">DIALTONE // EARTH</span>
+        <span class="auth-pill">${escapeHtml(opts.badge)}</span>
+      </div>
+      <div class="globe-meta-line is-ch">H3: GEOSPATIAL MESH · MAGIC LINK</div>
+      <div class="globe-meta-line">${escapeHtml(opts.host)}</div>
+    </div>
+    <div class="auth-center">
+      <main>${opts.bodyHtml}</main>
+    </div>
+    <footer class="auth-bottom-bar">
+      <div class="bottom-cc">
+        <span class="bottom-cc-kicker">CC AUTH</span>
+        <span class="bottom-cc-text">${escapeHtml(opts.caption)}</span>
+      </div>
+      <a class="bottom-chip" href="${escapeHtml(opts.backHref)}">${escapeHtml(opts.backLabel)}</a>
+    </footer>
+    <script type="module" src="/auth-globe.js"></script>
   </body>
 </html>`;
 }

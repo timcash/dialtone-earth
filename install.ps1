@@ -70,7 +70,7 @@ function Install-DialtoneEarth {
                     'ARM64' { $asset = 'dialtone-earth-windows-arm64.exe' }
                     default { throw "Unsupported Windows architecture: $arch." }
                 }
-                $releaseBase = 'https://github.com/timcash/dialtone-earth/releases'
+                $releaseBase = 'https://dialtone.earth/releases/dialtone-earth'
                 if ($env:DIALTONE_EARTH_RELEASE_BASE_URL) { $releaseBase = $env:DIALTONE_EARTH_RELEASE_BASE_URL.TrimEnd('/') }
                 $baseUri = [Uri]$releaseBase
                 if (-not $baseUri.IsAbsoluteUri -or ($baseUri.Scheme -ne 'https' -and -not ($baseUri.Scheme -eq 'http' -and $baseUri.Host -eq '127.0.0.1'))) {
@@ -95,7 +95,7 @@ function Install-DialtoneEarth {
                 if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
                     throw 'Go 1.24+ is required for source installs (or pass -Version vX.Y.Z for a release binary).'
                 }
-                $sourceUrl = 'https://github.com/timcash/dialtone-earth/archive/refs/heads/main.zip'
+                $sourceUrl = 'https://dialtone.earth/api/code/dialtone-earth/archive/main.zip'
                 if ($env:DIALTONE_EARTH_SOURCE_URL) { $sourceUrl = $env:DIALTONE_EARTH_SOURCE_URL }
                 $sourceUri = [Uri]$sourceUrl
                 if (-not $sourceUri.IsAbsoluteUri -or ($sourceUri.Scheme -ne 'https' -and -not ($sourceUri.Scheme -eq 'http' -and $sourceUri.Host -eq '127.0.0.1'))) {

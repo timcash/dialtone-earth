@@ -17,8 +17,12 @@ export function resolveEffectiveLayout(
   pref: LayoutPreference,
   viewportWidth: number,
 ): SplitLayout {
+  // Mobile viewports must strictly stay single-column (never 1|1, 1|2, or 2x2).
+  if (viewportWidth < MOBILE_BREAKPOINT_PX) {
+    return pref === "1" ? "1" : "1/1";
+  }
   if (pref !== "auto") return pref;
-  return viewportWidth < MOBILE_BREAKPOINT_PX ? "1/1" : "1|1";
+  return "1|1";
 }
 
 export interface SavedQuery {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -33,20 +35,231 @@ const goTestTimeout = "30m"
 // nothing else writes it, and it is never committed.
 var stateFile = filepath.Join("logs", "state.json")
 
+// pipelineFile tracks the live Edit -> Test -> Deploy stage for the dashboard.
+var pipelineFile = filepath.Join("logs", "pipeline.json")
+
+// deployedFile records the exact staging content fingerprint last deployed live
+// to https://dialtone.earth/ so the deploy button only lights up when new changes exist.
+var deployedFile = filepath.Join("logs", "deployed.json")
+
+type deployedRecord struct {
+	DeployedHash string `json:"deployed_hash"`
+	VersionID    string `json:"version_id,omitempty"`
+	VerifiedProd bool   `json:"verified_prod,omitempty"`
+	DeployedAt   string `json:"deployed_at"`
+}
+
+type pipelineState struct {
+	Stage                string `json:"stage"`
+	Message              string `json:"message"`
+	Changed              string `json:"changed,omitempty"`
+	TargetOrigin         string `json:"target_origin,omitempty"`
+	DeployURL            string `json:"deploy_url,omitempty"`
+	VersionID            string `json:"version_id,omitempty"`
+	TestedHash           string `json:"tested_hash,omitempty"`
+	DeployedHash         string `json:"deployed_hash,omitempty"`
+	Passed               int    `json:"passed"`
+	Failed               int    `json:"failed"`
+	Total                int    `json:"total"`
+	ScreenshotsURL       string `json:"screenshots_url,omitempty"`
+	ScreenshotsDir       string `json:"screenshots_dir,omitempty"`
+	ScreenshotsCount     int    `json:"screenshots_count,omitempty"`
+	ScreenshotsAnnotated int    `json:"screenshots_annotated,omitempty"`
+	ScreenshotsLoopID    string `json:"screenshots_loop_id,omitempty"`
+	UpdatedAt            string `json:"updated_at"`
+}
+
+func readPipelineState(root string) pipelineState {
+	var p pipelineState
+	if raw, err := os.ReadFile(filepath.Join(root, pipelineFile)); err == nil {
+		_ = json.Unmarshal(raw, &p)
+	}
+	return p
+}
+
+func readDeployedRecord(root string) deployedRecord {
+	var rec deployedRecord
+	if raw, err := os.ReadFile(filepath.Join(root, deployedFile)); err == nil {
+		_ = json.Unmarshal(raw, &rec)
+	}
+	return rec
+}
+
+func writeDeployedRecord(root string, rec deployedRecord) {
+	rec.DeployedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	_ = writeJSONFile(filepath.Join(root, deployedFile), rec)
+}
+
+// computeStagingFingerprint returns a deterministic SHA-256 hex digest over all
+// deployable dialtone.earth site & Worker source files. Matches ui/vite.config.ts.
+func computeStagingFingerprint(root string) string {
+	var relPaths []string
+	addFile := func(rel string) {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			relPaths = append(relPaths, rel)
+		}
+	}
+	addTree := func(relDir string) {
+		base := filepath.Join(root, filepath.FromSlash(relDir))
+		_ = filepath.WalkDir(base, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				name := d.Name()
+				if name == "node_modules" || name == "dist" || name == ".git" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			rel, relErr := filepath.Rel(root, path)
+			if relErr == nil {
+				relPaths = append(relPaths, filepath.ToSlash(rel))
+			}
+			return nil
+		})
+	}
+	addTree("registry/src")
+	addTree("registry/worker")
+	addFile("registry/index.html")
+	addFile("registry/wrangler.jsonc")
+	addFile("install.sh")
+	addFile("install.ps1")
+	sort.Strings(relPaths)
+	h := sha256.New()
+	for _, rel := range relPaths {
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			continue
+		}
+		_, _ = h.Write([]byte(rel))
+		_, _ = h.Write([]byte("\n"))
+		_, _ = h.Write(data)
+		_, _ = h.Write([]byte("\n"))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func writePipelineState(root string, p pipelineState) {
+	if p.DeployedHash == "" {
+		p.DeployedHash = readDeployedRecord(root).DeployedHash
+	}
+	p.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	_ = writeJSONFile(filepath.Join(root, pipelineFile), p)
+}
+
+func allBrowserTestsPassed(state *testState) bool {
+	if state == nil {
+		return false
+	}
+	browserTotal := 0
+	browserPass := 0
+	for _, t := range state.Tests {
+		if strings.HasPrefix(t.Name, "TestBrowser") {
+			browserTotal++
+			if t.Status == "pass" {
+				browserPass++
+			}
+		}
+	}
+	return browserTotal > 0 && browserPass == browserTotal
+}
+
+func countStateTotals(state *testState) (passed, failed, total int) {
+	if state == nil {
+		return 0, 0, 0
+	}
+	total = len(state.Tests)
+	for _, t := range state.Tests {
+		switch t.Status {
+		case "pass":
+			passed++
+		case "fail":
+			failed++
+		}
+	}
+	return passed, failed, total
+}
+
+func verifyStagingGate(root string) (int, int, error) {
+	raw, err := os.ReadFile(filepath.Join(root, stateFile))
+	if err != nil {
+		return 0, 0, fmt.Errorf("staging gate blocked: no test state found at %s (run tests first)", stateFile)
+	}
+	var state testState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return 0, 0, fmt.Errorf("staging gate blocked: invalid %s: %w", stateFile, err)
+	}
+	if len(state.Tests) == 0 {
+		return 0, 0, errors.New("staging gate blocked: test list is empty")
+	}
+	byName := make(map[string]string, len(state.Tests))
+	var passed, failed, running, pending int
+	for _, t := range state.Tests {
+		byName[t.Name] = t.Status
+		switch t.Status {
+		case "pass":
+			passed++
+		case "fail":
+			failed++
+		case "running":
+			running++
+		case "pending", "":
+			pending++
+		}
+	}
+	if running > 0 {
+		return passed, len(state.Tests), fmt.Errorf("staging gate blocked: %d test(s) still running", running)
+	}
+	if failed > 0 {
+		return passed, len(state.Tests), fmt.Errorf("staging gate blocked: %d test(s) failed — fix before deploying to dialtone.earth", failed)
+	}
+	if pending > 0 {
+		return passed, len(state.Tests), fmt.Errorf("staging gate blocked: %d test(s) still pending — run all tests first", pending)
+	}
+	if passed == 0 {
+		return 0, len(state.Tests), errors.New("staging gate blocked: 0 tests passed — run tests before deploying")
+	}
+	if !allBrowserTestsPassed(&state) {
+		return passed, len(state.Tests), errors.New("staging gate blocked: test-network browser tests (TestBrowser01..09) must all pass before deploying")
+	}
+	for _, required := range []string{
+		"TestDialtoneEarthOwnerOnlyAccess",
+		"TestDialtoneEarthCloudflareRegistry",
+		"TestUIUnitTests",
+	} {
+		if st, exists := byName[required]; exists && st != "pass" {
+			return passed, len(state.Tests), fmt.Errorf("staging gate blocked: required test %s is %q (must be pass)", required, st)
+		}
+	}
+	currentHash := computeStagingFingerprint(root)
+	pipe := readPipelineState(root)
+	if pipe.TestedHash == "" || pipe.TestedHash != currentHash {
+		return passed, len(state.Tests), errors.New("staging gate blocked: files changed since last passing test-network run — re-run tests first")
+	}
+	deployed := readDeployedRecord(root)
+	if deployed.DeployedHash != "" && deployed.DeployedHash == currentHash {
+		return passed, len(state.Tests), errors.New("nothing new to deploy: staging already matches live dialtone.earth")
+	}
+	return passed, len(state.Tests), nil
+}
+
 type testState struct {
 	GeneratedAt string      `json:"generated_at"`
 	Tests       []testEntry `json:"tests"`
 }
 
 type testEntry struct {
-	Name      string `json:"name"`
-	Title     string `json:"title"`
-	Section   string `json:"section,omitempty"`
-	Source    string `json:"source,omitempty"`
-	Status    string `json:"status"`
-	Elapsed   string `json:"elapsed"`
-	Timestamp string `json:"timestamp"`
-	TestID    string `json:"test-id"`
+	Name        string `json:"name"`
+	Title       string `json:"title"`
+	Section     string `json:"section,omitempty"`
+	Source      string `json:"source,omitempty"`
+	Status      string `json:"status"`
+	Elapsed     string `json:"elapsed"`
+	LastElapsed string `json:"last_elapsed,omitempty"`
+	Timestamp   string `json:"timestamp"`
+	TestID      string `json:"test-id"`
 }
 
 type testRunRecord struct {
@@ -134,11 +347,16 @@ func testSection(name string) string {
 		"TestDialtoneEarthSimulatedTour":
 		return "Live metal Data & UI"
 	case "TestDialtoneEarthCloudflareGateway",
+		"TestDialtoneEarthCloudflareRegistry",
+		"TestDialtoneEarthOwnerOnlyAccess",
+		"TestDialtoneEarthScreenshotsWorker",
+		"TestDialtoneEarthLiveOwnerAccessOnCloudflare",
 		"TestDialtoneEarthRegistrySecurityHeaders",
 		"TestDialtoneEarthOriginBridge",
 		"TestDialtoneEarthRegistryNetworks":
 		return "Cloudflare Gateway & Security"
 	case "TestDialtoneEarthLiveControlCLI",
+		"TestDialtoneEarthRegistryCLI",
 		"TestLintAllSources",
 		"TestBuildArtifacts",
 		"TestDeployLocalBundle",
@@ -150,18 +368,17 @@ func testSection(name string) string {
 	}
 }
 
+func previousElapsedForEntry(prev testEntry) string {
+	if prev.Status == "pass" && strings.TrimSpace(prev.Elapsed) != "" && strings.TrimSpace(prev.Elapsed) != "0" {
+		return strings.TrimSpace(prev.Elapsed)
+	}
+	if strings.TrimSpace(prev.LastElapsed) != "" && strings.TrimSpace(prev.LastElapsed) != "0" {
+		return strings.TrimSpace(prev.LastElapsed)
+	}
+	return ""
+}
+
 func buildInitialTestState(root string, selectedNames []string, filter string) testState {
-	if strings.TrimSpace(filter) == "" {
-		return newTestState(selectedNames)
-	}
-	allNames, err := listTestNames(root, "")
-	if err != nil || len(allNames) == 0 {
-		return newTestState(selectedNames)
-	}
-	selected := make(map[string]bool, len(selectedNames))
-	for _, n := range selectedNames {
-		selected[n] = true
-	}
 	previous := map[string]testEntry{}
 	if raw, err := os.ReadFile(filepath.Join(root, stateFile)); err == nil {
 		var prevState testState
@@ -171,17 +388,40 @@ func buildInitialTestState(root string, selectedNames []string, filter string) t
 			}
 		}
 	}
+	if strings.TrimSpace(filter) == "" {
+		state := newTestState(selectedNames)
+		for i := range state.Tests {
+			if prev, ok := previous[state.Tests[i].Name]; ok {
+				state.Tests[i].LastElapsed = previousElapsedForEntry(prev)
+			}
+		}
+		return state
+	}
+	allNames, err := listTestNames(root, "")
+	if err != nil || len(allNames) == 0 {
+		state := newTestState(selectedNames)
+		for i := range state.Tests {
+			if prev, ok := previous[state.Tests[i].Name]; ok {
+				state.Tests[i].LastElapsed = previousElapsedForEntry(prev)
+			}
+		}
+		return state
+	}
+	selected := make(map[string]bool, len(selectedNames))
+	for _, n := range selectedNames {
+		selected[n] = true
+	}
 	state := newTestState(allNames)
 	for i := range state.Tests {
 		name := state.Tests[i].Name
-		if selected[name] {
-			continue
-		}
 		if prev, ok := previous[name]; ok {
-			state.Tests[i].Status = prev.Status
-			state.Tests[i].Elapsed = prev.Elapsed
-			state.Tests[i].Timestamp = prev.Timestamp
-			state.Tests[i].TestID = prev.TestID
+			state.Tests[i].LastElapsed = previousElapsedForEntry(prev)
+			if !selected[name] {
+				state.Tests[i].Status = prev.Status
+				state.Tests[i].Elapsed = prev.Elapsed
+				state.Tests[i].Timestamp = prev.Timestamp
+				state.Tests[i].TestID = prev.TestID
+			}
 		}
 	}
 	return state

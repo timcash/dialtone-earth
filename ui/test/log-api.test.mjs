@@ -106,4 +106,8 @@ test("the dashboard serves generated state and per-execution logs", async (conte
 
   const badFilter = await fetch(`${base}/api/tests/run?filter=${encodeURIComponent("Test;rm -rf")}`, { method: "POST" });
   assert.equal(badFilter.status, 400);
+
+  // Staging promotion gate must refuse (412) while tests are running or failing
+  const blockedPromote = await fetch(`${base}/api/promote`, { method: "POST" });
+  assert.equal(blockedPromote.status, 412);
 });

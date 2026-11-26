@@ -459,10 +459,6 @@ function visibleQueryObjects(): SavedQuery[] {
   return out;
 }
 
-function isContentVisible(contentId: string): boolean {
-  return visiblePaneContents().includes(contentId);
-}
-
 function currentGlobeLayers(): GlobeQueryLayers {
   return buildQueryDrivenGlobeLayers(
     state.networks,
@@ -1130,52 +1126,69 @@ function renderWindowGrid(): void {
   }
 }
 
+function buildGlobeStatusMetadata(): {
+  brand: string;
+  statusPill: string;
+  trafficSummary: string;
+  camBadge: string;
+  authAction: string;
+} {
+  const summary = summarizeSystemResources(state.networks);
+  const primaryNet = networkBySlug(state.networkSlug);
+  const isLive = state.session.authenticated && !primaryNet.simulated;
+  const liveCtrl = !isLive ? state.liveSite : null;
+
+  const brand = liveCtrl?.title || "dialtone // earth";
+  const statusPill = isLive
+    ? `<span class="tbl-pill is-live" data-testid="live-badge">LIVE · ${escapeHtml(primaryNet.slug)}</span>`
+    : liveCtrl?.badge
+      ? `<span class="tbl-pill is-live" data-testid="live-cli-badge">${escapeHtml(liveCtrl.badge)}</span>`
+      : `<span class="tbl-pill is-sim" data-testid="simulated-badge">SIM · ${summary.onlineNodes}/${summary.totalNodes}</span>`;
+
+  const visibleQs = visibleQueryObjects();
+  const totalBps = visibleQs.reduce((acc, q) => acc + q.estBytesPerSec, 0);
+  const baseCadence = formatCadenceLabel(
+    state.currentPollMs,
+    state.unchangedStreak,
+    state.notModifiedCount,
+  );
+  const trafficSummary =
+    visibleQs.length === 0
+      ? `BASE ONLY · 0 B/s · ${baseCadence}`
+      : `${visibleQs.length} ACTIVE · ${totalBps} B/s · ${baseCadence}`;
+
+  const camBadge =
+    state.cameraResult.ok && state.cameraResult.target
+      ? `CAM: ${state.cameraResult.target.node ?? `${state.cameraResult.target.lat.toFixed(1)}°,${state.cameraResult.target.lng.toFixed(1)}°`}${state.cameraResult.target.reason ? ` (${state.cameraResult.target.reason})` : ""}`
+      : "CAM: free";
+
+  const authAction = isLive
+    ? `<a class="tbl-chip" data-testid="auth-logout" href="${escapeHtml(state.session.logout_url || "/cdn-cgi/access/logout")}">sign out</a>`
+    : state.session.login_url
+      ? `<a class="tbl-chip" data-testid="auth-login" href="${escapeHtml(state.session.login_url)}">sign in</a>`
+      : "";
+
+  return { brand, statusPill, trafficSummary, camBadge, authAction };
+}
+
 function renderGlobePane(paneIndex: number): string {
   const focused = paneIndex === state.activePaneIndex ? "is-focused" : "";
-  const isMax = state.maximizedPaneIndex === paneIndex;
   const layers = currentGlobeLayers();
-  const camSummary =
-    state.cameraResult.ok && state.cameraResult.target
-      ? `${state.cameraResult.target.node ?? `${state.cameraResult.target.lat.toFixed(1)}°,${state.cameraResult.target.lng.toFixed(1)}°`}${state.cameraResult.target.reason ? ` · ${state.cameraResult.target.reason}` : ""}`
-      : "free orbit";
-
-  const step = state.tourSteps[state.tourStepIndex] ?? state.tourSteps[0];
-  const liveCtrl = !state.session.authenticated ? state.liveSite : null;
-  const ccControls = `
-    <span class="cc-controls">
-      <button type="button" class="tbl-chip" data-action="prev-step" title="Previous tour step">◀</button>
-      <button type="button" class="tbl-chip ${state.tourPlaying ? "is-active" : ""}" data-action="toggle-tour" data-testid="toggle-tour" aria-pressed="${state.tourPlaying}">${state.tourPlaying ? "⏸ tour" : "▶ tour"}</button>
-      <button type="button" class="tbl-chip" data-action="next-step" title="Next tour step">▶</button>
-    </span>
-  `;
-
-  const ccHtml =
-    state.tourCaptionsVisible && step
-      ? `<div class="cc-head-row">
-          <span class="cc-line cc-kicker">CC · TOUR ${state.tourStepIndex + 1}/${state.tourSteps.length} · ${escapeHtml(step.label)}</span>
-          ${ccControls}
-        </div>
-        <div class="cc-line cc-headline">${escapeHtml(liveCtrl?.headline || step.headline)}</div>
-        <div class="cc-line cc-body">${escapeHtml(liveCtrl?.subline || step.caption)}</div>`
-      : `<div class="cc-head-row">${ccControls}</div>`;
+  const { brand, statusPill, trafficSummary, camBadge } = buildGlobeStatusMetadata();
 
   return `
     <div class="earth-pane globe-pane ${focused}" data-pane-index="${paneIndex}" data-testid="query-pane-${paneIndex}" data-pane-type="globe">
-      <div class="earth-pane-head">
-        <div class="pane-head-left">
-          <span class="pane-num">#${paneIndex + 1}</span>
-          <strong class="pane-title">3D H3 GLOBE</strong>
-          <span class="pane-source is-ch" data-testid="globe-layer-legend" title="${escapeHtml(layers.legendTooltip)}">${escapeHtml(layers.legend)}</span>
-        </div>
-        <div class="pane-head-right">
-          <span class="pane-stats" data-testid="globe-cam-stats">CAM: ${escapeHtml(camSummary)}</span>
-          <button type="button" class="tbl-chip" data-action="open-camera" title="Open fullscreen TypeScript camera editor">code</button>
-          <button type="button" class="tbl-chip ${isMax ? "is-active" : ""}" data-max-pane="${paneIndex}">${isMax ? "split" : "full"}</button>
-        </div>
-      </div>
       <div class="globe-pane-body">
         <div class="globe-pane-mount" data-testid="globe-pane-mount"></div>
-        <aside class="tour-captions" id="tour-captions" aria-live="polite" data-testid="tour-captions">${ccHtml}</aside>
+        <aside class="globe-meta-overlay" data-testid="globe-meta-overlay" aria-label="3D globe telemetry">
+          <div class="globe-meta-brand-row">
+            <a class="tbl-brand" href="/">${escapeHtml(brand)}</a>
+            ${statusPill}
+          </div>
+          <div class="globe-meta-line is-ch" data-testid="globe-layer-legend" title="${escapeHtml(layers.legendTooltip)}">${escapeHtml(layers.legend)}</div>
+          <div class="globe-meta-line" data-testid="mesh-cadence">${escapeHtml(trafficSummary)}</div>
+          <div class="globe-meta-line" data-testid="camera-readout">${escapeHtml(camBadge)}</div>
+        </aside>
       </div>
     </div>
   `;
@@ -1490,6 +1503,8 @@ function renderConfigPage(): void {
     : `BROWSER STORAGE · ${state.configSyncLabel} (SIGN IN TO SYNC VIA CLOUDFLARE)`;
 
   const cfgCaptionsHtml = renderFullscreenTourCaptionsHtml("config-tour-captions");
+  const { authAction } = buildGlobeStatusMetadata();
+  const isMax = state.maximizedPaneIndex !== null;
 
   cfgEl.hidden = false;
   cfgEl.innerHTML = `
@@ -1497,11 +1512,13 @@ function renderConfigPage(): void {
       ${cfgCaptionsHtml}
       <header class="cfg-header">
         <div class="earth-bar-left">
-          <span class="tbl-brand">CONFIG // APP WINDOWS &amp; QUERIES</span>
+          <span class="tbl-brand">MENU // WINDOWS &amp; CONFIG</span>
           <span class="tbl-cadence" data-testid="config-sync-status">${escapeHtml(saveLabel)}</span>
         </div>
         <div class="earth-bar-right">
-          <button type="button" class="tbl-chip" data-action="open-camera" data-testid="cfg-open-camera">camera studio</button>
+          <button type="button" class="tbl-chip ${isMax ? "is-active" : ""}" data-action="toggle-fullscreen" data-testid="toggle-fullscreen" aria-pressed="${isMax}">${isMax ? "split" : "full"}</button>
+          <button type="button" class="tbl-chip ${state.cameraOpen ? "is-active" : ""}" data-action="open-camera" data-testid="open-camera">camera</button>
+          ${authAction}
           <button type="button" class="tbl-chip" data-cfg-reset="1" data-testid="cfg-reset">reset defaults</button>
           <button type="button" class="tbl-chip is-active" data-action="close-config" data-testid="config-done">done</button>
         </div>
@@ -1549,61 +1566,11 @@ function renderBottomBar(): void {
   const dockEl = app.querySelector<HTMLElement>("#bottom-table-dock");
   if (!dockEl) return;
 
-  const summary = summarizeSystemResources(state.networks);
   const primaryNet = networkBySlug(state.networkSlug);
   const isLive = state.session.authenticated && !primaryNet.simulated;
   const liveCtrl = !isLive ? state.liveSite : null;
-
-  const brand = liveCtrl?.title || "dialtone // earth";
-  const statusPill = isLive
-    ? `<span class="tbl-pill is-live" data-testid="live-badge">LIVE · ${escapeHtml(primaryNet.slug)}</span>`
-    : liveCtrl?.badge
-      ? `<span class="tbl-pill is-live" data-testid="live-cli-badge">${escapeHtml(liveCtrl.badge)}</span>`
-      : `<span class="tbl-pill is-sim" data-testid="simulated-badge">SIM · ${summary.onlineNodes}/${summary.totalNodes}</span>`;
-
-  const visibleQs = visibleQueryObjects();
-  const totalBps = visibleQs.reduce((acc, q) => acc + q.estBytesPerSec, 0);
-  const baseCadence = formatCadenceLabel(
-    state.currentPollMs,
-    state.unchangedStreak,
-    state.notModifiedCount,
-  );
-  const trafficSummary =
-    visibleQs.length === 0
-      ? `BASE ONLY · 0 B/s · ${baseCadence}`
-      : `${visibleQs.length} ACTIVE · ${totalBps} B/s · ${baseCadence}`;
-
-  const camBadge =
-    state.cameraResult.ok && state.cameraResult.target
-      ? `CAM: ${state.cameraResult.target.node ?? `${state.cameraResult.target.lat.toFixed(1)}°,${state.cameraResult.target.lng.toFixed(1)}°`}${state.cameraResult.target.reason ? ` (${state.cameraResult.target.reason})` : ""}`
-      : "CAM: free";
-
-  const authAction = isLive
-    ? `<a class="tbl-chip" data-testid="auth-logout" href="${escapeHtml(state.session.logout_url || "/cdn-cgi/access/logout")}">sign out</a>`
-    : state.session.login_url
-      ? `<a class="tbl-chip" data-testid="auth-login" href="${escapeHtml(state.session.login_url)}">sign in</a>`
-      : "";
-
-  const activeContent = state.paneContents[state.activePaneIndex];
-  const globeChipCls =
-    activeContent === GLOBE_PANE_ID
-      ? "is-active"
-      : isContentVisible(GLOBE_PANE_ID)
-        ? "is-shown"
-        : "";
-  const globeChip = `<button type="button" class="tbl-tab ${globeChipCls}" data-pick-content="${GLOBE_PANE_ID}" data-testid="pick-globe">globe</button>`;
-
-  const queryChips = state.queries
-    .map((q) => {
-      const cls =
-        activeContent === q.id
-          ? "is-active"
-          : isContentVisible(q.id)
-            ? "is-shown"
-            : "";
-      return `<button type="button" class="tbl-tab ${cls}" data-pick-content="${escapeHtml(q.id)}" title="${escapeHtml(q.source)} · rate=${escapeHtml(q.rate)}">${escapeHtml(q.label)}</button>`;
-    })
-    .join("");
+  const step = state.tourSteps[state.tourStepIndex] ?? state.tourSteps[0];
+  const inTourMode = state.tourSteps.length > 1 && (!isLive || state.tourPlaying);
 
   const liveBannerBar = state.liveError
     ? `<div class="tbl-banner-bar is-warn">${escapeHtml(state.liveError)}</div>`
@@ -1611,27 +1578,34 @@ function renderBottomBar(): void {
       ? `<div class="tbl-banner-bar is-live" data-testid="live-cli-banner"><strong>REV #${liveCtrl.revision}</strong> ${escapeHtml(liveCtrl.banner)}</div>`
       : "";
 
-  const isMax = state.maximizedPaneIndex !== null;
+  const tourNavHtml = inTourMode
+    ? `<div class="bottom-tour-nav" data-testid="bottom-tour-nav">
+        <button type="button" class="tbl-chip" data-action="prev-step" data-testid="tour-prev" title="Previous tour step" aria-label="Previous tour step">◀</button>
+        <button type="button" class="tbl-chip" data-action="next-step" data-testid="tour-next" title="Next tour step" aria-label="Next tour step">▶</button>
+      </div>`
+    : "";
+
+  const ccKicker = step
+    ? `CC ${state.tourStepIndex + 1}/${state.tourSteps.length}`
+    : isLive
+      ? `LIVE · ${primaryNet.slug}`
+      : "CC";
+  const ccHeadline = liveCtrl?.headline || step?.headline || primaryNet.slug;
+  const ccBody = liveCtrl?.subline || step?.caption || "";
 
   dockEl.innerHTML = `
     <div class="earth-table-frame">
       ${liveBannerBar}
       <div class="earth-table-bar">
-        <div class="earth-bar-left">
-          <a class="tbl-brand" href="/">${escapeHtml(brand)}</a>
-          ${statusPill}
-          <span class="tbl-cadence" data-testid="mesh-cadence">${escapeHtml(trafficSummary)}</span>
-          <span class="tbl-cadence" data-testid="camera-readout">${escapeHtml(camBadge)}</span>
-        </div>
-        <div class="earth-bar-tabs" role="tablist" aria-label="Panels and query set">
-          ${globeChip}
-          ${queryChips}
+        ${tourNavHtml}
+        <div class="bottom-cc" id="tour-captions" data-testid="tour-captions" aria-live="polite">
+          <span class="bottom-cc-kicker">${escapeHtml(ccKicker)}</span>
+          <span class="bottom-cc-text">
+            <strong class="bottom-cc-headline">${escapeHtml(ccHeadline)}</strong>${ccBody ? `<span class="bottom-cc-sep"> — </span><span class="bottom-cc-body">${escapeHtml(ccBody)}</span>` : ""}
+          </span>
         </div>
         <div class="earth-bar-right">
-          <button type="button" class="tbl-chip ${isMax ? "is-active" : ""}" data-action="toggle-fullscreen" data-testid="toggle-fullscreen" aria-pressed="${isMax}">${isMax ? "split" : "full"}</button>
-          <button type="button" class="tbl-chip ${state.cameraOpen ? "is-active" : ""}" data-action="open-camera" data-testid="open-camera">camera</button>
-          <button type="button" class="tbl-chip ${state.configOpen ? "is-active" : ""}" data-action="open-config" data-testid="open-config">config</button>
-          ${authAction}
+          <button type="button" class="tbl-chip ${state.configOpen ? "is-active" : ""}" data-action="open-config" data-testid="open-config">menu</button>
         </div>
       </div>
     </div>
@@ -1938,6 +1912,7 @@ function bindInteractions(): void {
     ?.addEventListener("click", () => {
       state.maximizedPaneIndex =
         state.maximizedPaneIndex !== null ? null : state.activePaneIndex;
+      state.configOpen = false;
       renderAll();
     });
 
