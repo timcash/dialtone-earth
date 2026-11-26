@@ -960,6 +960,7 @@ function renderMenuOverlay(menuEl: HTMLElement, catalog: WorkspaceContent[], ass
                 ? `<button type="button" class="tbl-chip" data-testid="close-browser">close persistent chrome</button>`
                 : `<button type="button" class="tbl-chip is-primary" data-testid="launch-browser">launch persistent chrome</button>`
             }
+            <a class="tbl-chip" href="/diagnostics">diagnostics</a>
             <a class="tbl-chip" href="/logs">logs</a>
             <a class="tbl-chip" href="/screenshots/">screenshots</a>
             ${isRemoteHost ? `<a class="tbl-chip" href="/code">code</a>` : ""}
@@ -1360,7 +1361,297 @@ async function refreshLogsIndex(): Promise<void> {
     </div>`;
 }
 
-if (location.pathname.replace(/\/$/, "").endsWith("/logs")) {
+type DiagCheckItem = {
+  check_id: string;
+  test_id: string;
+  category: string;
+  title: string;
+  depends_on?: string[];
+  after?: string[];
+  status: string;
+  skip_reason?: string;
+  duration_ms: number;
+  summary?: string;
+  error?: string;
+  details?: Record<string, unknown>;
+  task_id?: string;
+  task_action?: string;
+};
+
+type DiagLoopReport = {
+  loop_id: string;
+  source: string;
+  runner_node: string;
+  interval?: string;
+  started_at: string;
+  ended_at: string;
+  duration_ms: number;
+  status: string;
+  summary: {
+    total: number;
+    passed: number;
+    failed: number;
+    skipped: number;
+  };
+  screenshots_url?: string;
+  screenshots_loop_id?: string;
+  git_branch?: string;
+  git_commit?: string;
+  checks: DiagCheckItem[];
+};
+
+type DiagHistoryRow = {
+  loop_id: string;
+  source: string;
+  runner_node: string;
+  started_at: string;
+  ended_at: string;
+  duration_ms: number;
+  status: string;
+  summary: {
+    total: number;
+    passed: number;
+    failed: number;
+    skipped: number;
+  };
+  screenshots_url?: string;
+  screenshots_loop_id?: string;
+  failed_check_ids?: string[];
+};
+
+function computeDiagLayers(checks: DiagCheckItem[]): Array<{ depth: number; items: DiagCheckItem[] }> {
+  const byId = new Map<string, DiagCheckItem>();
+  for (const c of checks) byId.set(c.check_id, c);
+  const memo = new Map<string, number>();
+  const depthOf = (id: string, stack: Set<string>): number => {
+    if (memo.has(id)) return memo.get(id)!;
+    if (stack.has(id)) return 0;
+    const item = byId.get(id);
+    if (!item) return 0;
+    stack.add(id);
+    let maxP = -1;
+    for (const dep of [...(item.depends_on || []), ...(item.after || [])]) {
+      if (byId.has(dep)) maxP = Math.max(maxP, depthOf(dep, stack));
+    }
+    stack.delete(id);
+    const d = maxP + 1;
+    memo.set(id, d);
+    return d;
+  };
+  const buckets = new Map<number, DiagCheckItem[]>();
+  for (const c of checks) {
+    const d = depthOf(c.check_id, new Set());
+    const arr = buckets.get(d) || [];
+    arr.push(c);
+    buckets.set(d, arr);
+  }
+  return Array.from(buckets.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([depth, items]) => ({ depth, items }));
+}
+
+function diagStatusBadge(status: string): string {
+  const st = status.toLowerCase();
+  const cls = st === "pass" ? "is-pass" : st === "fail" ? "is-fail" : "is-skip";
+  return `<span class="diag-badge ${cls}">${escapeHtml(st.toUpperCase())}</span>`;
+}
+
+async function refreshDiagnosticsPage(selectedLoopId: string): Promise<void> {
+  applyTheme();
+  const reportUrl = selectedLoopId
+    ? `/api/diagnostics/runs/${encodeURIComponent(selectedLoopId)}`
+    : "/api/diagnostics/latest";
+  const [repResp, histResp] = await Promise.all([
+    fetch(reportUrl, { cache: "no-store", signal: AbortSignal.timeout(5000) }),
+    fetch("/api/diagnostics/history", { cache: "no-store", signal: AbortSignal.timeout(5000) }),
+  ]);
+
+  let report: DiagLoopReport | null = null;
+  if (repResp.ok) {
+    report = (await repResp.json()) as DiagLoopReport;
+  }
+  let history: DiagHistoryRow[] = [];
+  if (histResp.ok) {
+    const hPayload = (await histResp.json()) as { history?: DiagHistoryRow[] };
+    if (Array.isArray(hPayload.history)) history = hPayload.history;
+  }
+
+  const serialized = JSON.stringify({ report, history, selectedLoopId });
+  if (renderedRun === serialized) return;
+  renderedRun = serialized;
+
+  let mainSections = `<section class="diag-card"><p class="c-dim">No diagnostic loops recorded yet. Run <code>go run . diag run</code> to publish the first loop.</p></section>`;
+
+  if (report) {
+    const layers = computeDiagLayers(report.checks || []);
+    const dagHtml = layers
+      .map(
+        (layer) => `
+      <div class="diag-stage">
+        <div class="diag-stage-title">DAG Stage ${layer.depth} (${layer.items.length})</div>
+        <div class="diag-node-grid">
+          ${layer.items
+            .map((c) => {
+              const cls = c.status === "pass" ? "is-pass" : c.status === "fail" ? "is-fail" : "is-skip";
+              const depsText = (c.depends_on || []).length > 0 ? `deps: ${(c.depends_on || []).join(", ")}` : "root";
+              const logHref = testLogHref(c.test_id) || "/logs";
+              const detailNote = c.error || c.skip_reason || c.summary || "";
+              return `
+                <a class="diag-node ${cls}" href="${escapeHtml(logHref)}" title="${escapeHtml(detailNote)}">
+                  <div class="diag-node-top">
+                    <span class="diag-node-id">${escapeHtml(c.check_id)}</span>
+                    ${diagStatusBadge(c.status)}
+                  </div>
+                  <div class="diag-node-sub">${escapeHtml(c.category)} | ${c.duration_ms}ms | ${escapeHtml(depsText)}</div>
+                  <div class="diag-node-note">${escapeHtml(detailNote.slice(0, 90))}</div>
+                </a>`;
+            })
+            .join("")}
+        </div>
+      </div>`,
+      )
+      .join("");
+
+    const checkRows = (report.checks || [])
+      .map((c) => {
+        const href = testLogHref(c.test_id);
+        const rawHref = href ? `/api/test-runs/${encodeURIComponent(c.test_id)}/log` : "";
+        const deps = (c.depends_on || []).join(", ") || "none";
+        const detail = c.error || c.skip_reason || c.summary || "";
+        const pathInfo =
+          c.details && typeof c.details.path === "string"
+            ? ` [path=${c.details.path}]`
+            : "";
+        const taskCol = c.task_id
+          ? `<code>${escapeHtml(c.task_id)}</code> <span class="c-dim">(${escapeHtml(c.task_action || "")})</span>`
+          : `<span class="c-dim">none</span>`;
+        return `
+          <tr data-diag-check="${escapeHtml(c.check_id)}" data-status="${escapeHtml(c.status)}">
+            <td>${diagStatusBadge(c.status)}</td>
+            <td><code>${escapeHtml(c.check_id)}</code></td>
+            <td class="c-dim">${escapeHtml(c.category)}</td>
+            <td class="c-dim">${escapeHtml(deps)}</td>
+            <td>${c.duration_ms}ms</td>
+            <td class="diag-wrap-cell">${escapeHtml(detail + pathInfo)}</td>
+            <td>${taskCol}</td>
+            <td>${
+              href
+                ? `<a class="c-cf" href="${escapeHtml(href)}">log</a> | <a class="c-dim" href="${escapeHtml(rawHref)}" target="_blank" rel="noreferrer">raw</a>`
+                : `<span class="c-dim">n/a</span>`
+            }</td>
+          </tr>`;
+      })
+      .join("");
+
+    const shotHref = report.screenshots_url || "/screenshots/";
+    mainSections = `
+      <section class="diag-card diag-summary-grid" data-testid="diag-summary">
+        <div><div class="diag-label">LOOP ID</div><div class="diag-val"><code>${escapeHtml(report.loop_id)}</code></div></div>
+        <div><div class="diag-label">STATUS</div><div class="diag-val">${diagStatusBadge(report.status)}</div></div>
+        <div><div class="diag-label">RUNNER / SOURCE</div><div class="diag-val">${escapeHtml(report.runner_node)} (${escapeHtml(report.source)})</div></div>
+        <div><div class="diag-label">CHECK TOTALS</div><div class="diag-val">${report.summary.passed} pass, ${report.summary.failed} fail, ${report.summary.skipped} skipped / ${report.summary.total}</div></div>
+        <div><div class="diag-label">DURATION / INTERVAL</div><div class="diag-val">${report.duration_ms}ms / ${escapeHtml(report.interval || "10m")}</div></div>
+        <div><div class="diag-label">UI SCREENSHOTS</div><div class="diag-val"><a class="c-cf" href="${escapeHtml(shotHref)}">Annotated gallery</a>${report.screenshots_loop_id ? ` <span class="c-dim">(${escapeHtml(report.screenshots_loop_id)})</span>` : ""}</div></div>
+      </section>
+
+      <section class="diag-card" data-testid="diag-dag">
+        <div class="diag-section-head">
+          <h2>Dependency DAG</h2>
+          <span class="c-dim">Parents execute before dependents; failed parents skip children</span>
+        </div>
+        <div class="diag-stages">${dagHtml}</div>
+      </section>
+
+      <section class="diag-card" data-testid="diag-checks-table">
+        <div class="diag-section-head">
+          <h2>Check Results (${(report.checks || []).length})</h2>
+          <span class="c-dim">Click log to inspect immutable structured test-id output</span>
+        </div>
+        <div class="earth-table-scroll">
+          <table class="earth-table">
+            <thead>
+              <tr><th>STATUS</th><th>CHECK ID</th><th>CATEGORY</th><th>DEPENDS ON</th><th>TIME</th><th>RESULT / PATH</th><th>DIAG TASK</th><th>LOGS</th></tr>
+            </thead>
+            <tbody>${checkRows}</tbody>
+          </table>
+        </div>
+      </section>`;
+  }
+
+  const historyRows = history
+    .map((h) => {
+      const activeCls = report && h.loop_id === report.loop_id ? "is-selected" : "";
+      return `
+        <tr class="${activeCls}">
+          <td>${diagStatusBadge(h.status)}</td>
+          <td><a class="c-cf" href="/diagnostics/runs/${encodeURIComponent(h.loop_id)}"><code>${escapeHtml(h.loop_id)}</code></a></td>
+          <td>${escapeHtml(h.runner_node)} <span class="c-dim">(${escapeHtml(h.source)})</span></td>
+          <td class="c-dim">${escapeHtml(h.started_at)}</td>
+          <td>${h.summary.passed} pass / ${h.summary.failed} fail / ${h.summary.skipped} skip</td>
+          <td>${h.duration_ms}ms</td>
+          <td><a class="c-cf" href="${escapeHtml(h.screenshots_url || "/screenshots/")}">screenshots</a></td>
+        </tr>`;
+    })
+    .join("");
+
+  app.innerHTML = `
+    <div class="log-page-wrap">
+      <main class="diag-page" data-testid="diag-page">
+        <header class="diag-header">
+          <div>
+            <p class="c-dim">TEST.DIALTONE.EARTH / DIAGNOSTIC LOOP</p>
+            <h1>${selectedLoopId ? `Diagnostic Loop ${escapeHtml(selectedLoopId)}` : "Automated Diagnostic Loop"}</h1>
+          </div>
+          <nav class="diag-nav">
+            <a class="tbl-chip" href="${import.meta.env.BASE_URL}">dashboard</a>
+            <a class="tbl-chip is-active" href="/diagnostics">latest loop</a>
+            <a class="tbl-chip" href="/screenshots/">screenshots</a>
+            <a class="tbl-chip" href="/logs">logs</a>
+            ${isRemoteHost ? `<a class="tbl-chip" href="/code">code</a>` : ""}
+            ${isRemoteHost ? `<a class="tbl-chip" href="/auth/logout">sign out</a>` : ""}
+          </nav>
+        </header>
+        ${mainSections}
+        <section class="diag-card" data-testid="diag-history">
+          <div class="diag-section-head">
+            <h2>Recent Diagnostic Loops (last 50)</h2>
+            <span class="c-dim">${history.length} loop(s) recorded</span>
+          </div>
+          <div class="earth-table-scroll">
+            <table class="earth-table">
+              <thead>
+                <tr><th>STATUS</th><th>LOOP ID</th><th>RUNNER</th><th>STARTED</th><th>SUMMARY</th><th>DURATION</th><th>SCREENSHOTS</th></tr>
+              </thead>
+              <tbody>${historyRows || '<tr><td colspan="7" class="c-dim">No loops recorded yet.</td></tr>'}</tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>`;
+}
+
+const cleanPath = location.pathname.replace(/\/$/, "");
+if (cleanPath === "/diagnostics" || cleanPath.startsWith("/diagnostics/runs/")) {
+  const selectedLoop = cleanPath.startsWith("/diagnostics/runs/")
+    ? decodeURIComponent(cleanPath.slice("/diagnostics/runs/".length))
+    : "";
+  app.innerHTML = `<div class="log-page-wrap"><main class="diag-page"><p>Loading diagnostics...</p></main></div>`;
+  let diagInFlight = false;
+  const refreshDiag = () => {
+    if (diagInFlight || document.visibilityState === "hidden") return;
+    diagInFlight = true;
+    refreshDiagnosticsPage(selectedLoop)
+      .catch((error: unknown) => {
+        renderedRun = "";
+        app.innerHTML = `<div class="log-page-wrap"><main class="diag-page"><a class="c-cf" href="${import.meta.env.BASE_URL}">All tests</a><p role="alert">${escapeHtml(error instanceof Error ? error.message : String(error))}</p></main></div>`;
+      })
+      .finally(() => {
+        diagInFlight = false;
+      });
+  };
+  refreshDiag();
+  setInterval(refreshDiag, 3000);
+} else if (location.pathname.replace(/\/$/, "").endsWith("/logs")) {
   const params = new URLSearchParams(location.search);
   const hasTestIdParam = params.has("test-id");
   const testId = params.get("test-id") || "";

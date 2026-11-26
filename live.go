@@ -363,6 +363,9 @@ func runLiveWatch(args []string, stdout, stderr io.Writer) error {
 	filter := fs.String("filter", "", "Optional Go test filter regexp (empty runs all tests)")
 	screenshots := fs.Bool("screenshots", true, "Capture annotated test UI screenshots after each test loop (dry-run by default)")
 	screenshotsPublishLive := fs.Bool("screenshots-publish-live", false, "Explicitly upload screenshots to Cloudflare R2 after each loop (default: false)")
+	diagEnabled := fs.Bool("diag", false, "Also run periodic diagnostic DAG loops alongside live watch")
+	diagInterval := fs.Duration("diag-interval", 10*time.Minute, "Diagnostic loop interval when --diag is set")
+	diagPublishURL := fs.String("diag-publish-url", defaultDiagPublishURL, "Target URL for diagnostic loop publish when --diag is set")
 	pushCode := fs.Bool("push", false, "Also push git bundle to Cloudflare R2 on pass")
 	repo := fs.String("repo", defaultRepoSlug(), "Repository slug when --push is set")
 	baseURL := fs.String("url", defaultLiveSiteURL, "Registry base URL when --push is set")
@@ -395,6 +398,17 @@ func runLiveWatch(args []string, stdout, stderr io.Writer) error {
 		return m
 	}
 	last := snapshotMap()
+	if *diagEnabled {
+		if _, err := ValidateDiagPublishTarget(*diagPublishURL, false); err != nil {
+			return err
+		}
+		go func() {
+			_ = runDiagWatch([]string{
+				"--interval", diagInterval.String(),
+				"--publish-url", *diagPublishURL,
+			}, stdout, stderr)
+		}()
+	}
 	fmt.Fprintf(stdout, "live watch: watching registry/src & registry/worker (every %s) -> test -> deploy https://dialtone.earth/\n", *interval)
 	fmt.Fprintln(stdout, "live watch: save any file to trigger synced tests + auto-deploy on pass (Ctrl+C to stop)")
 	ticker := time.NewTicker(*interval)

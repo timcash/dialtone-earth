@@ -2,6 +2,7 @@ import { verifySessionCookie } from "./auth.ts";
 import { getOwnerEmail } from "./live.ts";
 import { handleRegistryRoute, renderOwnerCodePortal } from "./registry.ts";
 import { handleScreenshotsRoute } from "./screenshots.ts";
+import { handleDiagnosticsRoute } from "./diagnostics.ts";
 import type {
   AccessVerificationResult,
   GatewayDeps,
@@ -218,6 +219,19 @@ export async function handleStagingRoute({
     const shotResp = await handleScreenshotsRoute(request, env, securityHeaders, nowSec);
     if (shotResp) {
       return shotResp;
+    }
+  }
+
+  // Owner verified: serve and persist diagnostic loop runs (/diagnostics & /api/diagnostics/* & stored /api/test-runs/*) from R2 + KV.
+  if (
+    url.pathname === "/diagnostics" ||
+    url.pathname.startsWith("/diagnostics/") ||
+    url.pathname.startsWith("/api/diagnostics/") ||
+    url.pathname.startsWith("/api/test-runs/")
+  ) {
+    const diagResp = await handleDiagnosticsRoute(request, env, securityHeaders, nowSec);
+    if (diagResp) {
+      return diagResp;
     }
   }
 

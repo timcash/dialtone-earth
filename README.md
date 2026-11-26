@@ -137,6 +137,8 @@ go run . plugins list                                   # list public Dialtone p
 go run . plugins info dialtone-shell                    # show plugin manifest, hashes, and iroh-blobs:// ticket
 go run . plugins publish dialtone-shell --from-local    # publish local Dialtone plugin to https://dialtone.earth/api/plugins
 go run . screenshots                                    # capture annotated test UI screenshots and build local gallery (dry-run)
+go run . diag run                                       # run one diagnostic DAG loop across dialtone.earth, metal, plugins, and dialtone
+go run . diag watch --interval 10m                      # repeat diagnostic DAG loops every 10 minutes
 go run . clean                                          # remove generated artifacts; retain archived run logs
 ```
 

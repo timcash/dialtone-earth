@@ -350,6 +350,7 @@ func testSection(name string) string {
 		"TestDialtoneEarthCloudflareRegistry",
 		"TestDialtoneEarthOwnerOnlyAccess",
 		"TestDialtoneEarthScreenshotsWorker",
+		"TestDialtoneEarthDiagnosticsWorker",
 		"TestDialtoneEarthLiveOwnerAccessOnCloudflare",
 		"TestDialtoneEarthRegistrySecurityHeaders",
 		"TestDialtoneEarthOriginBridge",

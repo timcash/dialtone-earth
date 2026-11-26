@@ -972,3 +972,177 @@ code {
   background: rgba(239, 65, 54, 0.1);
   font-size: 12px;
 }
+
+/* Diagnostics Loop Page (/diagnostics and /diagnostics/runs/:id) */
+.diag-page {
+  max-width: 1400px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.diag-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.diag-header h1 {
+  font-size: 18px;
+  margin-top: 2px;
+}
+
+.diag-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.diag-card {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.diag-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.diag-section-head h2 {
+  font-size: 14px;
+  letter-spacing: 0.03em;
+}
+
+.diag-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+}
+
+.diag-label {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.diag-val {
+  font-size: 13px;
+}
+
+.diag-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid var(--line);
+}
+
+.diag-badge.is-pass {
+  color: var(--deploy-ready);
+  border-color: var(--deploy-ready);
+}
+
+.diag-badge.is-fail {
+  color: var(--err);
+  border-color: var(--err);
+}
+
+.diag-badge.is-skip {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.diag-stages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.diag-stage {
+  border: 1px solid var(--line);
+  background: var(--bg);
+  padding: 10px;
+}
+
+.diag-stage-title {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.diag-node-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 8px;
+}
+
+.diag-node {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.diag-node:hover {
+  border-color: var(--fg);
+}
+
+.diag-node.is-pass {
+  border-left: 3px solid var(--deploy-ready);
+}
+
+.diag-node.is-fail {
+  border-left: 3px solid var(--err);
+}
+
+.diag-node.is-skip {
+  border-left: 3px solid var(--warn);
+}
+
+.diag-node-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.diag-node-id {
+  font-size: 12px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.diag-node-sub {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.diag-node-note {
+  font-size: 11px;
+  color: var(--fg-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.diag-wrap-cell {
+  white-space: normal !important;
+  max-width: 360px;
+  overflow-wrap: anywhere;
+}

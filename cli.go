@@ -33,6 +33,7 @@ Actions:
   release   Tag and publish SHA-256-verified releases on Cloudflare R2
   plugins     List and publish public Dialtone plugins (e.g. dialtone-shell)
   screenshots Capture annotated test UI screenshots and build stable gallery
+  diag        Run or watch automated diagnostic DAG loops across earth, metal, and plugins
   dev         Start the test dashboard without running tests
   help        Show this help
 
@@ -46,6 +47,7 @@ Flags:
   test --screenshots       Capture annotated test UI screenshots after the test loop
   test --close-browser     Close the persistent CDP Chrome browser and exit
   screenshots [--publish-live]  Capture annotated screenshots (dry-run by default)
+  diag <run|watch> [--interval 10m]         Run or loop diagnostic DAG checks and publish results
   deploy --live            Build registry/ and deploy live to Cloudflare Workers
   live <status|set|reset|watch|init-token>  Control or watch-deploy dialtone.earth live
   code <list|status|push|pull|clone>        Store/sync git bundles directly on Cloudflare R2
@@ -101,6 +103,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		err = runPlugins(args[1:], stdout, stderr)
 	case "screenshots":
 		err = runScreenshots(args[1:], stdout, stderr)
+	case "diag":
+		err = runDiag(args[1:], stdout, stderr)
 	case "dev":
 		err = runDev(args[1:], stdout, stderr)
 	default:

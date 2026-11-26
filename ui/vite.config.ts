@@ -18,7 +18,11 @@ const cdpPort = Number(process.env.DIALTONE_CDP_PORT || 9222);
 const SAFE_FILTER_RE = /^[\^$A-Za-z0-9_.|*-]+$/;
 const SAFE_TARGET_ID_RE = /^[A-Za-z0-9_-]{4,80}$/;
 const SAFE_SCREENSHOT_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.(png|html|json)$/i;
+const SAFE_DIAG_LOOP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{2,80}$/;
 let activeRun: ChildProcess | null = null;
+const postedDiagRuns = new Map<string, Record<string, unknown>>();
+const postedDiagLogs = new Map<string, { record: Record<string, unknown>; log: string }>();
+let postedDiagHistory: Array<Record<string, unknown>> = [];
 
 type TestRecord = {
   name: string;
@@ -184,6 +188,89 @@ function testApiPlugin(): Plugin {
                 missing ? 404 : 500,
               );
             });
+          return;
+        }
+        if (pathname === "/api/diagnostics/runs" && request.method === "POST") {
+          readRequestBody(request)
+            .then((raw) => {
+              const parsed: unknown = JSON.parse(raw);
+              if (!isRecord(parsed) || !isRecord(parsed.report)) {
+                sendJson(response, { error: "Invalid diagnostics payload" }, 400);
+                return;
+              }
+              const report = parsed.report;
+              const loopId = text(report.loop_id);
+              if (!SAFE_DIAG_LOOP_ID_RE.test(loopId)) {
+                sendJson(response, { error: "Invalid diagnostic loop_id" }, 400);
+                return;
+              }
+              postedDiagRuns.set(loopId, report);
+              const checks = Array.isArray(report.checks) ? report.checks : [];
+              const failedIds = checks
+                .filter((c): c is Record<string, unknown> => isRecord(c) && text(c.status) === "fail")
+                .map((c) => text(c.check_id));
+              const histEntry: Record<string, unknown> = {
+                loop_id: loopId,
+                source: text(report.source, "cli"),
+                runner_node: text(report.runner_node, "local"),
+                started_at: text(report.started_at),
+                ended_at: text(report.ended_at),
+                duration_ms: typeof report.duration_ms === "number" ? report.duration_ms : 0,
+                status: text(report.status, "fail"),
+                summary: isRecord(report.summary) ? report.summary : { total: 0, passed: 0, failed: 0, skipped: 0 },
+                screenshots_url: text(report.screenshots_url, "/screenshots/"),
+                screenshots_loop_id: text(report.screenshots_loop_id),
+                failed_check_ids: failedIds,
+              };
+              postedDiagHistory = [histEntry, ...postedDiagHistory.filter((h) => text(h.loop_id) !== loopId)].slice(0, 50);
+              if (isRecord(parsed.logs)) {
+                for (const [tid, entry] of Object.entries(parsed.logs)) {
+                  if (/^[a-f0-9]{32}$/.test(tid) && isRecord(entry)) {
+                    postedDiagLogs.set(tid, {
+                      record: isRecord(entry.record) ? entry.record : { "test-id": tid },
+                      log: text(entry.log),
+                    });
+                  }
+                }
+              }
+              sendJson(response, { ok: true, loop_id: loopId, url: "/diagnostics", run_url: `/diagnostics/runs/${loopId}` }, 200);
+            })
+            .catch((error: unknown) => sendJson(response, { error: error instanceof Error ? error.message : String(error) }, 400));
+          return;
+        }
+        if (pathname === "/api/diagnostics/latest" && request.method === "GET") {
+          readDiagLatest()
+            .then((latest) => {
+              if (!latest) {
+                sendJson(response, { error: "No diagnostic loops recorded yet" }, 404);
+                return;
+              }
+              sendJson(response, latest);
+            })
+            .catch((error: unknown) => sendError(response, error));
+          return;
+        }
+        if (pathname === "/api/diagnostics/history" && request.method === "GET") {
+          readDiagHistory()
+            .then((history) => sendJson(response, { history }))
+            .catch((error: unknown) => sendError(response, error));
+          return;
+        }
+        if (pathname.startsWith("/api/diagnostics/runs/") && request.method === "GET") {
+          const loopId = decodeURIComponent(pathname.slice("/api/diagnostics/runs/".length));
+          if (!SAFE_DIAG_LOOP_ID_RE.test(loopId)) {
+            sendJson(response, { error: "Invalid diagnostic loop_id" }, 400);
+            return;
+          }
+          readDiagRunById(loopId)
+            .then((run) => {
+              if (!run) {
+                sendJson(response, { error: "Diagnostic loop not found" }, 404);
+                return;
+              }
+              sendJson(response, run);
+            })
+            .catch((error: unknown) => sendError(response, error));
           return;
         }
         if (pathname.startsWith("/api/test-runs/") && request.method === "GET") {
@@ -767,13 +854,97 @@ async function readTests(): Promise<TestRecord[]> {
 
 async function readTestRun(testId: string): Promise<Record<string, unknown> & { log: string }> {
   // Only server-validated opaque IDs select files; no path from state.json is used.
-  const [metadata, log] = await Promise.all([
-    readFile(resolve(logsDir, `${testId}.json`), "utf8"),
-    readFile(resolve(logsDir, `${testId}.log`), "utf8"),
-  ]);
-  const run: unknown = JSON.parse(metadata);
-  if (!isRecord(run) || run["test-id"] !== testId) throw new Error("Invalid run metadata");
-  return { ...run, log };
+  try {
+    const [metadata, log] = await Promise.all([
+      readFile(resolve(logsDir, `${testId}.json`), "utf8"),
+      readFile(resolve(logsDir, `${testId}.log`), "utf8"),
+    ]);
+    const run: unknown = JSON.parse(metadata);
+    if (!isRecord(run) || run["test-id"] !== testId) throw new Error("Invalid run metadata");
+    return { ...run, log };
+  } catch (err) {
+    const posted = postedDiagLogs.get(testId);
+    if (posted) {
+      return { ...posted.record, "test-id": testId, log: posted.log };
+    }
+    throw err;
+  }
+}
+
+async function readRequestBody(request: IncomingMessage): Promise<string> {
+  return new Promise((resolveFn, rejectFn) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    request.on("data", (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > 8 * 1024 * 1024) {
+        rejectFn(new Error("Request body too large"));
+        request.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on("end", () => resolveFn(Buffer.concat(chunks).toString("utf8")));
+    request.on("error", rejectFn);
+  });
+}
+
+async function readDiagLatest(): Promise<Record<string, unknown> | null> {
+  try {
+    const raw = await readFile(resolve(logsDir, "diag", "latest.json"), "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (isRecord(parsed)) return parsed;
+  } catch {
+    // fallback to in-memory posted run
+  }
+  if (postedDiagHistory.length > 0) {
+    const latestId = text(postedDiagHistory[0].loop_id);
+    return postedDiagRuns.get(latestId) || null;
+  }
+  return null;
+}
+
+async function readDiagHistory(): Promise<Array<Record<string, unknown>>> {
+  const seen = new Set<string>();
+  const combined: Array<Record<string, unknown>> = [];
+  for (const item of postedDiagHistory) {
+    const id = text(item.loop_id);
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      combined.push(item);
+    }
+  }
+  try {
+    const raw = await readFile(resolve(logsDir, "diag", "history.json"), "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        if (!isRecord(item)) continue;
+        const id = text(item.loop_id);
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          combined.push(item);
+        }
+      }
+    }
+  } catch {
+    // no history on disk yet
+  }
+  combined.sort((a, b) => text(b.started_at).localeCompare(text(a.started_at)));
+  return combined.slice(0, 50);
+}
+
+async function readDiagRunById(loopId: string): Promise<Record<string, unknown> | null> {
+  const mem = postedDiagRuns.get(loopId);
+  if (mem) return mem;
+  try {
+    const raw = await readFile(resolve(logsDir, "diag", "runs", `${loopId}.json`), "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (isRecord(parsed)) return parsed;
+  } catch {
+    // not found on disk
+  }
+  return null;
 }
 
 function normalizeStatus(value: unknown): string {
