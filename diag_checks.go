@@ -756,6 +756,7 @@ func BuildDiagnosticDAG(cfg DiagChecksConfig) []DiagCheckSpec {
 						ServeRunning bool   `json:"serve_running"`
 						PeerCount    int    `json:"peer_count"`
 						TaskCount    int    `json:"task_count"`
+						StaleCount   int    `json:"stale_count"`
 						StateHash    string `json:"state_hash"`
 					}
 					if err := json.Unmarshal([]byte(outText), &st); err != nil {
@@ -767,6 +768,7 @@ func BuildDiagnosticDAG(cfg DiagChecksConfig) []DiagCheckSpec {
 						"serve_running": st.ServeRunning,
 						"peer_count":    st.PeerCount,
 						"task_count":    st.TaskCount,
+						"stale_count":   st.StaleCount,
 						"state_hash":    st.StateHash,
 					}
 					if st.StateHash != "" {
@@ -1032,6 +1034,7 @@ func BuildDiagnosticDAG(cfg DiagChecksConfig) []DiagCheckSpec {
 				}
 			},
 		},
+		buildStaleTasksCheckSpec(cfg.TaskBin),
 		// Category D: Dialtone CLI version & optional repo unit tests
 		DiagCheckSpec{
 			ID:        "dialtone.cli.version",
@@ -1096,4 +1099,70 @@ func BuildDiagnosticDAG(cfg DiagChecksConfig) []DiagCheckSpec {
 	)
 
 	return specs
+}
+
+func buildStaleTasksCheckSpec(taskBinOverride string) DiagCheckSpec {
+	return DiagCheckSpec{
+		ID:       "plugin.task.stale",
+		Category: "plugins",
+		Title:    "dialtone-task stale active task count",
+		Run: func(ctx context.Context, _ map[string]DiagCheckResult) DiagCheckOutcome {
+			bin := strings.TrimSpace(taskBinOverride)
+			if bin == "" {
+				bin = defaultDiagTaskBinary()
+			}
+			if bin == "" || !fileExists(bin) {
+				return DiagCheckOutcome{
+					Status:     DiagStatusSkipped,
+					SkipReason: "local dialtone-task binary not installed",
+					Details:    map[string]any{"installed": false},
+				}
+			}
+			stdout, stderr, exitCode, err := runBoundedCommand(ctx, 15*time.Second, bin, "status", "--json")
+			if err != nil || exitCode != 0 {
+				return DiagCheckOutcome{
+					Status: DiagStatusFail,
+					Error:  fmt.Sprintf("dialtone-task status --json failed (exit=%d err=%v)", exitCode, err),
+					Stdout: stdout,
+					Stderr: stderr,
+				}
+			}
+			var st struct {
+				Node         string `json:"node"`
+				ServeRunning bool   `json:"serve_running"`
+				TaskCount    int    `json:"task_count"`
+				StaleCount   int    `json:"stale_count"`
+				StateHash    string `json:"state_hash"`
+			}
+			if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &st); err != nil {
+				return DiagCheckOutcome{
+					Status: DiagStatusFail,
+					Error:  "invalid dialtone-task status JSON: " + err.Error(),
+					Stdout: stdout,
+					Stderr: stderr,
+				}
+			}
+			details := map[string]any{
+				"node":          st.Node,
+				"serve_running": st.ServeRunning,
+				"task_count":    st.TaskCount,
+				"stale_count":   st.StaleCount,
+				"state_hash":    st.StateHash,
+			}
+			if st.StaleCount > 0 {
+				return DiagCheckOutcome{
+					Status:  DiagStatusFail,
+					Error:   fmt.Sprintf("%d stale active task(s) overdue for update", st.StaleCount),
+					Details: details,
+					Stdout:  stdout,
+				}
+			}
+			return DiagCheckOutcome{
+				Status:  DiagStatusPass,
+				Summary: fmt.Sprintf("0 stale active tasks (total=%d)", st.TaskCount),
+				Details: details,
+				Stdout:  stdout,
+			}
+		},
+	}
 }

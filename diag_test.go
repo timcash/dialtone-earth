@@ -521,3 +521,26 @@ func TestDiagCLIHelpAndNoEmDash(t *testing.T) {
 		t.Fatal("diag help must not contain em-dashes")
 	}
 }
+
+func TestDiagStaleTasksCheck(t *testing.T) {
+	dir := t.TempDir()
+	fakePass := filepath.Join(dir, "task-pass.sh")
+	if err := os.WriteFile(fakePass, []byte("#!/bin/sh\necho '{\"node\":\"rosie\",\"serve_running\":true,\"task_count\":4,\"stale_count\":0,\"state_hash\":\"abc123\"}'\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	specPass := buildStaleTasksCheckSpec(fakePass)
+	resPass := specPass.Run(context.Background(), nil)
+	if resPass.Status != DiagStatusPass {
+		t.Fatalf("expected pass for 0 stale tasks, got %+v", resPass)
+	}
+
+	fakeFail := filepath.Join(dir, "task-fail.sh")
+	if err := os.WriteFile(fakeFail, []byte("#!/bin/sh\necho '{\"node\":\"rosie\",\"serve_running\":true,\"task_count\":4,\"stale_count\":2,\"state_hash\":\"abc123\"}'\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	specFail := buildStaleTasksCheckSpec(fakeFail)
+	resFail := specFail.Run(context.Background(), nil)
+	if resFail.Status != DiagStatusFail || !strings.Contains(resFail.Error, "2 stale active task") {
+		t.Fatalf("expected fail for 2 stale tasks, got %+v", resFail)
+	}
+}
