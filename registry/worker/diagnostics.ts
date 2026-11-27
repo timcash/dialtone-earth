@@ -14,7 +14,7 @@ export interface DiagCheckResult {
   title: string;
   depends_on: string[];
   after?: string[];
-  status: "pass" | "fail" | "skipped";
+  status: "pass" | "fail" | "skipped" | "pending" | "info";
   skip_reason?: string;
   started_at?: string;
   ended_at?: string;
@@ -34,6 +34,8 @@ export interface DiagSummary {
   passed: number;
   failed: number;
   skipped: number;
+  pending?: number;
+  info?: number;
 }
 
 export interface DiagLoopReport {
@@ -138,7 +140,7 @@ function toHistoryEntry(report: DiagLoopReport): DiagHistoryEntry {
     ended_at: report.ended_at,
     duration_ms: Number(report.duration_ms) || 0,
     status: report.status === "pass" ? "pass" : "fail",
-    summary: report.summary || { total: 0, passed: 0, failed: 0, skipped: 0 },
+    summary: report.summary || { total: 0, passed: 0, failed: 0, skipped: 0, pending: 0 },
     screenshots_url: report.screenshots_url || "/screenshots/",
     screenshots_loop_id: report.screenshots_loop_id,
     failed_check_ids: failedIds.length > 0 ? failedIds : undefined,
@@ -266,6 +268,70 @@ function computeDagDepths(checks: DiagCheckResult[]): Map<string, number> {
   return memo;
 }
 
+const DIAG_CATEGORY_ORDER = [
+  "http",
+  "metal",
+  "versions",
+  "migration",
+  "plugins",
+  "gb34",
+  "gb35",
+  "rpc",
+  "macapp",
+  "dialtone",
+];
+
+const DIAG_CATEGORY_TITLES: Record<string, string> = {
+  http: "Public & Auth HTTP Endpoints",
+  metal: "Metal Mesh Connectivity",
+  versions: "Fleet Plugin & Agent Versions",
+  migration: "Migration Readiness (Pending Does Not Fail)",
+  plugins: "Installed Plugins & Task Consistency",
+  gb34: "GB-34 Agent Spec, Logs & Permissions",
+  gb35: "GB-35 Channel Scope & Manifests",
+  rpc: "RPC & DB Lock Retry",
+  macapp: "Mac App Verification",
+  dialtone: "Dialtone Daemon & CLI",
+};
+
+function groupChecksByCategory(checks: DiagCheckResult[]): Array<{ category: string; title: string; checks: DiagCheckResult[] }> {
+  const buckets = new Map<string, DiagCheckResult[]>();
+  for (const c of checks) {
+    const key = (c.category || "other").trim().toLowerCase() || "other";
+    const list = buckets.get(key) || [];
+    list.push(c);
+    buckets.set(key, list);
+  }
+  const ordered: Array<{ category: string; title: string; checks: DiagCheckResult[] }> = [];
+  for (const key of DIAG_CATEGORY_ORDER) {
+    const list = buckets.get(key);
+    if (list && list.length > 0) {
+      ordered.push({ category: key, title: DIAG_CATEGORY_TITLES[key] || key.toUpperCase(), checks: list });
+      buckets.delete(key);
+    }
+  }
+  for (const key of Array.from(buckets.keys()).sort()) {
+    const list = buckets.get(key) || [];
+    if (list.length > 0) {
+      ordered.push({ category: key, title: DIAG_CATEGORY_TITLES[key] || key.toUpperCase(), checks: list });
+    }
+  }
+  return ordered;
+}
+
+function formatSummaryCounts(summary: DiagSummary): string {
+  const parts = [
+    `${summary.passed} pass`,
+    `${summary.failed} fail`,
+    `${summary.pending ?? 0} pending`,
+  ];
+  if ((summary.info ?? 0) > 0) {
+    parts.push(`${summary.info} info`);
+  }
+  parts.push(`${summary.skipped} skipped`);
+  return `${parts.join(", ")} / ${summary.total}`;
+}
+
 function renderDiagnosticsHtml(
   report: DiagLoopReport | null,
   history: DiagHistoryEntry[],
@@ -276,8 +342,28 @@ function renderDiagnosticsHtml(
     : "Diagnostics | test.dialtone.earth";
 
   const statusBadge = (st: string) => {
-    const cls = st === "pass" ? "st-pass" : st === "fail" ? "st-fail" : "st-skip";
-    return `<span class="badge ${cls}">${escapeHtml(st.toUpperCase())}</span>`;
+    const low = (st || "").toLowerCase();
+    const cls =
+      low === "pass"
+        ? "st-pass"
+        : low === "fail"
+          ? "st-fail"
+          : low === "pending"
+            ? "st-pending"
+            : low === "info"
+              ? "st-info"
+              : "st-skip";
+    const label = low === "pending" ? "PENDING MIGRATION" : low.toUpperCase();
+    return `<span class="badge ${cls}">${escapeHtml(label)}</span>`;
+  };
+
+  const nodeStatusClass = (st: string) => {
+    const low = (st || "").toLowerCase();
+    if (low === "pass") return "node-pass";
+    if (low === "fail") return "node-fail";
+    if (low === "pending") return "node-pending";
+    if (low === "info") return "node-info";
+    return "node-skip";
   };
 
   let bodyContent = `<section class="card"><p class="muted">No diagnostic loops have been published yet. Run <code>go run . diag run</code> to publish a loop.</p></section>`;
@@ -298,7 +384,7 @@ function renderDiagnosticsHtml(
         const nodes = (layers.get(depth) || [])
           .map((c) => {
             const deps = (c.depends_on || []).length > 0 ? `deps: ${c.depends_on.join(", ")}` : "root";
-            const cls = c.status === "pass" ? "node-pass" : c.status === "fail" ? "node-fail" : "node-skip";
+            const cls = nodeStatusClass(c.status);
             return `<a class="dag-node ${cls}" href="/logs/?test-id=${encodeURIComponent(c.test_id)}" title="${escapeHtml(c.summary || c.error || "")}">
               <div class="dag-id">${escapeHtml(c.check_id)}</div>
               <div class="dag-meta">${escapeHtml(c.status.toUpperCase())} | ${c.duration_ms}ms | ${escapeHtml(deps)}</div>
@@ -309,26 +395,54 @@ function renderDiagnosticsHtml(
       })
       .join("");
 
-    const checkRowsHtml = (report.checks || [])
-      .map((c) => {
-        const depsText = (c.depends_on || []).join(", ") || "none";
-        const detailText = c.error || c.skip_reason || c.summary || "";
-        const taskCell = c.task_id
-          ? `<code>${escapeHtml(c.task_id)}</code> (${escapeHtml(c.task_action || "")})`
-          : `<span class="muted">none</span>`;
-        const logLink = SAFE_TEST_ID_RE.test(c.test_id || "")
-          ? `<a class="link" href="/logs/?test-id=${encodeURIComponent(c.test_id)}">log</a>`
-          : `<span class="muted">n/a</span>`;
-        return `<tr>
-          <td>${statusBadge(c.status)}</td>
-          <td><code>${escapeHtml(c.check_id)}</code></td>
-          <td>${escapeHtml(c.category)}</td>
-          <td class="muted">${escapeHtml(depsText)}</td>
-          <td>${c.duration_ms}ms</td>
-          <td>${escapeHtml(detailText)}</td>
-          <td>${taskCell}</td>
-          <td>${logLink}</td>
-        </tr>`;
+    const groupedChecksHtml = groupChecksByCategory(report.checks || [])
+      .map((group) => {
+        const gPass = group.checks.filter((c) => c.status === "pass").length;
+        const gFail = group.checks.filter((c) => c.status === "fail").length;
+        const gPend = group.checks.filter((c) => c.status === "pending").length;
+        const gSkip = group.checks.filter((c) => c.status === "skipped").length;
+        const gInfo = group.checks.filter((c) => c.status === "info").length;
+        const countBits = [`${gPass} pass`, `${gFail} fail`];
+        if (gPend > 0) countBits.push(`${gPend} pending`);
+        if (gInfo > 0) countBits.push(`${gInfo} info`);
+        if (gSkip > 0) countBits.push(`${gSkip} skipped`);
+
+        const rows = group.checks
+          .map((c) => {
+            const depsText = (c.depends_on || []).join(", ") || "none";
+            const detailText = c.error || c.skip_reason || c.summary || "";
+            const taskCell = c.task_id
+              ? `<code>${escapeHtml(c.task_id)}</code> (${escapeHtml(c.task_action || "")})`
+              : `<span class="muted">none</span>`;
+            const logLink = SAFE_TEST_ID_RE.test(c.test_id || "")
+              ? `<a class="link" href="/logs/?test-id=${encodeURIComponent(c.test_id)}">log</a>`
+              : `<span class="muted">n/a</span>`;
+            return `<tr>
+              <td>${statusBadge(c.status)}</td>
+              <td><code>${escapeHtml(c.check_id)}</code></td>
+              <td class="muted">${escapeHtml(depsText)}</td>
+              <td>${c.duration_ms}ms</td>
+              <td>${escapeHtml(detailText)}</td>
+              <td>${taskCell}</td>
+              <td>${logLink}</td>
+            </tr>`;
+          })
+          .join("");
+
+        return `<div class="cat-group" data-category-group="${escapeHtml(group.category)}">
+          <div class="cat-head">
+            <strong>${escapeHtml(group.title)}</strong>
+            <span class="muted"><code>${escapeHtml(group.category)}</code> (${escapeHtml(countBits.join(" / "))})</span>
+          </div>
+          <div class="tbl-wrap">
+            <table>
+              <thead>
+                <tr><th>STATUS</th><th>CHECK ID</th><th>DEPENDS ON</th><th>TIME</th><th>RESULT</th><th>TASK</th><th>LOG</th></tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        </div>`;
       })
       .join("");
 
@@ -338,7 +452,7 @@ function renderDiagnosticsHtml(
         <div><div class="label">LOOP ID</div><div class="val"><code>${escapeHtml(report.loop_id)}</code></div></div>
         <div><div class="label">STATUS</div><div class="val">${statusBadge(report.status)}</div></div>
         <div><div class="label">RUNNER</div><div class="val">${escapeHtml(report.runner_node)} (${escapeHtml(report.source)})</div></div>
-        <div><div class="label">TOTALS</div><div class="val">${report.summary.passed} pass, ${report.summary.failed} fail, ${report.summary.skipped} skipped / ${report.summary.total}</div></div>
+        <div><div class="label">TOTALS</div><div class="val">${escapeHtml(formatSummaryCounts(report.summary))}</div></div>
         <div><div class="label">DURATION</div><div class="val">${report.duration_ms}ms</div></div>
         <div><div class="label">SCREENSHOTS</div><div class="val"><a class="link" href="${escapeHtml(shotHref)}">Annotated gallery</a></div></div>
       </section>
@@ -349,27 +463,21 @@ function renderDiagnosticsHtml(
       </section>
 
       <section class="card">
-        <h2>Checks (${(report.checks || []).length})</h2>
-        <div class="tbl-wrap">
-          <table>
-            <thead>
-              <tr><th>STATUS</th><th>CHECK ID</th><th>CATEGORY</th><th>DEPENDS ON</th><th>TIME</th><th>RESULT</th><th>TASK</th><th>LOG</th></tr>
-            </thead>
-            <tbody>${checkRowsHtml}</tbody>
-          </table>
-        </div>
+        <h2>Checks by Category (${(report.checks || []).length})</h2>
+        <div class="cat-list">${groupedChecksHtml}</div>
       </section>`;
   }
 
   const historyRowsHtml = history
     .map((h) => {
       const active = report && h.loop_id === report.loop_id ? ` class="active-row"` : "";
+      const pendText = (h.summary.pending ?? 0) > 0 ? ` / ${h.summary.pending} pend` : "";
       return `<tr${active}>
         <td>${statusBadge(h.status)}</td>
         <td><a class="link" href="/diagnostics/runs/${encodeURIComponent(h.loop_id)}"><code>${escapeHtml(h.loop_id)}</code></a></td>
         <td>${escapeHtml(h.runner_node)} (${escapeHtml(h.source)})</td>
         <td>${escapeHtml(h.started_at)}</td>
-        <td>${h.summary.passed} pass / ${h.summary.failed} fail / ${h.summary.skipped} skip</td>
+        <td>${h.summary.passed} pass / ${h.summary.failed} fail${pendText} / ${h.summary.skipped} skip</td>
         <td>${h.duration_ms}ms</td>
         <td><a class="link" href="${escapeHtml(h.screenshots_url || "/screenshots/")}">screenshots</a></td>
       </tr>`;
@@ -383,7 +491,7 @@ function renderDiagnosticsHtml(
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${escapeHtml(title)}</title>
   <style>
-    :root { --bg:#0c0c0c; --panel:#131313; --fg:#fff; --muted:#9a9a9a; --line:#2c2c2c; --ok:#2fd065; --err:#ef4136; --warn:#f1c84b; }
+    :root { --bg:#0c0c0c; --panel:#131313; --fg:#fff; --muted:#9a9a9a; --line:#2c2c2c; --ok:#2fd065; --err:#ef4136; --warn:#f1c84b; --pending:#5bc0eb; --info:#a5b4fc; }
     * { box-sizing:border-box; }
     body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
     header { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:12px; padding:14px 20px; border-bottom:1px solid var(--line); background:#080808; }
@@ -400,6 +508,8 @@ function renderDiagnosticsHtml(
     .st-pass { color:var(--ok); border-color:var(--ok); }
     .st-fail { color:var(--err); border-color:var(--err); }
     .st-skip { color:var(--warn); border-color:var(--warn); }
+    .st-pending { color:var(--pending); border-color:var(--pending); background:rgba(91,192,235,0.1); }
+    .st-info { color:var(--info); border-color:var(--info); background:rgba(165,180,252,0.1); }
     .dag-grid { display:flex; flex-direction:column; gap:12px; }
     .dag-layer { border:1px solid var(--line); padding:10px; background:#0f0f0f; }
     .dag-layer-title { font-size:11px; color:var(--muted); margin-bottom:8px; text-transform:uppercase; }
@@ -408,8 +518,13 @@ function renderDiagnosticsHtml(
     .node-pass { border-left:3px solid var(--ok); }
     .node-fail { border-left:3px solid var(--err); }
     .node-skip { border-left:3px solid var(--warn); }
+    .node-pending { border-left:3px solid var(--pending); }
+    .node-info { border-left:3px solid var(--info); }
     .dag-id { font-weight:700; font-size:12px; }
     .dag-meta { color:var(--muted); font-size:11px; margin-top:2px; }
+    .cat-list { display:flex; flex-direction:column; gap:14px; }
+    .cat-group { border:1px solid var(--line); background:#0f0f0f; }
+    .cat-head { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--line); background:#0b0b0b; font-size:12px; }
     .tbl-wrap { overflow-x:auto; }
     table { width:100%; border-collapse:collapse; font-size:12px; }
     th, td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); vertical-align:top; }

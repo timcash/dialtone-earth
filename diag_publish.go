@@ -64,6 +64,8 @@ func formatDiagCheckLog(report *DiagLoopReport, check DiagCheckResult) (testRunR
 		level = "ERROR"
 	case DiagStatusSkipped:
 		level = "WARN "
+	case DiagStatusPending, DiagStatusInfo:
+		level = "INFO "
 	}
 	ts := formatLogTimestamp(check.StartedAt)
 	endTs := formatLogTimestamp(check.EndedAt)
@@ -102,8 +104,13 @@ func formatDiagCheckLog(report *DiagLoopReport, check DiagCheckResult) (testRunR
 	}
 
 	uiStatus := check.Status
-	if uiStatus == DiagStatusSkipped {
+	switch uiStatus {
+	case DiagStatusSkipped:
 		uiStatus = "skip"
+	case DiagStatusPending:
+		uiStatus = "pending"
+	case DiagStatusInfo:
+		uiStatus = "pass"
 	}
 	rec := testRunRecord{
 		TestID:      check.TestID,

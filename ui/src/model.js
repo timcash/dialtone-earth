@@ -87,6 +87,10 @@ export const SECTION_META = [
     description: "Live dialtone.earth CLI overrides, Go & TypeScript lint, local bundle deploy, dashboard unit tests, and installable PWA checks",
   },
   {
+    title: "Diagnostic Loop & Coverage",
+    description: "Diagnostic DAG ordering, version checks, pending-migration gating, GB-34 agent spec, GB-35 channel scope fixtures, try_rpc retry, and Mac app verification",
+  },
+  {
     title: "CLI & Test Runner Contracts",
     description: "Structured timestamp/level/file:line logs, immutable per-run artifacts, stdlib CLI self-containment, and wrapper/installer verification",
   },
@@ -100,6 +104,9 @@ export function classifyTestSection(row) {
   const name = typeof row?.name === "string" ? row.name : "";
   if (/^TestBrowser/.test(name)) {
     return "Synced Live Browser (CDP)";
+  }
+  if (/^TestDiag/.test(name)) {
+    return "Diagnostic Loop & Coverage";
   }
   if (
     /LiveMetal|MetalCloudflareLive|MetalLiveBrowser|GlobeH3|TilingWindowManager|CameraStudio|CloudflareKVConfig|SimulatedTour/.test(name)
@@ -172,4 +179,117 @@ export function parseStructuredLogLine(line) {
     source: match[3],
     message: match[4],
   };
+}
+
+export const DIAG_CATEGORY_ORDER = [
+  "http",
+  "metal",
+  "versions",
+  "migration",
+  "plugins",
+  "gb34",
+  "gb35",
+  "rpc",
+  "macapp",
+  "dialtone",
+];
+
+export const DIAG_CATEGORY_TITLES = {
+  http: "Public & Auth HTTP Endpoints",
+  metal: "Metal Mesh Connectivity",
+  versions: "Fleet Plugin & Agent Versions",
+  migration: "Migration Readiness (Pending Does Not Fail)",
+  plugins: "Installed Plugins & Task Consistency",
+  gb34: "GB-34 Agent Spec, Logs & Permissions",
+  gb35: "GB-35 Channel Scope & Manifests",
+  rpc: "RPC & DB Lock Retry",
+  macapp: "Mac App Verification",
+  dialtone: "Dialtone Daemon & CLI",
+};
+
+/**
+ * Maps a diagnostic check status to display metadata. Pending and info never count as failures.
+ * @param {unknown} status
+ * @returns {{status: string, cls: string, label: string, isFailure: boolean}}
+ */
+export function diagStatusMeta(status) {
+  const st = typeof status === "string" ? status.trim().toLowerCase() : "skipped";
+  switch (st) {
+    case "pass":
+      return { status: "pass", cls: "is-pass", label: "PASS", isFailure: false };
+    case "fail":
+      return { status: "fail", cls: "is-fail", label: "FAIL", isFailure: true };
+    case "pending":
+      return { status: "pending", cls: "is-pending", label: "PENDING", isFailure: false };
+    case "info":
+      return { status: "info", cls: "is-info", label: "INFO", isFailure: false };
+    default:
+      return { status: "skipped", cls: "is-skip", label: "SKIPPED", isFailure: false };
+  }
+}
+
+/**
+ * Groups diagnostic check items by category in canonical order with per-group counts.
+ * @template {{category?: string, status?: string}} T
+ * @param {T[]} checks
+ * @returns {Array<{category: string, title: string, checks: T[], counts: {total: number, passed: number, failed: number, pending: number, info: number, skipped: number}}>}
+ */
+export function groupDiagChecksByCategory(checks) {
+  /** @type {Map<string, T[]>} */
+  const buckets = new Map();
+  for (const c of Array.isArray(checks) ? checks : []) {
+    const key = typeof c?.category === "string" && c.category.trim() !== "" ? c.category.trim().toLowerCase() : "other";
+    const list = buckets.get(key) ?? [];
+    list.push(c);
+    buckets.set(key, list);
+  }
+
+  /** @param {string} category @param {T[]} items */
+  const toGroup = (category, items) => {
+    const counts = { total: items.length, passed: 0, failed: 0, pending: 0, info: 0, skipped: 0 };
+    for (const item of items) {
+      const st = diagStatusMeta(item?.status).status;
+      if (st === "pass") counts.passed += 1;
+      else if (st === "fail") counts.failed += 1;
+      else if (st === "pending") counts.pending += 1;
+      else if (st === "info") counts.info += 1;
+      else counts.skipped += 1;
+    }
+    const title = DIAG_CATEGORY_TITLES[/** @type {keyof typeof DIAG_CATEGORY_TITLES} */ (category)] || category.toUpperCase();
+    return { category, title, checks: items, counts };
+  };
+
+  const ordered = [];
+  for (const key of DIAG_CATEGORY_ORDER) {
+    const items = buckets.get(key);
+    if (items && items.length > 0) {
+      ordered.push(toGroup(key, items));
+      buckets.delete(key);
+    }
+  }
+  for (const key of Array.from(buckets.keys()).sort()) {
+    const items = buckets.get(key);
+    if (items && items.length > 0) {
+      ordered.push(toGroup(key, items));
+    }
+  }
+  return ordered;
+}
+
+/**
+ * Formats loop summary totals including pending and optional info counts.
+ * @param {{total?: number, passed?: number, failed?: number, skipped?: number, pending?: number, info?: number}} summary
+ * @returns {string}
+ */
+export function formatDiagSummaryLine(summary) {
+  const passed = Number(summary?.passed ?? 0);
+  const failed = Number(summary?.failed ?? 0);
+  const pending = Number(summary?.pending ?? 0);
+  const info = Number(summary?.info ?? 0);
+  const skipped = Number(summary?.skipped ?? 0);
+  const total = Number(summary?.total ?? 0);
+  const parts = [`${passed} pass`, `${failed} fail`, `${pending} pending`];
+  if (info > 0) parts.push(`${info} info`);
+  parts.push(`${skipped} skipped`);
+  return `${parts.join(", ")} / ${total}`;
 }

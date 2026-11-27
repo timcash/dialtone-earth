@@ -217,7 +217,7 @@ function testApiPlugin(): Plugin {
                 ended_at: text(report.ended_at),
                 duration_ms: typeof report.duration_ms === "number" ? report.duration_ms : 0,
                 status: text(report.status, "fail"),
-                summary: isRecord(report.summary) ? report.summary : { total: 0, passed: 0, failed: 0, skipped: 0 },
+                summary: isRecord(report.summary) ? report.summary : { total: 0, passed: 0, failed: 0, skipped: 0, pending: 0 },
                 screenshots_url: text(report.screenshots_url, "/screenshots/"),
                 screenshots_loop_id: text(report.screenshots_loop_id),
                 failed_check_ids: failedIds,

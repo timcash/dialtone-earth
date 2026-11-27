@@ -336,6 +336,9 @@ func testSection(name string) string {
 	if strings.HasPrefix(name, "TestBrowser") {
 		return "Synced Live Browser (CDP)"
 	}
+	if strings.HasPrefix(name, "TestDiag") {
+		return "Diagnostic Loop & Coverage"
+	}
 	switch name {
 	case "TestDialtoneEarthLiveMetalDaemonE2E",
 		"TestDialtoneEarthMetalLiveBrowserE2E",

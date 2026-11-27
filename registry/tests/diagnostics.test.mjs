@@ -294,3 +294,94 @@ test("scheduled HTTP-only diagnostics cron runs read-only GET checks and persist
   assert.ok(kv.store.has("diag:latest"));
   assert.ok(kv.store.has("diag:history"));
 });
+
+test("diagnostics page groups checks by category and displays pending-migration distinctly without counting as failure", async () => {
+  const kv = createMemoryKv();
+  const r2 = createMemoryR2();
+  const env = makeEnv(kv, r2);
+  const deps = {
+    nowSec: () => 1_795_700_000,
+    fetchImpl: async () => new Response("fallback", { status: 404 }),
+    verifyJwt: async () => ({ valid: false, reason: "invalid" }),
+  };
+  const ownerAuth = { Authorization: "Bearer owner-cli-bearer-secret-token-2026" };
+
+  const tid1 = "a".repeat(32);
+  const tid2 = "b".repeat(32);
+  const tid3 = "c".repeat(32);
+  const payload = {
+    report: {
+      schema_version: 1,
+      loop_id: "20261127-150000Z-cov01",
+      source: "cli",
+      runner_node: "legion",
+      interval: "10m0s",
+      started_at: "2026-11-27T15:00:00Z",
+      ended_at: "2026-11-27T15:00:03Z",
+      duration_ms: 3000,
+      status: "pass",
+      summary: { total: 3, passed: 1, failed: 0, skipped: 1, pending: 1 },
+      screenshots_url: "/screenshots/",
+      checks: [
+        {
+          check_id: "version.task.node.rosie",
+          test_id: tid1,
+          category: "versions",
+          title: "dialtone-task version on rosie",
+          depends_on: [],
+          status: "pass",
+          duration_ms: 45,
+          summary: "v0.4.0",
+        },
+        {
+          check_id: "migration.dialtone.v060",
+          test_id: tid2,
+          category: "migration",
+          title: "dialtone v0.6.0 migration readiness",
+          depends_on: [],
+          status: "pending",
+          skip_reason: "pending migration: 0/7 nodes on v0.6.0",
+          duration_ms: 5,
+          summary: "pending migration: 0/7 nodes on v0.6.0",
+        },
+        {
+          check_id: "gb35.api.channels",
+          test_id: tid3,
+          category: "gb35",
+          title: "GET /api/channels responds",
+          depends_on: ["migration.dialtone.v060"],
+          status: "skipped",
+          skip_reason: "skip: awaits migration",
+          duration_ms: 0,
+          summary: "skip: awaits migration",
+        },
+      ],
+    },
+  };
+
+  const postResp = await handleGatewayRequest(
+    new Request("https://test.dialtone.earth/api/diagnostics/runs", {
+      method: "POST",
+      headers: { ...ownerAuth, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+    env,
+    deps,
+  );
+  assert.equal(postResp.status, 200);
+
+  const page = await handleGatewayRequest(
+    new Request("https://test.dialtone.earth/diagnostics", { headers: ownerAuth }),
+    env,
+    deps,
+  );
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.match(html, /st-pending/, "pending-migration badge class must be rendered distinctly");
+  assert.match(html, /node-pending/, "pending-migration DAG node class must be rendered distinctly");
+  assert.match(html, /1 pending/, "summary totals must display pending count");
+  assert.match(html, /data-category-group="versions"/, "checks must be grouped by category");
+  assert.match(html, /data-category-group="migration"/, "migration category group must be present");
+  assert.match(html, /data-category-group="gb35"/, "gb35 category group must be present");
+  assert.equal(html.includes("\u2014"), false, "HTML must not contain em-dashes");
+});

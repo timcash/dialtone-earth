@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -522,22 +523,34 @@ func TestDiagCLIHelpAndNoEmDash(t *testing.T) {
 	}
 }
 
-func TestDiagStaleTasksCheck(t *testing.T) {
-	dir := t.TempDir()
-	fakePass := filepath.Join(dir, "task-pass.sh")
-	if err := os.WriteFile(fakePass, []byte("#!/bin/sh\necho '{\"node\":\"rosie\",\"serve_running\":true,\"task_count\":4,\"stale_count\":0,\"state_hash\":\"abc123\"}'\n"), 0755); err != nil {
+func writeFakeDiagScript(t *testing.T, dir, baseName, stdoutPayload string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		p := filepath.Join(dir, baseName+".cmd")
+		body := "@echo off\r\necho " + stdoutPayload + "\r\n"
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	p := filepath.Join(dir, baseName+".sh")
+	body := "#!/bin/sh\necho '" + stdoutPayload + "'\n"
+	if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	return p
+}
+
+func TestDiagStaleTasksCheck(t *testing.T) {
+	dir := t.TempDir()
+	fakePass := writeFakeDiagScript(t, dir, "task-pass", `{"node":"rosie","serve_running":true,"task_count":4,"stale_count":0,"state_hash":"abc123"}`)
 	specPass := buildStaleTasksCheckSpec(fakePass)
 	resPass := specPass.Run(context.Background(), nil)
 	if resPass.Status != DiagStatusPass {
 		t.Fatalf("expected pass for 0 stale tasks, got %+v", resPass)
 	}
 
-	fakeFail := filepath.Join(dir, "task-fail.sh")
-	if err := os.WriteFile(fakeFail, []byte("#!/bin/sh\necho '{\"node\":\"rosie\",\"serve_running\":true,\"task_count\":4,\"stale_count\":2,\"state_hash\":\"abc123\"}'\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
+	fakeFail := writeFakeDiagScript(t, dir, "task-fail", `{"node":"rosie","serve_running":true,"task_count":4,"stale_count":2,"state_hash":"abc123"}`)
 	specFail := buildStaleTasksCheckSpec(fakeFail)
 	resFail := specFail.Run(context.Background(), nil)
 	if resFail.Status != DiagStatusFail || !strings.Contains(resFail.Error, "2 stale active task") {

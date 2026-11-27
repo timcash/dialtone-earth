@@ -109,4 +109,42 @@ test("local dev server accepts POST /api/diagnostics/runs and serves /diagnostic
   const pageResp = await fetch(`${base}/diagnostics`);
   assert.equal(pageResp.status, 200);
   assert.match(pageResp.headers.get("content-type") || "", /text\/html/);
+
+  // Verify pending-migration status and pending summary count are preserved.
+  const pendResp = await fetch(`${base}/api/diagnostics/runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      report: {
+        schema_version: 1,
+        loop_id: "20261127-150500Z-pend1",
+        source: "cli",
+        runner_node: "legion",
+        started_at: "2026-11-27T15:05:00Z",
+        ended_at: "2026-11-27T15:05:01Z",
+        duration_ms: 1000,
+        status: "pass",
+        summary: { total: 2, passed: 1, failed: 0, skipped: 0, pending: 1 },
+        checks: [
+          {
+            check_id: "migration.dialtone.v060",
+            test_id: "e".repeat(32),
+            category: "migration",
+            title: "dialtone v0.6.0 migration",
+            depends_on: [],
+            status: "pending",
+            duration_ms: 2,
+            summary: "pending migration",
+          },
+        ],
+      },
+    }),
+  });
+  assert.equal(pendResp.status, 200);
+  const histResp2 = await fetch(`${base}/api/diagnostics/history`);
+  const hist2 = await histResp2.json();
+  const pendEntry = hist2.history.find((h) => h.loop_id === "20261127-150500Z-pend1");
+  assert.ok(pendEntry, "pending loop should appear in history");
+  assert.equal(pendEntry.status, "pass");
+  assert.equal(pendEntry.summary.pending, 1);
 });

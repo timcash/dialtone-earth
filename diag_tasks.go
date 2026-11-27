@@ -191,7 +191,7 @@ func SyncDiagTasks(ctx context.Context, store DiagTaskStore, report *DiagLoopRep
 		matches := openByTitle[title]
 
 		switch check.Status {
-		case DiagStatusSkipped:
+		case DiagStatusSkipped, DiagStatusPending, DiagStatusInfo:
 			continue
 		case DiagStatusFail:
 			detail := check.Error

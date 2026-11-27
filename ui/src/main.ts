@@ -2,7 +2,10 @@ import "./style.css";
 import {
   classifyTestSection,
   computeTestProgress,
+  diagStatusMeta,
   elapsedSeconds,
+  formatDiagSummaryLine,
+  groupDiagChecksByCategory,
   normalizeStatus,
   parseStructuredLogLine,
   statusLabel,
@@ -1392,6 +1395,8 @@ type DiagLoopReport = {
     passed: number;
     failed: number;
     skipped: number;
+    pending?: number;
+    info?: number;
   };
   screenshots_url?: string;
   screenshots_loop_id?: string;
@@ -1413,6 +1418,8 @@ type DiagHistoryRow = {
     passed: number;
     failed: number;
     skipped: number;
+    pending?: number;
+    info?: number;
   };
   screenshots_url?: string;
   screenshots_loop_id?: string;
@@ -1451,9 +1458,9 @@ function computeDiagLayers(checks: DiagCheckItem[]): Array<{ depth: number; item
 }
 
 function diagStatusBadge(status: string): string {
-  const st = status.toLowerCase();
-  const cls = st === "pass" ? "is-pass" : st === "fail" ? "is-fail" : "is-skip";
-  return `<span class="diag-badge ${cls}">${escapeHtml(st.toUpperCase())}</span>`;
+  const meta = diagStatusMeta(status);
+  const display = meta.status === "pending" ? "PENDING MIGRATION" : meta.label;
+  return `<span class="diag-badge ${meta.cls}">${escapeHtml(display)}</span>`;
 }
 
 async function refreshDiagnosticsPage(selectedLoopId: string): Promise<void> {
@@ -1492,12 +1499,12 @@ async function refreshDiagnosticsPage(selectedLoopId: string): Promise<void> {
         <div class="diag-node-grid">
           ${layer.items
             .map((c) => {
-              const cls = c.status === "pass" ? "is-pass" : c.status === "fail" ? "is-fail" : "is-skip";
+              const meta = diagStatusMeta(c.status);
               const depsText = (c.depends_on || []).length > 0 ? `deps: ${(c.depends_on || []).join(", ")}` : "root";
               const logHref = testLogHref(c.test_id) || "/logs";
               const detailNote = c.error || c.skip_reason || c.summary || "";
               return `
-                <a class="diag-node ${cls}" href="${escapeHtml(logHref)}" title="${escapeHtml(detailNote)}">
+                <a class="diag-node ${meta.cls}" href="${escapeHtml(logHref)}" title="${escapeHtml(detailNote)}">
                   <div class="diag-node-top">
                     <span class="diag-node-id">${escapeHtml(c.check_id)}</span>
                     ${diagStatusBadge(c.status)}
@@ -1512,34 +1519,58 @@ async function refreshDiagnosticsPage(selectedLoopId: string): Promise<void> {
       )
       .join("");
 
-    const checkRows = (report.checks || [])
-      .map((c) => {
-        const href = testLogHref(c.test_id);
-        const rawHref = href ? `/api/test-runs/${encodeURIComponent(c.test_id)}/log` : "";
-        const deps = (c.depends_on || []).join(", ") || "none";
-        const detail = c.error || c.skip_reason || c.summary || "";
-        const pathInfo =
-          c.details && typeof c.details.path === "string"
-            ? ` [path=${c.details.path}]`
-            : "";
-        const taskCol = c.task_id
-          ? `<code>${escapeHtml(c.task_id)}</code> <span class="c-dim">(${escapeHtml(c.task_action || "")})</span>`
-          : `<span class="c-dim">none</span>`;
+    const groupedChecksHtml = groupDiagChecksByCategory(report.checks || [])
+      .map((group) => {
+        const countBits = [`${group.counts.passed} pass`, `${group.counts.failed} fail`];
+        if (group.counts.pending > 0) countBits.push(`${group.counts.pending} pending`);
+        if (group.counts.info > 0) countBits.push(`${group.counts.info} info`);
+        if (group.counts.skipped > 0) countBits.push(`${group.counts.skipped} skipped`);
+
+        const rowsHtml = group.checks
+          .map((c) => {
+            const href = testLogHref(c.test_id);
+            const rawHref = href ? `/api/test-runs/${encodeURIComponent(c.test_id)}/log` : "";
+            const deps = (c.depends_on || []).join(", ") || "none";
+            const detail = c.error || c.skip_reason || c.summary || "";
+            const pathInfo =
+              c.details && typeof c.details.path === "string"
+                ? ` [path=${c.details.path}]`
+                : "";
+            const taskCol = c.task_id
+              ? `<code>${escapeHtml(c.task_id)}</code> <span class="c-dim">(${escapeHtml(c.task_action || "")})</span>`
+              : `<span class="c-dim">none</span>`;
+            return `
+              <tr data-diag-check="${escapeHtml(c.check_id)}" data-status="${escapeHtml(c.status)}">
+                <td>${diagStatusBadge(c.status)}</td>
+                <td><code>${escapeHtml(c.check_id)}</code></td>
+                <td class="c-dim">${escapeHtml(deps)}</td>
+                <td>${c.duration_ms}ms</td>
+                <td class="diag-wrap-cell">${escapeHtml(detail + pathInfo)}</td>
+                <td>${taskCol}</td>
+                <td>${
+                  href
+                    ? `<a class="c-cf" href="${escapeHtml(href)}">log</a> | <a class="c-dim" href="${escapeHtml(rawHref)}" target="_blank" rel="noreferrer">raw</a>`
+                    : `<span class="c-dim">n/a</span>`
+                }</td>
+              </tr>`;
+          })
+          .join("");
+
         return `
-          <tr data-diag-check="${escapeHtml(c.check_id)}" data-status="${escapeHtml(c.status)}">
-            <td>${diagStatusBadge(c.status)}</td>
-            <td><code>${escapeHtml(c.check_id)}</code></td>
-            <td class="c-dim">${escapeHtml(c.category)}</td>
-            <td class="c-dim">${escapeHtml(deps)}</td>
-            <td>${c.duration_ms}ms</td>
-            <td class="diag-wrap-cell">${escapeHtml(detail + pathInfo)}</td>
-            <td>${taskCol}</td>
-            <td>${
-              href
-                ? `<a class="c-cf" href="${escapeHtml(href)}">log</a> | <a class="c-dim" href="${escapeHtml(rawHref)}" target="_blank" rel="noreferrer">raw</a>`
-                : `<span class="c-dim">n/a</span>`
-            }</td>
-          </tr>`;
+          <div class="diag-cat-group" data-category-group="${escapeHtml(group.category)}">
+            <div class="diag-cat-head">
+              <span class="c-strong">${escapeHtml(group.title)}</span>
+              <span class="c-dim"><code>${escapeHtml(group.category)}</code> (${escapeHtml(countBits.join(" / "))})</span>
+            </div>
+            <div class="earth-table-scroll">
+              <table class="earth-table">
+                <thead>
+                  <tr><th>STATUS</th><th>CHECK ID</th><th>DEPENDS ON</th><th>TIME</th><th>RESULT / PATH</th><th>DIAG TASK</th><th>LOGS</th></tr>
+                </thead>
+                <tbody>${rowsHtml}</tbody>
+              </table>
+            </div>
+          </div>`;
       })
       .join("");
 
@@ -1549,7 +1580,7 @@ async function refreshDiagnosticsPage(selectedLoopId: string): Promise<void> {
         <div><div class="diag-label">LOOP ID</div><div class="diag-val"><code>${escapeHtml(report.loop_id)}</code></div></div>
         <div><div class="diag-label">STATUS</div><div class="diag-val">${diagStatusBadge(report.status)}</div></div>
         <div><div class="diag-label">RUNNER / SOURCE</div><div class="diag-val">${escapeHtml(report.runner_node)} (${escapeHtml(report.source)})</div></div>
-        <div><div class="diag-label">CHECK TOTALS</div><div class="diag-val">${report.summary.passed} pass, ${report.summary.failed} fail, ${report.summary.skipped} skipped / ${report.summary.total}</div></div>
+        <div><div class="diag-label">CHECK TOTALS</div><div class="diag-val">${escapeHtml(formatDiagSummaryLine(report.summary))}</div></div>
         <div><div class="diag-label">DURATION / INTERVAL</div><div class="diag-val">${report.duration_ms}ms / ${escapeHtml(report.interval || "10m")}</div></div>
         <div><div class="diag-label">UI SCREENSHOTS</div><div class="diag-val"><a class="c-cf" href="${escapeHtml(shotHref)}">Annotated gallery</a>${report.screenshots_loop_id ? ` <span class="c-dim">(${escapeHtml(report.screenshots_loop_id)})</span>` : ""}</div></div>
       </section>
@@ -1557,37 +1588,31 @@ async function refreshDiagnosticsPage(selectedLoopId: string): Promise<void> {
       <section class="diag-card" data-testid="diag-dag">
         <div class="diag-section-head">
           <h2>Dependency DAG</h2>
-          <span class="c-dim">Parents execute before dependents; failed parents skip children</span>
+          <span class="c-dim">Parents execute before dependents; pending-migration gates downstream checks without failing</span>
         </div>
         <div class="diag-stages">${dagHtml}</div>
       </section>
 
       <section class="diag-card" data-testid="diag-checks-table">
         <div class="diag-section-head">
-          <h2>Check Results (${(report.checks || []).length})</h2>
+          <h2>Check Results by Category (${(report.checks || []).length})</h2>
           <span class="c-dim">Click log to inspect immutable structured test-id output</span>
         </div>
-        <div class="earth-table-scroll">
-          <table class="earth-table">
-            <thead>
-              <tr><th>STATUS</th><th>CHECK ID</th><th>CATEGORY</th><th>DEPENDS ON</th><th>TIME</th><th>RESULT / PATH</th><th>DIAG TASK</th><th>LOGS</th></tr>
-            </thead>
-            <tbody>${checkRows}</tbody>
-          </table>
-        </div>
+        <div class="diag-cat-list">${groupedChecksHtml}</div>
       </section>`;
   }
 
   const historyRows = history
     .map((h) => {
       const activeCls = report && h.loop_id === report.loop_id ? "is-selected" : "";
+      const pendBit = (h.summary.pending ?? 0) > 0 ? ` / ${h.summary.pending} pend` : "";
       return `
         <tr class="${activeCls}">
           <td>${diagStatusBadge(h.status)}</td>
           <td><a class="c-cf" href="/diagnostics/runs/${encodeURIComponent(h.loop_id)}"><code>${escapeHtml(h.loop_id)}</code></a></td>
           <td>${escapeHtml(h.runner_node)} <span class="c-dim">(${escapeHtml(h.source)})</span></td>
           <td class="c-dim">${escapeHtml(h.started_at)}</td>
-          <td>${h.summary.passed} pass / ${h.summary.failed} fail / ${h.summary.skipped} skip</td>
+          <td>${h.summary.passed} pass / ${h.summary.failed} fail${pendBit} / ${h.summary.skipped} skip</td>
           <td>${h.duration_ms}ms</td>
           <td><a class="c-cf" href="${escapeHtml(h.screenshots_url || "/screenshots/")}">screenshots</a></td>
         </tr>`;

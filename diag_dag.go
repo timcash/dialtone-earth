@@ -15,6 +15,8 @@ const (
 	DiagStatusPass    = "pass"
 	DiagStatusFail    = "fail"
 	DiagStatusSkipped = "skipped"
+	DiagStatusPending = "pending"
+	DiagStatusInfo    = "info"
 )
 
 // DiagCheckOutcome is returned by a single check implementation.
@@ -61,12 +63,14 @@ type DiagCheckResult struct {
 	TaskAction    string         `json:"task_action,omitempty"`
 }
 
-// DiagSummary aggregates pass/fail/skipped counts for a loop.
+// DiagSummary aggregates pass/fail/skipped/pending/info counts for a loop.
 type DiagSummary struct {
 	Total   int `json:"total"`
 	Passed  int `json:"passed"`
 	Failed  int `json:"failed"`
 	Skipped int `json:"skipped"`
+	Pending int `json:"pending"`
+	Info    int `json:"info,omitempty"`
 }
 
 // DiagRunMeta supplies loop-level metadata to ExecuteDiagDAG.
@@ -325,10 +329,21 @@ func executeOneDiagCheck(ctx context.Context, spec DiagCheckSpec, depResults map
 		if !ok || parent.Status != DiagStatusPass {
 			ended := time.Now().UTC()
 			reason := fmt.Sprintf("skipped because dependency %s %s", parentID, parent.Status)
-			if parent.Status == DiagStatusFail {
+			switch parent.Status {
+			case DiagStatusFail:
 				reason = fmt.Sprintf("skipped because dependency %s failed", parentID)
-			} else if parent.Status == DiagStatusSkipped {
-				reason = fmt.Sprintf("skipped because dependency %s was skipped", parentID)
+			case DiagStatusPending:
+				if strings.HasPrefix(parentID, "migration.") {
+					reason = fmt.Sprintf("skip: awaits migration (%s pending)", parentID)
+				} else {
+					reason = fmt.Sprintf("skipped because dependency %s is pending", parentID)
+				}
+			case DiagStatusSkipped:
+				if strings.Contains(strings.ToLower(parent.SkipReason), "awaits migration") {
+					reason = fmt.Sprintf("skip: awaits migration (dependency %s awaits migration)", parentID)
+				} else {
+					reason = fmt.Sprintf("skipped because dependency %s was skipped", parentID)
+				}
 			}
 			return DiagCheckResult{
 				CheckID:    spec.ID,
@@ -359,7 +374,9 @@ func executeOneDiagCheck(ctx context.Context, spec DiagCheckSpec, depResults map
 	ended := time.Now().UTC()
 
 	status := outcome.Status
-	if status != DiagStatusPass && status != DiagStatusFail && status != DiagStatusSkipped {
+	switch status {
+	case DiagStatusPass, DiagStatusFail, DiagStatusSkipped, DiagStatusPending, DiagStatusInfo:
+	default:
 		status = DiagStatusFail
 	}
 
@@ -383,6 +400,18 @@ func executeOneDiagCheck(ctx context.Context, spec DiagCheckSpec, depResults map
 			summary = "ok"
 		case DiagStatusSkipped:
 			summary = skipReason
+		case DiagStatusPending:
+			if skipReason != "" {
+				summary = skipReason
+			} else {
+				summary = "pending"
+			}
+		case DiagStatusInfo:
+			if skipReason != "" {
+				summary = skipReason
+			} else {
+				summary = "info"
+			}
 		default:
 			summary = errMsg
 		}
@@ -409,7 +438,7 @@ func executeOneDiagCheck(ctx context.Context, spec DiagCheckSpec, depResults map
 	}
 }
 
-// AggregateDiagSummary computes pass/fail/skipped totals from check results.
+// AggregateDiagSummary computes pass/fail/skipped/pending/info totals from check results.
 func AggregateDiagSummary(results []DiagCheckResult) DiagSummary {
 	s := DiagSummary{Total: len(results)}
 	for _, r := range results {
@@ -420,6 +449,10 @@ func AggregateDiagSummary(results []DiagCheckResult) DiagSummary {
 			s.Failed++
 		case DiagStatusSkipped:
 			s.Skipped++
+		case DiagStatusPending:
+			s.Pending++
+		case DiagStatusInfo:
+			s.Info++
 		}
 	}
 	return s

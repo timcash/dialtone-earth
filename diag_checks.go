@@ -24,7 +24,12 @@ var defaultDiagFleetNodes = []string{
 	"vm-eu",
 	"vm-asia",
 	"steamdeck-2",
-	"grok-bot-metal",
+}
+
+var defaultDiagAgentNodes = []string{
+	"rosie",
+	"legion",
+	"build-1",
 }
 
 // DiagChecksConfig configures the real read-only diagnostic check DAG.
@@ -75,23 +80,30 @@ type meshStateSnapshot struct {
 }
 
 type diagSharedRuntime struct {
-	mu           sync.RWMutex
-	selfNode     string
-	meshSnapshot *meshStateSnapshot
-	nodeByName   map[string]meshNodeSnapshot
-	beatAge      map[string]int
-	beatOK       map[string]bool
-	taskHashes   map[string]string
-	taskPeers    map[string]int
+	mu             sync.RWMutex
+	selfNode       string
+	meshSnapshot   *meshStateSnapshot
+	nodeByName     map[string]meshNodeSnapshot
+	beatAge        map[string]int
+	beatOK         map[string]bool
+	taskHashes     map[string]string
+	taskPeers      map[string]int
+	taskVersions   map[string]string
+	agentVersions  map[string]string
+	daemonVersions map[string]string
+	gb35Manifest   *gb35ChannelManifest
 }
 
 func newDiagSharedRuntime() *diagSharedRuntime {
 	return &diagSharedRuntime{
-		nodeByName: map[string]meshNodeSnapshot{},
-		beatAge:    map[string]int{},
-		beatOK:     map[string]bool{},
-		taskHashes: map[string]string{},
-		taskPeers:  map[string]int{},
+		nodeByName:     map[string]meshNodeSnapshot{},
+		beatAge:        map[string]int{},
+		beatOK:         map[string]bool{},
+		taskHashes:     map[string]string{},
+		taskPeers:      map[string]int{},
+		taskVersions:   map[string]string{},
+		agentVersions:  map[string]string{},
+		daemonVersions: map[string]string{},
 	}
 }
 
@@ -624,6 +636,7 @@ func BuildDiagnosticDAG(cfg DiagChecksConfig) []DiagCheckSpec {
 
 	// Per-node mesh, plugin, and dialtone daemon checks.
 	var taskCheckIDs []string
+	var daemonCheckIDs []string
 	for _, rawNode := range nodes {
 		node := strings.TrimSpace(rawNode)
 		if node == "" {
@@ -635,6 +648,7 @@ func BuildDiagnosticDAG(cfg DiagChecksConfig) []DiagCheckSpec {
 		agentCheckID := "plugin.agent.node." + node
 		daemonCheckID := "dialtone.daemon.node." + node
 		taskCheckIDs = append(taskCheckIDs, taskCheckID)
+		daemonCheckIDs = append(daemonCheckIDs, daemonCheckID)
 
 		specs = append(specs,
 			DiagCheckSpec{
@@ -948,6 +962,11 @@ func BuildDiagnosticDAG(cfg DiagChecksConfig) []DiagCheckSpec {
 							uptimeSecs = snap.Counter * snap.BeatIntervalSecs
 						}
 					}
+					if version != "" && version != "unknown" {
+						rt.mu.Lock()
+						rt.daemonVersions[node] = version
+						rt.mu.Unlock()
+					}
 					if node == selfNode && meshSnap != nil && len(meshSnap.BootStages) > 0 && meshSnap.BootStages[0].UpdatedAtUnix > 0 {
 						nowUnix := time.Now().Unix()
 						if nowUnix > meshSnap.BootStages[0].UpdatedAtUnix {
@@ -1097,6 +1116,8 @@ func BuildDiagnosticDAG(cfg DiagChecksConfig) []DiagCheckSpec {
 			},
 		},
 	)
+
+	specs = appendCoverageChecks(specs, cfg, rt, dialtoneBin, daemonAPI, httpClient, nodes, daemonCheckIDs)
 
 	return specs
 }

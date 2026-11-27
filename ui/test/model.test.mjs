@@ -4,7 +4,10 @@ import test from "node:test";
 import {
   classifyTestSection,
   computeTestProgress,
+  diagStatusMeta,
   elapsedSeconds,
+  formatDiagSummaryLine,
+  groupDiagChecksByCategory,
   groupTestsBySection,
   normalizeStatus,
   parseStructuredLogLine,
@@ -119,4 +122,41 @@ test("computeTestProgress fills against last_elapsed and marks overtime red when
   const passedSlow = computeTestProgress({ status: "pass", elapsed: "11.2", last_elapsed: "10" });
   assert.equal(passedSlow.percent, 100);
   assert.equal(passedSlow.overtime, true);
+});
+
+test("diagStatusMeta and groupDiagChecksByCategory render pending-migration distinctly without counting as failure", () => {
+  const pend = diagStatusMeta("pending");
+  assert.equal(pend.cls, "is-pending");
+  assert.equal(pend.label, "PENDING");
+  assert.equal(pend.isFailure, false);
+
+  const info = diagStatusMeta("info");
+  assert.equal(info.cls, "is-info");
+  assert.equal(info.isFailure, false);
+
+  const checks = [
+    { check_id: "gb35.api.channels", category: "gb35", status: "skipped" },
+    { check_id: "version.task.node.rosie", category: "versions", status: "pass" },
+    { check_id: "migration.dialtone.v060", category: "migration", status: "pending" },
+    { check_id: "gb34.logs.chunk", category: "gb34", status: "pass" },
+    { check_id: "macapp.version.rosie", category: "macapp", status: "info" },
+  ];
+  const groups = groupDiagChecksByCategory(checks);
+  assert.deepEqual(
+    groups.map((g) => g.category),
+    ["versions", "migration", "gb34", "gb35", "macapp"],
+  );
+  assert.equal(groups[1].counts.pending, 1);
+  assert.equal(groups[1].counts.failed, 0);
+
+  const summaryLine = formatDiagSummaryLine({ total: 5, passed: 2, failed: 0, skipped: 1, pending: 1, info: 1 });
+  assert.match(summaryLine, /2 pass/);
+  assert.match(summaryLine, /0 fail/);
+  assert.match(summaryLine, /1 pending/);
+  assert.match(summaryLine, /1 info/);
+  assert.match(summaryLine, /1 skipped/);
+});
+
+test("TestDiag tests classify into Diagnostic Loop & Coverage section", () => {
+  assert.equal(classifyTestSection({ name: "TestDiagCoverageDAGWiringAndDefaultNodes" }), "Diagnostic Loop & Coverage");
 });

@@ -9,6 +9,8 @@
   --deploy-ready: #2fd065;
   --warn: #f1c84b;
   --err: #ef4136;
+  --pending: #5bc0eb;
+  --info: #a5b4fc;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   color-scheme: dark;
 }
@@ -24,6 +26,8 @@
   --deploy-ready: #15803d;
   --warn: #9a6d00;
   --err: #c92a22;
+  --pending: #0369a1;
+  --info: #4338ca;
   color-scheme: light;
 }
 
@@ -1064,6 +1068,41 @@ code {
   border-color: var(--warn);
 }
 
+.diag-badge.is-pending {
+  color: var(--pending);
+  border-color: var(--pending);
+  background: rgba(91, 192, 235, 0.12);
+}
+
+.diag-badge.is-info {
+  color: var(--info);
+  border-color: var(--info);
+  background: rgba(165, 180, 252, 0.12);
+}
+
+.diag-cat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.diag-cat-group {
+  border: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.diag-cat-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  font-size: 12px;
+}
+
 .diag-stages {
   display: flex;
   flex-direction: column;
@@ -1112,6 +1151,14 @@ code {
 
 .diag-node.is-skip {
   border-left: 3px solid var(--warn);
+}
+
+.diag-node.is-pending {
+  border-left: 3px solid var(--pending);
+}
+
+.diag-node.is-info {
+  border-left: 3px solid var(--info);
 }
 
 .diag-node-top {

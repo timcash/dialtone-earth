@@ -298,8 +298,8 @@ func diagGitInfo(root string) (string, string) {
 func printDiagSummary(w io.Writer, report *DiagLoopReport, publishURL string) {
 	fmt.Fprintf(w, "=== DIAGNOSTIC LOOP %s (%s, %dms, runner=%s) ===\n",
 		report.LoopID, strings.ToUpper(report.Status), report.DurationMs, report.RunnerNode)
-	fmt.Fprintf(w, "PASS: %d | FAIL: %d | SKIPPED: %d | TOTAL: %d\n",
-		report.Summary.Passed, report.Summary.Failed, report.Summary.Skipped, report.Summary.Total)
+	fmt.Fprintf(w, "PASS: %d | FAIL: %d | SKIPPED: %d | PENDING: %d | TOTAL: %d\n",
+		report.Summary.Passed, report.Summary.Failed, report.Summary.Skipped, report.Summary.Pending, report.Summary.Total)
 	for _, c := range report.Checks {
 		tag := "PASS"
 		switch c.Status {
@@ -307,6 +307,10 @@ func printDiagSummary(w io.Writer, report *DiagLoopReport, publishURL string) {
 			tag = "FAIL"
 		case DiagStatusSkipped:
 			tag = "SKIP"
+		case DiagStatusPending:
+			tag = "PEND"
+		case DiagStatusInfo:
+			tag = "INFO"
 		}
 		extra := ""
 		if c.TaskID != "" {
